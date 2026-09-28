@@ -227,7 +227,10 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
         object.player = source.player;
         object.x = object.homeX = object.targetX = source.y;
         object.y = object.homeY = object.targetY = mapSize_ - source.x;
-        object.facing = source.rotation - kPi * 0.5f;
+        const dat::Graphic *graphic = assets_.dat().graphic(unit->standingGraphic[0]);
+        object.facing = graphic && graphic->angleCount == 5
+                            ? source.rotation
+                            : source.rotation - kPi * 0.5f;
         object.wander = false;
         object.initialFrame = source.initialFrame;
         objects_.push_back(object);
@@ -429,13 +432,20 @@ static bool pickFrame(const dat::Graphic &g, size_t slpFrames, float facing, flo
                       size_t &frame, bool &flip) {
     int angles = std::max<int>(1, g.angleCount);
     int perAngle = std::max<int>(1, g.frameCount);
-    // World direction -> screen direction (iso projection), y grows downwards.
-    float sdx = (std::cos(facing) - std::sin(facing)) * 2.0f;
-    float sdy = (std::cos(facing) + std::sin(facing));
-    float theta = std::atan2(sdy, sdx);                 // 0 = screen east
-    float rel = theta - kPi / 2;                        // 0 = screen south
     float step = 2 * kPi / angles;
-    int a = (int)std::lround(rel / step);
+    int a;
+    if (angles == 5) {
+        // Wall and fence rotations encode one of five connection shapes,
+        // rather than a world-space facing.
+        a = (int)std::lround(facing / step);
+    } else {
+        // World direction -> screen direction (iso projection), y grows downwards.
+        float sdx = (std::cos(facing) - std::sin(facing)) * 2.0f;
+        float sdy = (std::cos(facing) + std::sin(facing));
+        float theta = std::atan2(sdy, sdx);             // 0 = screen east
+        float rel = theta - kPi / 2;                    // 0 = screen south
+        a = (int)std::lround(rel / step);
+    }
     a = ((a % angles) + angles) % angles;
     flip = false;
     int stored = g.mirroringMode ? angles / 2 + 1 : angles;

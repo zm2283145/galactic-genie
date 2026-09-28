@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 
 using namespace swgb;
 
@@ -34,6 +35,7 @@ static int usage() {
             "  swgbtool render <DataDir> <out.png> [seed] [seconds] [zoom]\n"
             "  swgbtool campaign <file.cpx>\n"
             "  swgbtool scenario <file.cpx> <entry>\n"
+            "  swgbtool scenario-units <DataDir> <file.cpx> <entry> [unitId]\n"
             "  swgbtool render-scenario <DataDir> <file.cpx> <entry> <out.png> [x] [y] [zoom]\n"
             "  swgbtool stress-scenario <DataDir> <file.cpx> <entry>\n");
     return 2;
@@ -115,11 +117,18 @@ static int cmdUnit(const char *dataDir, int id) {
             const int graphicId = unit.standingGraphic[0];
             const auto *graphic = assets.dat().graphic(graphicId);
             printf("civ %zu %-24s unit '%s', type %u, graphic %d, slp %d, frames %d, angles %d, "
-                   "duration %.3f, sequence 0x%02x\n", civ,
+                   "duration %.3f, sequence 0x%02x, mirror %u, deltas %zu\n", civ,
                    assets.dat().civs[civ].name.c_str(), unit.name.c_str(), unit.type, graphicId,
                    graphic ? graphic->slp : -1, graphic ? graphic->frameCount : 0,
                    graphic ? graphic->angleCount : 0, graphic ? graphic->frameDuration : 0,
-                   graphic ? graphic->sequenceType : 0);
+                   graphic ? graphic->sequenceType : 0, graphic ? graphic->mirroringMode : 0,
+                   graphic ? graphic->deltas.size() : 0);
+            if (graphic)
+                for (const auto &delta : graphic->deltas)
+                    if (const auto *child = assets.dat().graphic(delta.graphicId))
+                        printf("  delta graphic %d slp %d frames %d angles %d offset %d,%d display angle %d\n",
+                               delta.graphicId, child->slp, child->frameCount, child->angleCount,
+                               delta.offsetX, delta.offsetY, delta.displayAngle);
         }
         return 0;
 }
@@ -183,6 +192,46 @@ static int cmdScenario(const char *path, int entryNumber) {
            scenario.nextUnitId);
     printf("camera %.1f,%.1f\n", scenario.cameraX, scenario.cameraY);
     printf("instructions: %s\n", scenario.instructions.c_str());
+    return 0;
+}
+
+static int cmdScenarioUnits(const char *dataDir, const char *path, int entryNumber, int detailId) {
+    Scenario scenario;
+    std::string err;
+    if (!loadScenario(path, entryNumber, scenario, err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    if (detailId >= 0) {
+        for (const ScenarioUnit &unit : scenario.units) {
+            if (unit.unitId != detailId) continue;
+            printf("player %u spawn %u unit %u at %.2f,%.2f rotation %.6f frame %u\n",
+                   unit.player, unit.spawnId, unit.unitId, unit.x, unit.y, unit.rotation,
+                   unit.initialFrame);
+        }
+        return 0;
+    }
+    std::map<std::pair<uint8_t, uint16_t>, size_t> counts;
+    for (const ScenarioUnit &unit : scenario.units) counts[{unit.player, unit.unitId}]++;
+    for (const auto &[key, count] : counts) {
+        const uint8_t player = key.first;
+        const uint16_t id = key.second;
+        const size_t civ = player > 0 && player <= scenario.civilizations.size()
+                               ? scenario.civilizations[player - 1]
+                               : 0;
+        const dat::Unit *unit = nullptr;
+        if (civ < assets.dat().civs.size() && id < assets.dat().civs[civ].units.size() &&
+            assets.dat().civs[civ].units[id].exists)
+            unit = &assets.dat().civs[civ].units[id];
+        printf("player %u civ %zu unit %u count %zu '%s'\n", player, civ, id, count,
+               unit ? unit->name.c_str() : "?");
+    }
     return 0;
 }
 
@@ -381,6 +430,8 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "drs")) return cmdDrs(argv[2]);
     if (!strcmp(cmd, "campaign")) return cmdCampaign(argv[2]);
     if (!strcmp(cmd, "scenario") && argc >= 4) return cmdScenario(argv[2], atoi(argv[3]));
+    if (!strcmp(cmd, "scenario-units") && argc >= 5)
+        return cmdScenarioUnits(argv[2], argv[3], atoi(argv[4]), argc > 5 ? atoi(argv[5]) : -1);
     if (!strcmp(cmd, "angles") && argc >= 5) return cmdAngles(argv[2], atoi(argv[3]), argv[4]);
     if (!strcmp(cmd, "slp") && argc >= 5) return cmdSlp(argv[2], atoi(argv[3]), argv[4], argc > 5 ? atoi(argv[5]) : 16);
     if (!strcmp(cmd, "slopes") && argc >= 5)
