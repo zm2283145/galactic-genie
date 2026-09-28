@@ -9,6 +9,7 @@
 #include "../core/genie_dat.h"
 #include "../core/palette.h"
 #include "../core/slp.h"
+#include "../core/slope_lighting.h"
 #include "../render/renderer.h"
 
 #include <functional>
@@ -50,19 +51,30 @@ public:
     // from the dat's player colour table). Null if the SLP doesn't exist.
     const SpriteSheet *sheet(int32_t slpId, int playerColorBase = 16);
     const SpriteSheet *terrainSheet(int32_t slpId);
-    const SpriteFrame *terrainSlopeFrame(int32_t slpId, int slope, size_t frame);
-    const SpriteFrame *blendMask(int mode, int mask) const;
+    const SpriteFrame *terrainSlopeFrame(int32_t slpId, int slope, size_t frame,
+                                         const std::array<int8_t, 8> &neighbors);
+    const SpriteFrame *blendMask(int mode, int mask, int slope = 0);
     bool hasBlendMasks() const { return blendMaskTexture_ != nullptr; }
     bool hasElevationMaps() const { return elevationMaps_ != nullptr; }
 
     size_t textureBytes() const { return textureBytes_; }
-    size_t sheetCount() const { return sheets_.size() + slopeFrames_.size(); }
+    size_t sheetCount() const { return sheets_.size() + slopeFrames_.size() + slopeBlendMasks_.size(); }
 
 private:
     const SpriteSheet *build(ResourceSet &set, int32_t slpId, int playerColorBase, uint64_t key);
-    const SpriteFrame *buildTerrainSlopeFrame(int32_t slpId, int slope, size_t frame, uint64_t key);
+    struct SlopeFrameKey {
+        int32_t slpId;
+        uint32_t frame;
+        uint8_t slope;
+        SlopeLighting lighting;
+
+        bool operator<(const SlopeFrameKey &other) const;
+    };
+
+    const SpriteFrame *buildTerrainSlopeFrame(const SlopeFrameKey &key);
     std::unique_ptr<SpriteSheet> pack(const std::vector<SlpImage> &imgs, int playerColorBase);
     bool buildBlendMasks(const Blendomatic &blendomatic, std::string *err);
+    const SpriteFrame *buildSlopeBlendMask(int mode, int mask, int slope, uint32_t key);
     void log(const std::string &s) const { if (log_) log_(s); }
 
     Renderer *renderer_;
@@ -70,9 +82,11 @@ private:
     ResourceSet graphics_, terrain_, interfac_;
     Palette palette_;
     dat::DatFile dat_;
+    std::unique_ptr<Blendomatic> blendomatic_;
     std::unique_ptr<ElevationMaps> elevationMaps_;
     std::map<uint64_t, std::unique_ptr<SpriteSheet>> sheets_;
-    std::map<uint64_t, std::unique_ptr<SpriteSheet>> slopeFrames_;
+    std::map<SlopeFrameKey, std::unique_ptr<SpriteSheet>> slopeFrames_;
+    std::map<uint32_t, std::unique_ptr<SpriteSheet>> slopeBlendMasks_;
     std::map<int32_t, std::unique_ptr<Slp>> terrainSlps_;
     Texture *blendMaskTexture_ = nullptr;
     std::vector<std::vector<SpriteFrame>> blendMasks_;

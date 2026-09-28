@@ -127,8 +127,10 @@ static int cmdSlopes(const char *dataDir, int id, const char *out, size_t frame)
     }
     constexpr int cellW = 105, cellH = 81;
     r.beginFrame(9 * cellW, 2 * cellH, 1.0f, 70, 70, 80);
+    std::array<int8_t, 8> neighbors;
+    neighbors.fill(-1);
     for (int slope = 0; slope < (int)kSlopeCount; slope++) {
-        const SpriteFrame *frameData = a.terrainSlopeFrame(id, slope, frame);
+        const SpriteFrame *frameData = a.terrainSlopeFrame(id, slope, frame, neighbors);
         if (!frameData) {
             fprintf(stderr, "slope %d for terrain SLP %d could not be generated\n", slope, id);
             return 1;

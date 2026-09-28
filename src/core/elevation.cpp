@@ -3,6 +3,7 @@
 
 #include "bytes.h"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace swgb {
@@ -36,16 +37,39 @@ bool readFile(const std::string &path, std::vector<uint8_t> &data, std::string *
 } // namespace
 
 bool ElevationMaps::load(const std::string &templatePath, const std::string &filterPath,
-                         const std::string &icmPath, std::string *err) {
+                         const std::string &icmPath, const std::string &lightPath,
+                         const std::string &patternPath, std::string *err) {
     templates_ = {};
     filters_ = {};
     icm_.clear();
-    return loadTemplates(templatePath, err) && loadFilters(filterPath, err) && loadIcm(icmPath, err);
+    lightMaps_.clear();
+    patternMasks_.clear();
+    return loadTemplates(templatePath, err) && loadFilters(filterPath, err) && loadIcm(icmPath, err) &&
+           loadTextureMaps(lightPath, 18, lightMaps_, err) &&
+           loadTextureMaps(patternPath, 40, patternMasks_, err);
 }
 
 uint8_t ElevationMaps::colorIndex(size_t map, uint8_t r, uint8_t g, uint8_t b) const {
     const size_t index = map * 32768 + ((size_t)r * 32 + g) * 32 + b;
     return index < icm_.size() ? icm_[index] : 0;
+}
+
+uint8_t ElevationMaps::lightIndex(uint16_t textureIndex, const uint8_t *patterns,
+                                  size_t patternCount) const {
+    if (textureIndex >= 4096 || patternCount == 0) return 4;
+    uint8_t first = patterns[0];
+    if (first >= patternMasks_.size()) return 4;
+    uint8_t result = (patternMasks_[first][textureIndex] >> 2) & 0x1F;
+    for (size_t i = 1; i < patternCount; i++) {
+        uint8_t pattern = patterns[i];
+        if (pattern >= patternMasks_.size()) continue;
+        uint8_t pixel = patternMasks_[pattern][textureIndex];
+        uint8_t brightness = pixel >> 2;
+        if (!(pixel & 1) && ((pixel & 2) ? brightness > result : brightness < result))
+            result = brightness;
+    }
+    result &= 0x1F;
+    return result < lightMaps_.size() ? lightMaps_[result][textureIndex] : 4;
 }
 
 bool ElevationMaps::loadTemplates(const std::string &path, std::string *err) {
@@ -138,6 +162,29 @@ bool ElevationMaps::loadIcm(const std::string &path, std::string *err) {
         return false;
     }
     return true;
+}
+
+bool ElevationMaps::loadTextureMaps(const std::string &path, size_t count,
+                                    std::vector<std::array<uint8_t, 4096>> &maps,
+                                    std::string *err) {
+    std::vector<uint8_t> data;
+    if (!readFile(path, data, err)) return false;
+    try {
+        ByteReader file(data);
+        maps.resize(count);
+        for (auto &map : maps) {
+            uint32_t size = file.u32();
+            if (size != map.size()) throw FormatError("texture map is not 64x64");
+            const uint8_t *pixels = file.ptr(size);
+            std::copy(pixels, pixels + size, map.begin());
+        }
+        if (file.remaining() != 0) throw FormatError("unexpected trailing texture-map data");
+        return true;
+    } catch (const FormatError &e) {
+        if (err) *err = path + ": " + e.what();
+        maps.clear();
+        return false;
+    }
 }
 
 } // namespace swgb

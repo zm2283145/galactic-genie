@@ -39,20 +39,26 @@ struct FilterMap {
 class ElevationMaps {
 public:
     bool load(const std::string &templatePath, const std::string &filterPath,
-              const std::string &icmPath, std::string *err);
+              const std::string &icmPath, const std::string &lightPath,
+              const std::string &patternPath, std::string *err);
 
     const SlopeTemplate &slopeTemplate(size_t slope) const { return templates_[slope]; }
     const FilterMap &filterMap(size_t slope) const { return filters_[slope]; }
     uint8_t colorIndex(size_t map, uint8_t r, uint8_t g, uint8_t b) const;
+    uint8_t lightIndex(uint16_t textureIndex, const uint8_t *patterns, size_t patternCount) const;
 
 private:
     bool loadTemplates(const std::string &path, std::string *err);
     bool loadFilters(const std::string &path, std::string *err);
     bool loadIcm(const std::string &path, std::string *err);
+    bool loadTextureMaps(const std::string &path, size_t count,
+                         std::vector<std::array<uint8_t, 4096>> &maps, std::string *err);
 
     std::array<SlopeTemplate, kSlopeCount> templates_;
     std::array<FilterMap, kSlopeCount> filters_;
     std::vector<uint8_t> icm_;
+    std::vector<std::array<uint8_t, 4096>> lightMaps_;
+    std::vector<std::array<uint8_t, 4096>> patternMasks_;
 };
 
 } // namespace swgb

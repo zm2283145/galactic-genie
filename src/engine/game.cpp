@@ -399,7 +399,6 @@ void Game::drawGraphicNow(Renderer &r, int graphicId, float sx, float sy, float 
 
 void Game::render(Renderer &r, int screenW, int screenH) {
     stats_ = FrameStats{};
-    r.beginFrame(screenW, screenH, zoom_, 0, 0, 0);
     const float viewW = screenW / zoom_, viewH = screenH / zoom_;
     const float ox = camX_ - viewW / 2, oy = camY_ - viewH / 2; // world-pixel of screen top-left
 
@@ -430,6 +429,84 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     };
     static constexpr int neighborX[8] = {-1, 0, 1, 1, 1, 0, -1, -1};
     static constexpr int neighborY[8] = {-1, -1, -1, 0, 1, 1, 1, 0};
+    static constexpr int slopeNeighborX[8] = {-1, 1, 1, -1, 0, 1, 0, -1};
+    static constexpr int slopeNeighborY[8] = {-1, -1, 1, 1, -1, 0, 1, 0};
+
+    // VitaGL texture creation during an active frame can expose uninitialized
+    // tiles for one swap. Populate every visible cache entry before beginFrame.
+    for (int ty = y0; ty <= y1; ty++) {
+        for (int tx = x0; tx <= x1; tx++) {
+            float sx, sy;
+            toScreen((float)tx, (float)ty, sx, sy);
+            const size_t tileIndex = (size_t)ty * mapSize_ + tx;
+            const int slope = tileSlope_[tileIndex];
+            sy -= tileElevation_[tileIndex] * assets_.dat().terrainBlock.elevHeight;
+            sx -= ox;
+            sy -= oy;
+            if (sx + kTileHalfW < 0 || sx - kTileHalfW > viewW || sy > viewH + 48 ||
+                sy + 3 * kTileHalfH < 0)
+                continue;
+
+            std::array<int8_t, 8> neighborSlopes;
+            neighborSlopes.fill(-1);
+            for (size_t i = 0; i < neighborSlopes.size(); i++) {
+                int nx = tx + slopeNeighborX[i], ny = ty + slopeNeighborY[i];
+                if (nx >= 0 && ny >= 0 && nx < mapSize_ && ny < mapSize_)
+                    neighborSlopes[i] = tileSlope_[(size_t)ny * mapSize_ + nx];
+            }
+            const int terrainId = terrainAt(tx, ty);
+            const dat::Terrain &terrain = terrains[terrainId];
+            const SpriteSheet *flat = assets_.terrainSheet(terrain.slp);
+            assets_.terrainSlopeFrame(terrain.slp, slope, frameIndexFor(flat, tx, ty), neighborSlopes);
+
+            if (!assets_.hasBlendMasks()) continue;
+            std::array<int, 8> neighbors;
+            neighbors.fill(-1);
+            std::array<bool, 8> active;
+            for (int i = 0; i < 8; i++) {
+                int nx = tx + neighborX[i], ny = ty + neighborY[i];
+                if (nx < 0 || ny < 0 || nx >= mapSize_ || ny >= mapSize_) {
+                    active[i] = false;
+                    continue;
+                }
+                int id = terrainAt(nx, ny);
+                neighbors[i] = id;
+                active[i] = id != terrainId && (size_t)id < terrains.size() &&
+                            terrains[id].blendPriority > terrain.blendPriority;
+            }
+            std::map<int, uint8_t> grouped;
+            for (int i = 0; i < 8; i++) {
+                if (!active[i]) continue;
+                if ((i & 1) == 0 && (active[(i + 7) & 7] || active[(i + 1) & 7])) continue;
+                grouped[neighbors[i]] |= (uint8_t)(1u << i);
+            }
+            for (const auto &entry : grouped) {
+                const dat::Terrain &overlay = terrains[entry.first];
+                const SpriteSheet *flatOverlay = assets_.terrainSheet(overlay.slp);
+                assets_.terrainSlopeFrame(overlay.slp, slope, frameIndexFor(flatOverlay, tx, ty),
+                                          neighborSlopes);
+                std::array<int, 5> maskIds;
+                int maskCount = blendMasksFor(entry.second, tx, ty, maskIds);
+                int mode = blendModeFor(terrain.blendType, overlay.blendType);
+                for (int i = 0; i < maskCount; i++) assets_.blendMask(mode, maskIds[i], slope);
+            }
+        }
+    }
+
+    g_draws.clear();
+    for (const Object &o : objects_) {
+        float sx, sy;
+        toScreen(o.x, o.y, sx, sy);
+        sy -= elevationAt(o.x, o.y) * assets_.dat().terrainBlock.elevHeight;
+        sx -= ox;
+        sy -= oy;
+        if (sx < -400 || sx > viewW + 400 || sy < -100 || sy > viewH + 500) continue;
+        int gid = o.unit->standingGraphic[0];
+        if (o.state == State::Walk && o.unit->walkingGraphic >= 0) gid = o.unit->walkingGraphic;
+        drawGraphic(r, gid, sx, sy, o.facing, o.animTime, o.player, 0);
+    }
+    g_draws.clear();
+    r.beginFrame(screenW, screenH, zoom_, 0, 0, 0);
 
     for (int ty = y0; ty <= y1; ty++) {
         for (int tx = x0; tx <= x1; tx++) {
@@ -445,9 +522,17 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 continue;
             const int terrainId = terrainAt(tx, ty);
             const dat::Terrain &t = terrains[terrainId];
+            std::array<int8_t, 8> neighborSlopes;
+            neighborSlopes.fill(-1);
+            for (size_t i = 0; i < neighborSlopes.size(); i++) {
+                int nx = tx + slopeNeighborX[i], ny = ty + slopeNeighborY[i];
+                if (nx >= 0 && ny >= 0 && nx < mapSize_ && ny < mapSize_)
+                    neighborSlopes[i] = tileSlope_[(size_t)ny * mapSize_ + nx];
+            }
             const SpriteSheet *flatBase = assets_.terrainSheet(t.slp);
             const size_t terrainFrame = frameIndexFor(flatBase, tx, ty);
-            const SpriteFrame *baseFrame = assets_.terrainSlopeFrame(t.slp, slope, terrainFrame);
+            const SpriteFrame *baseFrame =
+                assets_.terrainSlopeFrame(t.slp, slope, terrainFrame, neighborSlopes);
             if (!baseFrame) continue;
             const SpriteFrame &f = *baseFrame;
             const int deltaY = slope < (int)assets_.dat().terrainBlock.tileSizes.size()
@@ -491,7 +576,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 const SpriteSheet *flatOverlay = assets_.terrainSheet(overlayTerrain.slp);
                 const size_t overlayFrame = frameIndexFor(flatOverlay, tx, ty);
                 const SpriteFrame *overlay =
-                    assets_.terrainSlopeFrame(overlayTerrain.slp, slope, overlayFrame);
+                    assets_.terrainSlopeFrame(overlayTerrain.slp, slope, overlayFrame, neighborSlopes);
                 if (!overlay) continue;
                 Quad overlayQ{sx - kTileHalfW, tileY, (float)overlay->w, (float)overlay->h,
                               overlay->u, overlay->v, overlay->u + overlay->w, overlay->v + overlay->h};
@@ -499,7 +584,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 int maskCount = blendMasksFor(influence.directions, tx, ty, maskIds);
                 int mode = blendModeFor(t.blendType, overlayTerrain.blendType);
                 for (int i = 0; i < maskCount; i++) {
-                    const SpriteFrame *mask = assets_.blendMask(mode, maskIds[i]);
+                    const SpriteFrame *mask = assets_.blendMask(mode, maskIds[i], slope);
                     if (!mask) continue;
                     Quad maskQ{0, 0, (float)mask->w, (float)mask->h,
                                mask->u, mask->v, mask->u + mask->w, mask->v + mask->h};

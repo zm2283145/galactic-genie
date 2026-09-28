@@ -35,6 +35,9 @@ Assets::~Assets() {
     for (auto &kv : slopeFrames_)
         if (kv.second)
             for (Texture *t : kv.second->pages) renderer_->destroyTexture(t);
+    for (auto &kv : slopeBlendMasks_)
+        if (kv.second)
+            for (Texture *t : kv.second->pages) renderer_->destroyTexture(t);
     renderer_->destroyTexture(blendMaskTexture_);
 }
 
@@ -83,20 +86,24 @@ bool Assets::init(const std::string &dataDir, std::string *err) {
     if (blendPath.empty()) {
         log("blendomatic.dat not found; terrain blending disabled");
     } else {
-        Blendomatic blendomatic;
-        if (!blendomatic.load(blendPath, err) || !buildBlendMasks(blendomatic, err)) return false;
-        log("loaded " + blendPath + ": " + std::to_string(blendomatic.modeCount()) + " modes, " +
-            std::to_string(blendomatic.maskCount()) + " masks each");
+        auto blendomatic = std::make_unique<Blendomatic>();
+        if (!blendomatic->load(blendPath, err) || !buildBlendMasks(*blendomatic, err)) return false;
+        log("loaded " + blendPath + ": " + std::to_string(blendomatic->modeCount()) + " modes, " +
+            std::to_string(blendomatic->maskCount()) + " masks each");
+        blendomatic_ = std::move(blendomatic);
     }
 
     const std::string templatePath = findFileNoCase(dataDir, "STemplet.dat");
     const std::string filterPath = findFileNoCase(dataDir, "FilterMaps.dat");
     const std::string icmPath = findFileNoCase(dataDir, "VIEW_ICM.DAT");
-    if (templatePath.empty() || filterPath.empty() || icmPath.empty()) {
+    const std::string lightPath = findFileNoCase(dataDir, "lightMaps.dat");
+    const std::string patternPath = findFileNoCase(dataDir, "PatternMasks.dat");
+    if (templatePath.empty() || filterPath.empty() || icmPath.empty() || lightPath.empty() ||
+        patternPath.empty()) {
         log("terrain elevation resources not found; sloped terrain disabled");
     } else {
         auto maps = std::make_unique<ElevationMaps>();
-        if (!maps->load(templatePath, filterPath, icmPath, err)) return false;
+        if (!maps->load(templatePath, filterPath, icmPath, lightPath, patternPath, err)) return false;
         elevationMaps_ = std::move(maps);
         log("loaded terrain elevation maps: " + std::to_string(kSlopeCount) + " slope types");
     }
@@ -167,10 +174,86 @@ bool Assets::buildBlendMasks(const Blendomatic &blendomatic, std::string *err) {
     return true;
 }
 
-const SpriteFrame *Assets::blendMask(int mode, int mask) const {
+const SpriteFrame *Assets::blendMask(int mode, int mask, int slope) {
     if (mode < 0 || (size_t)mode >= blendMasks_.size()) return nullptr;
     if (mask < 0 || (size_t)mask >= blendMasks_[mode].size()) return nullptr;
+    if (slope > 0 && elevationMaps_) {
+        if ((size_t)slope >= kSlopeCount) return nullptr;
+        uint32_t key = (uint32_t)(uint8_t)mode << 16 | (uint32_t)(uint8_t)mask << 8 |
+                       (uint32_t)(uint8_t)slope;
+        auto it = slopeBlendMasks_.find(key);
+        if (it != slopeBlendMasks_.end())
+            return it->second && !it->second->frames.empty() ? &it->second->frames[0] : nullptr;
+        return buildSlopeBlendMask(mode, mask, slope, key);
+    }
     return &blendMasks_[mode][mask];
+}
+
+const SpriteFrame *Assets::buildSlopeBlendMask(int mode, int mask, int slope, uint32_t key) {
+    if (!blendomatic_ || (size_t)mode >= blendomatic_->modes().size() ||
+        (size_t)mask >= blendomatic_->modes()[(size_t)mode].masks.size()) {
+        slopeBlendMasks_[key] = nullptr;
+        return nullptr;
+    }
+    const BlendMask &source = blendomatic_->modes()[(size_t)mode].masks[(size_t)mask];
+    if (source.width != 97 || source.height != 49) {
+        slopeBlendMasks_[key] = nullptr;
+        return nullptr;
+    }
+
+    std::vector<uint16_t> commandPixels;
+    size_t commandOffset = 0;
+    for (int y = 0; y < source.height; y++) {
+        const int width = 1 + 4 * std::min(y, source.height - 1 - y);
+        const int left = (source.width - width) / 2;
+        const int commandBytes = width <= 63 ? 1 : 2;
+        if (commandPixels.size() < commandOffset + commandBytes + (size_t)width + 1)
+            commandPixels.resize(commandOffset + commandBytes + (size_t)width + 1, UINT16_MAX);
+        for (int x = 0; x < width; x++)
+            commandPixels[commandOffset + commandBytes + x] =
+                (uint16_t)((size_t)y * source.width + left + x);
+        commandOffset += commandBytes + width + 1;
+    }
+
+    const SlopeTemplate &shape = elevationMaps_->slopeTemplate((size_t)slope);
+    const FilterMap &filter = elevationMaps_->filterMap((size_t)slope);
+    std::vector<uint8_t> alpha((size_t)shape.width * shape.height, 0);
+    bool valid = true;
+    for (int y = 0; y < shape.height && valid; y++) {
+        int x = shape.leftEdges[(size_t)y];
+        for (const FilterPixel &pixel : filter.lines[(size_t)y].pixels) {
+            uint32_t value = 0;
+            for (const FilterSource &sample : pixel.sources) {
+                if (sample.sourceOffset >= commandPixels.size() ||
+                    commandPixels[sample.sourceOffset] == UINT16_MAX) {
+                    valid = false;
+                    break;
+                }
+                value += source.alpha[commandPixels[sample.sourceOffset]] * sample.alpha;
+            }
+            if (!valid) break;
+            alpha[(size_t)y * shape.width + x++] = (uint8_t)std::min(255u, (value + 128) >> 8);
+        }
+    }
+    if (!valid) {
+        log("slope blend mask references invalid source data");
+        slopeBlendMasks_[key] = nullptr;
+        return nullptr;
+    }
+
+    Texture *texture = renderer_->createMaskTexture(shape.width, shape.height, alpha.data());
+    if (!texture) {
+        slopeBlendMasks_[key] = nullptr;
+        return nullptr;
+    }
+    auto sheet = std::make_unique<SpriteSheet>();
+    sheet->pages.push_back(texture);
+    sheet->bytes = alpha.size();
+    sheet->frames.push_back({texture, 0, 0, shape.width, shape.height, 0, 0});
+    textureBytes_ += sheet->bytes;
+    const SpriteFrame *result = &sheet->frames[0];
+    slopeBlendMasks_[key] = std::move(sheet);
+    return result;
 }
 
 const SpriteSheet *Assets::sheet(int32_t slpId, int playerColorBase) {
@@ -187,17 +270,27 @@ const SpriteSheet *Assets::terrainSheet(int32_t slpId) {
     return build(terrain_, slpId, 16, key);
 }
 
-const SpriteFrame *Assets::terrainSlopeFrame(int32_t slpId, int slope, size_t frame) {
+bool Assets::SlopeFrameKey::operator<(const SlopeFrameKey &other) const {
+    if (slpId != other.slpId) return slpId < other.slpId;
+    if (frame != other.frame) return frame < other.frame;
+    if (slope != other.slope) return slope < other.slope;
+    if (lighting.count != other.lighting.count) return lighting.count < other.lighting.count;
+    return lighting.patterns < other.lighting.patterns;
+}
+
+const SpriteFrame *Assets::terrainSlopeFrame(int32_t slpId, int slope, size_t frame,
+                                             const std::array<int8_t, 8> &neighbors) {
     if (slope == 0 || !elevationMaps_) {
         const SpriteSheet *sheet = terrainSheet(slpId);
         return sheet && frame < sheet->frames.size() ? &sheet->frames[frame] : nullptr;
     }
     if (slope < 0 || (size_t)slope >= kSlopeCount || frame > 0xFFFFFF) return nullptr;
-    uint64_t key = ((uint64_t)(uint32_t)slpId << 32) | (uint64_t)(uint8_t)slope << 24 | frame;
+    SlopeFrameKey key{
+        slpId, (uint32_t)frame, (uint8_t)slope, selectSlopeLighting((uint8_t)slope, neighbors)};
     auto it = slopeFrames_.find(key);
     if (it != slopeFrames_.end())
         return it->second && !it->second->frames.empty() ? &it->second->frames[0] : nullptr;
-    return buildTerrainSlopeFrame(slpId, slope, frame, key);
+    return buildTerrainSlopeFrame(key);
 }
 
 const SpriteSheet *Assets::build(ResourceSet &set, int32_t slpId, int playerColorBase, uint64_t key) {
@@ -234,7 +327,10 @@ const SpriteSheet *Assets::build(ResourceSet &set, int32_t slpId, int playerColo
     return res;
 }
 
-const SpriteFrame *Assets::buildTerrainSlopeFrame(int32_t slpId, int slope, size_t frame, uint64_t key) {
+const SpriteFrame *Assets::buildTerrainSlopeFrame(const SlopeFrameKey &key) {
+    const int32_t slpId = key.slpId;
+    const int slope = key.slope;
+    const size_t frame = key.frame;
     std::string err;
     auto slpIt = terrainSlps_.find(slpId);
     if (slpIt == terrainSlps_.end()) {
@@ -297,8 +393,10 @@ const SpriteFrame *Assets::buildTerrainSlopeFrame(int32_t slpId, int slope, size
             if (!valid) break;
             const size_t dst = (size_t)y * out.width + x++;
             out.kind[dst] = PX_COLOR;
+            uint8_t light = elevationMaps_->lightIndex(
+                pixel.lightIndex, key.lighting.patterns.data(), key.lighting.count);
             out.index[dst] = elevationMaps_->colorIndex(
-                4, (uint8_t)std::min(31u, r >> 11), (uint8_t)std::min(31u, g >> 11),
+                light, (uint8_t)std::min(31u, r >> 11), (uint8_t)std::min(31u, g >> 11),
                 (uint8_t)std::min(31u, b >> 11));
         }
     }

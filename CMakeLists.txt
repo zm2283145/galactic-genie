@@ -15,6 +15,7 @@ set(SWGB_CORE_SOURCES
     src/core/drs.cpp
     src/core/elevation.cpp
     src/core/palette.cpp
+    src/core/slope_lighting.cpp
     src/core/slp.cpp
     src/core/genie_dat.cpp
     src/engine/assets.cpp

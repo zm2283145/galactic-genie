@@ -14,7 +14,7 @@ It is written clean-room style: file formats come from public documentation (ope
 | `genie_x1.dat` (VER 5.9) full parse, verified byte-exact to EOF | done |
 | Sprite atlas builder (per SLP and player colour) | done |
 | Isometric terrain renderer with `blendomatic.dat` priority/mode edge blending | done |
-| Terrain elevation with original `STemplet.dat`/`FilterMaps.dat` slope geometry | in progress |
+| Terrain elevation with original slope geometry and neighbor-sensitive lighting | done |
 | Units: idle/walk animation, 8-way facing with mirroring, graphic deltas for buildings | done |
 | Vita: vitaGL batched fixed-function renderer, stick/d-pad/touch scroll, L/R zoom | done |
 | PC `swgbtool`: dat info, DRS listing, SLP to PNG, headless scene render to PNG | done |
@@ -50,7 +50,7 @@ cmake -B build-pc && cmake --build build-pc
 
 ## Installing on the Vita
 
-1. Copy these files from the game's `Game/Data` folder to `ux0:data/swgb/Data/`: `genie_x1.dat`, `graphics.drs`, `graphics_x1.drs`, `terrain.drs`, `terrain_x1.drs`, `interfac.drs`, `interfac_x1.drs`, `blendomatic.dat`, `STemplet.dat`, `FilterMaps.dat`, and `VIEW_ICM.DAT` (about 313 MB). `tools\deploy_vita.ps1 -GameData` does this over FTP.
+1. Copy these files from the game's `Game/Data` folder to `ux0:data/swgb/Data/`: `genie_x1.dat`, `graphics.drs`, `graphics_x1.drs`, `terrain.drs`, `terrain_x1.drs`, `interfac.drs`, `interfac_x1.drs`, `blendomatic.dat`, `STemplet.dat`, `FilterMaps.dat`, `VIEW_ICM.DAT`, `lightMaps.dat`, and `PatternMasks.dat` (about 313 MB). `tools\deploy_vita.ps1 -GameData` does this over FTP.
 2. Install `swgb.vpk` with VitaShell. `tools\deploy_vita.ps1 -Vpk` uploads it to `ux0:data/swgb/`.
 3. The app writes a log to `ux0:data/swgb/swgb.log`. `tools\deploy_vita.ps1 -PullLog` fetches it.
 
