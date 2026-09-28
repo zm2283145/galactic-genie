@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // PS Vita entry point: vitaGL init, input, main loop.
+#include "../../core/cpx.h"
+#include "../../core/scenario.h"
 #include "../../engine/assets.h"
 #include "../../engine/game.h"
 #include "../../render/gl_renderer.h"
@@ -25,6 +27,7 @@ namespace {
 
 const char *kRoot = "ux0:data/swgb";
 const char *kDataDir = "ux0:data/swgb/Data";
+const char *kCampaignPath = "ux0:data/swgb/Campaign/xcam3.cpx";
 const int kScreenW = 960, kScreenH = 544;
 
 FILE *g_log = nullptr;
@@ -96,8 +99,29 @@ int main() {
         }
         logf("assets loaded in %llu ms", (unsigned long long)((sceKernelGetProcessTimeWide() - t0) / 1000));
 
+        auto campaign = swgb::CpxArchive::open(kCampaignPath, &err);
+        if (!campaign) {
+            errorScreen(err + " (copy XCAM3.CPX to ux0:data/swgb/Campaign)");
+            sceKernelExitProcess(0);
+            return 0;
+        }
+        std::vector<uint8_t> scx;
+        if (!campaign->read(1, scx, &err)) {
+            errorScreen(err);
+            sceKernelExitProcess(0);
+            return 0;
+        }
+        swgb::Scenario scenario;
+        if (!scenario.load(scx, &err)) {
+            errorScreen(err);
+            sceKernelExitProcess(0);
+            return 0;
+        }
+        logf("scenario %s loaded: %ux%u, player data %.2f", scenario.originalFilename.c_str(),
+             (unsigned)scenario.map.width, (unsigned)scenario.map.height, scenario.playerDataVersion);
+
         swgb::Game game(assets);
-        if (!game.init((uint32_t)sceKernelGetProcessTimeLow(), 64, &err)) {
+        if (!game.initScenario(scenario, &err)) {
             errorScreen(err);
             sceKernelExitProcess(0);
             return 0;

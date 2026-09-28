@@ -6,8 +6,10 @@
 //   swgbtool slp    <DataDir> <slpId> <out.png> [playerBase]
 //   swgbtool slopes <DataDir> <slpId> <out.png> [frame]
 //   swgbtool render <DataDir> <out.png> [seed] [seconds] [zoom]
+#include "../src/core/cpx.h"
 #include "../src/core/drs.h"
 #include "../src/core/genie_dat.h"
+#include "../src/core/scenario.h"
 #include "../src/engine/assets.h"
 #include "../src/engine/game.h"
 #include "../src/render/soft_renderer.h"
@@ -27,7 +29,10 @@ static int usage() {
             "  swgbtool drs    <file.drs>\n"
             "  swgbtool slp    <DataDir> <slpId> <out.png> [playerBase]\n"
             "  swgbtool slopes <DataDir> <slpId> <out.png> [frame]\n"
-            "  swgbtool render <DataDir> <out.png> [seed] [seconds] [zoom]\n");
+            "  swgbtool render <DataDir> <out.png> [seed] [seconds] [zoom]\n"
+            "  swgbtool campaign <file.cpx>\n"
+            "  swgbtool scenario <file.cpx> <entry>\n"
+            "  swgbtool render-scenario <DataDir> <file.cpx> <entry> <out.png> [x] [y] [zoom]\n");
     return 2;
 }
 
@@ -83,6 +88,53 @@ static int cmdDrs(const char *path) {
         const char *t = e.type == DrsType::Slp ? "slp" : e.type == DrsType::Wav ? "wav" : e.type == DrsType::Bina ? "bina" : "?";
         printf("%6d %-4s %10u %9u\n", e.id, t, e.offset, e.size);
     }
+    return 0;
+}
+
+static std::unique_ptr<CpxArchive> openCampaign(const char *path) {
+    std::string err;
+    auto campaign = CpxArchive::open(path, &err);
+    if (!campaign) fprintf(stderr, "error: %s\n", err.c_str());
+    return campaign;
+}
+
+static int cmdCampaign(const char *path) {
+    auto campaign = openCampaign(path);
+    if (!campaign) return 1;
+    printf("%s: version %s, %zu entries\n", campaign->name().c_str(), campaign->version().c_str(),
+           campaign->entries().size());
+    for (size_t i = 0; i < campaign->entries().size(); i++) {
+        const CpxEntry &entry = campaign->entries()[i];
+        printf("%3zu  %-32s %8u bytes  %s\n", i + 1, entry.filename.c_str(), entry.size,
+               entry.identifier.c_str());
+    }
+    return 0;
+}
+
+static bool loadScenario(const char *path, int entryNumber, Scenario &scenario, std::string &err) {
+    auto campaign = CpxArchive::open(path, &err);
+    if (!campaign) return false;
+    if (entryNumber < 1 || (size_t)entryNumber > campaign->entries().size()) {
+        err = "campaign entry must be between 1 and " + std::to_string(campaign->entries().size());
+        return false;
+    }
+    std::vector<uint8_t> scx;
+    if (!campaign->read((size_t)entryNumber - 1, scx, &err)) return false;
+    return scenario.load(scx, &err);
+}
+
+static int cmdScenario(const char *path, int entryNumber) {
+    Scenario scenario;
+    std::string err;
+    if (!loadScenario(path, entryNumber, scenario, err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    printf("%s: SCX %s, player data %.2f, %ux%u map, %u players, next unit %u\n",
+           scenario.originalFilename.c_str(), scenario.version.c_str(), scenario.playerDataVersion,
+           scenario.map.width, scenario.map.height, scenario.enabledPlayerCount, scenario.nextUnitId);
+    printf("camera %d,%d\n", scenario.cameraX, scenario.cameraY);
+    printf("instructions: %s\n", scenario.instructions.c_str());
     return 0;
 }
 
@@ -172,6 +224,39 @@ static int cmdRender(const char *dataDir, const char *out, uint32_t seed, float 
     return 0;
 }
 
+static int cmdRenderScenario(const char *dataDir, const char *campaignPath, int entryNumber, const char *out,
+                             float x, float y, float zoom) {
+    Scenario scenario;
+    std::string err;
+    if (!loadScenario(campaignPath, entryNumber, scenario, err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    auto start = std::chrono::steady_clock::now();
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    Game game(assets);
+    if (!game.initScenario(scenario, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    if (x >= 0 && y >= 0) game.lookAt(x, y);
+    game.setZoom(zoom);
+    game.render(renderer, 960, 544);
+    renderer.savePng(out);
+    auto end = std::chrono::steady_clock::now();
+    printf("rendered %s (%ux%u) at %.1f,%.1f: %d tiles, %.1f MB textures, %.0f ms -> %s\n",
+           scenario.originalFilename.c_str(), scenario.map.width, scenario.map.height,
+           x >= 0 ? x : scenario.map.width * 0.5f, y >= 0 ? y : scenario.map.height * 0.5f,
+           game.stats().tiles, assets.textureBytes() / 1048576.0,
+           std::chrono::duration<double, std::milli>(end - start).count(), out);
+    return 0;
+}
+
 // Renders one graphic at 8 world facings (0 = +x, then +45 deg steps) in a row.
 static int cmdAngles(const char *dataDir, int gid, const char *out) {
     SoftRenderer r;
@@ -202,6 +287,8 @@ int main(int argc, char **argv) {
     const char *cmd = argv[1];
     if (!strcmp(cmd, "info")) return cmdInfo(argv[2]);
     if (!strcmp(cmd, "drs")) return cmdDrs(argv[2]);
+    if (!strcmp(cmd, "campaign")) return cmdCampaign(argv[2]);
+    if (!strcmp(cmd, "scenario") && argc >= 4) return cmdScenario(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "angles") && argc >= 5) return cmdAngles(argv[2], atoi(argv[3]), argv[4]);
     if (!strcmp(cmd, "slp") && argc >= 5) return cmdSlp(argv[2], atoi(argv[3]), argv[4], argc > 5 ? atoi(argv[5]) : 16);
     if (!strcmp(cmd, "slopes") && argc >= 5)
@@ -209,5 +296,10 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "render") && argc >= 4)
         return cmdRender(argv[2], argv[3], argc > 4 ? (uint32_t)atoi(argv[4]) : 1, argc > 5 ? (float)atof(argv[5]) : 0,
                          argc > 6 ? (float)atof(argv[6]) : 1.0f);
+    if (!strcmp(cmd, "render-scenario") && argc >= 6)
+        return cmdRenderScenario(argv[2], argv[3], atoi(argv[4]), argv[5],
+                                 argc > 6 ? (float)atof(argv[6]) : -1.0f,
+                                 argc > 7 ? (float)atof(argv[7]) : -1.0f,
+                                 argc > 8 ? (float)atof(argv[8]) : 0.4f);
     return usage();
 }

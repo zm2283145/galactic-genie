@@ -2,13 +2,16 @@
 #
 #   tools\deploy_vita.ps1 -Vpk          # copies build-vita\swgb.vpk to ux0:data/swgb/swgb.vpk (install with VitaShell)
 #   tools\deploy_vita.ps1 -GameData     # one-time: copies the SWGB:CC files to ux0:data/swgb/Data
+#   tools\deploy_vita.ps1 -CampaignData # copies XCAM3.CPX for the Breaking Bread scenario
 #   tools\deploy_vita.ps1 -PullLog      # downloads ux0:data/swgb/swgb.log to build-vita\swgb.log
 param(
     [string]$Vita = "10.1.1.93",
     [int]$Port = 1337,
     [string]$GameDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Data",
+    [string]$CampaignDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Campaign",
     [switch]$Vpk,
     [switch]$GameData,
+    [switch]$CampaignData,
     [switch]$PullLog
 )
 $ErrorActionPreference = "Stop"
@@ -54,6 +57,10 @@ if ($GameData) {
              "INTERFAC.DRS", "interfac_x1.drs", "blendomatic.dat", "STemplet.dat", "FilterMaps.dat",
              "VIEW_ICM.DAT", "lightMaps.dat", "PatternMasks.dat"
     foreach ($f in $files) { Ftp-Put (Join-Path $GameDir $f) "ux0:/data/swgb/Data/$($f.ToLower())" }
+}
+if ($CampaignData) {
+    Ftp-MkDir "ux0:/data/swgb/Campaign"
+    Ftp-Put (Join-Path $CampaignDir "XCAM3.CPX") "ux0:/data/swgb/Campaign/xcam3.cpx"
 }
 if ($Vpk) { Ftp-Put (Join-Path $repo "build-vita\swgb.vpk") "ux0:/data/swgb/swgb.vpk" }
 if ($PullLog) {

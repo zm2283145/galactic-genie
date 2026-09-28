@@ -4,6 +4,7 @@
 #pragma once
 
 #include "assets.h"
+#include "../core/scenario.h"
 
 #include <cstdint>
 #include <random>
@@ -29,6 +30,7 @@ public:
     explicit Game(Assets &assets) : assets_(assets) {}
 
     bool init(uint32_t seed, int mapSize, std::string *err);
+    bool initScenario(const Scenario &scenario, std::string *err);
     void update(float dt, const InputState &in);
     void render(Renderer &r, int screenW, int screenH);
 
@@ -61,6 +63,7 @@ private:
     };
 
     void generateTerrain(int size);
+    void buildTileElevation();
     void spawnBase(int player, int civ, char civLetter, float cx, float cy);
     const dat::Unit *findUnit(int civ, const std::string &name) const;
     Object *spawn(int civ, const std::string &name, int player, float x, float y, float facing);

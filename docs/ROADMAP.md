@@ -12,7 +12,9 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   placement, neighbor-sensitive `PatternMasks`/`lightMaps` shading, and a memory-bounded
   per-frame slope cache are done. Terrain blend masks are resampled through the same slope filters.
 - Cliffs, trees and gaia resources (carbon, ore, nova, fruit, animals).
-- Scenario (`.scx`) loader, so real maps can be shown instead of the procedural test map.
+- CPX campaign archive and SCX terrain/elevation loading are done. The Vita vertical slice now opens
+  Galactic Empire mission 2, “Breaking Bread,” directly from the original `XCAM3.CPX`.
+- Scenario units, player initialization, triggers, objectives, and campaign progression.
 - Fog of war and explored/visible tile state.
 - Shadow and player-outline passes (PX_OUTLINE pixels drawn only when occluded).
 

@@ -142,11 +142,51 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     return true;
 }
 
+bool Game::initScenario(const Scenario &scenario, std::string *err) {
+    if (!scenario.map.width || scenario.map.width != scenario.map.height) {
+        if (err) *err = "only square scenario maps are currently supported";
+        return false;
+    }
+    if (scenario.map.tiles.size() != (size_t)scenario.map.width * scenario.map.height) {
+        if (err) *err = "scenario map tile count does not match its dimensions";
+        return false;
+    }
+    const auto &terrains = assets_.dat().terrainBlock.terrains;
+    for (const ScenarioTile &tile : scenario.map.tiles) {
+        if ((size_t)tile.terrain >= terrains.size()) {
+            if (err) *err = "scenario references terrain " + std::to_string(tile.terrain) +
+                            ", but the dat only contains " + std::to_string(terrains.size());
+            return false;
+        }
+    }
+
+    rng_.seed(1);
+    mapSize_ = (int)scenario.map.width;
+    terrain_.resize(scenario.map.tiles.size());
+    for (size_t i = 0; i < scenario.map.tiles.size(); i++) terrain_[i] = scenario.map.tiles[i].terrain;
+
+    const size_t stride = (size_t)mapSize_ + 1;
+    cornerElevation_.resize(stride * stride);
+    for (int y = 0; y <= mapSize_; y++) {
+        const int sourceY = std::min(y, mapSize_ - 1);
+        for (int x = 0; x <= mapSize_; x++) {
+            const int sourceX = std::min(x, mapSize_ - 1);
+            cornerElevation_[(size_t)y * stride + x] =
+                scenario.map.tiles[(size_t)sourceY * mapSize_ + sourceX].elevation;
+        }
+    }
+    buildTileElevation();
+    objects_.clear();
+    if (scenario.cameraX >= 0 && scenario.cameraY >= 0)
+        lookAt((float)scenario.cameraX, (float)scenario.cameraY);
+    else
+        lookAt(mapSize_ * 0.5f, mapSize_ * 0.5f);
+    return true;
+}
+
 void Game::generateTerrain(int size) {
     terrain_.assign((size_t)size * size, T_GRASS1);
     cornerElevation_.assign((size_t)(size + 1) * (size + 1), 0);
-    tileElevation_.assign((size_t)size * size, 0);
-    tileSlope_.assign((size_t)size * size, 0);
     uint32_t seed = rng_();
     for (int y = 0; y < size; y++) {
         for (int x = 0; x < size; x++) {
@@ -175,14 +215,21 @@ void Game::generateTerrain(int size) {
                 distance < 3.25f ? 2 : distance < 5.75f ? 1 : 0;
         }
     }
-    for (int y = 0; y < size; y++) {
-        for (int x = 0; x < size; x++) {
-            const uint8_t north = cornerElevation_[(size_t)y * (size + 1) + x];
-            const uint8_t east = cornerElevation_[(size_t)y * (size + 1) + x + 1];
-            const uint8_t south = cornerElevation_[(size_t)(y + 1) * (size + 1) + x + 1];
-            const uint8_t west = cornerElevation_[(size_t)(y + 1) * (size + 1) + x];
-            uint8_t &elevation = tileElevation_[(size_t)y * size + x];
-            tileSlope_[(size_t)y * size + x] = slopeForCorners(north, east, south, west, elevation);
+    buildTileElevation();
+}
+
+void Game::buildTileElevation() {
+    tileElevation_.assign((size_t)mapSize_ * mapSize_, 0);
+    tileSlope_.assign((size_t)mapSize_ * mapSize_, 0);
+    for (int y = 0; y < mapSize_; y++) {
+        for (int x = 0; x < mapSize_; x++) {
+            const uint8_t north = cornerElevation_[(size_t)y * (mapSize_ + 1) + x];
+            const uint8_t east = cornerElevation_[(size_t)y * (mapSize_ + 1) + x + 1];
+            const uint8_t south = cornerElevation_[(size_t)(y + 1) * (mapSize_ + 1) + x + 1];
+            const uint8_t west = cornerElevation_[(size_t)(y + 1) * (mapSize_ + 1) + x];
+            uint8_t &elevation = tileElevation_[(size_t)y * mapSize_ + x];
+            tileSlope_[(size_t)y * mapSize_ + x] =
+                slopeForCorners(north, east, south, west, elevation);
         }
     }
 }

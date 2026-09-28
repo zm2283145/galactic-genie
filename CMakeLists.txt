@@ -12,9 +12,11 @@ endif()
 
 set(SWGB_CORE_SOURCES
     src/core/blendomatic.cpp
+    src/core/cpx.cpp
     src/core/drs.cpp
     src/core/elevation.cpp
     src/core/palette.cpp
+    src/core/scenario.cpp
     src/core/slope_lighting.cpp
     src/core/slp.cpp
     src/core/genie_dat.cpp
