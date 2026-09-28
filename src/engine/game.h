@@ -61,6 +61,7 @@ private:
         float targetX = 0, targetY = 0;
         float homeX = 0, homeY = 0;
         bool wander = true;
+        uint16_t initialFrame = 0;
     };
 
     void generateTerrain(int size);
@@ -74,7 +75,7 @@ private:
     float elevationAt(float x, float y) const;
 
     void drawGraphic(Renderer &r, int graphicId, float sx, float sy, float facing, float animTime, int player,
-                     int depth);
+                     int initialFrame, int depth);
 
     Assets &assets_;
     std::mt19937 rng_;

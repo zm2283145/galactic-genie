@@ -11,6 +11,7 @@ namespace swgb {
 namespace {
 
 constexpr float kPi = 3.14159265358979f;
+constexpr uint8_t kSequenceAnimated = 0x1;
 
 // Terrain ids from genie_x1.dat's terrain table.
 enum : uint8_t {
@@ -174,7 +175,12 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     rng_.seed(1);
     mapSize_ = (int)scenario.map.width;
     terrain_.resize(scenario.map.tiles.size());
-    for (size_t i = 0; i < scenario.map.tiles.size(); i++) terrain_[i] = scenario.map.tiles[i].terrain;
+    // Rotate scenario world coordinates 90 degrees clockwise. Transforming
+    // the source data keeps slope geometry, objects, facings, and art aligned.
+    for (int y = 0; y < mapSize_; y++)
+        for (int x = 0; x < mapSize_; x++)
+            terrain_[(size_t)y * mapSize_ + x] =
+                scenario.map.tiles[(size_t)(mapSize_ - 1 - x) * mapSize_ + y].terrain;
 
     // Player-unit block 0 is Gaia; block N belongs to player N and uses
     // player-info entry N-1. Gungans are the only civilization with their
@@ -188,8 +194,8 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     for (const ScenarioUnit &unit : scenario.units) {
         if (unit.unitId != 50) continue; // BLDG-GARDEN
         const uint8_t farmTerrain = civilizationFor(unit.player) == 2 ? T_FARM_GUNGAN : T_FARM;
-        const int centerX = (int)std::floor(unit.x);
-        const int centerY = (int)std::floor(unit.y);
+        const int centerX = (int)std::floor(mapSize_ - unit.y);
+        const int centerY = (int)std::floor(unit.x);
         for (int y = centerY - 1; y <= centerY + 1; y++)
             for (int x = centerX - 1; x <= centerX + 1; x++) {
                 if (x < 0 || y < 0 || x >= mapSize_ || y >= mapSize_) continue;
@@ -201,9 +207,9 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     const size_t stride = (size_t)mapSize_ + 1;
     cornerElevation_.resize(stride * stride);
     for (int y = 0; y <= mapSize_; y++) {
-        const int sourceY = std::min(y, mapSize_ - 1);
         for (int x = 0; x <= mapSize_; x++) {
-            const int sourceX = std::min(x, mapSize_ - 1);
+            const int sourceX = std::min(y, mapSize_ - 1);
+            const int sourceY = std::max(0, std::min(mapSize_ - 1, mapSize_ - x));
             cornerElevation_[(size_t)y * stride + x] =
                 scenario.map.tiles[(size_t)sourceY * mapSize_ + sourceX].elevation;
         }
@@ -219,14 +225,15 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
         Object object;
         object.unit = unit;
         object.player = source.player;
-        object.x = object.homeX = object.targetX = source.x;
-        object.y = object.homeY = object.targetY = source.y;
-        object.facing = source.rotation;
+        object.x = object.homeX = object.targetX = mapSize_ - source.y;
+        object.y = object.homeY = object.targetY = source.x;
+        object.facing = source.rotation + kPi * 0.5f;
         object.wander = false;
+        object.initialFrame = source.initialFrame;
         objects_.push_back(object);
     }
     if (scenario.cameraX >= 0 && scenario.cameraY >= 0)
-        lookAt(scenario.cameraX, scenario.cameraY);
+        lookAt(mapSize_ - scenario.cameraY, scenario.cameraX);
     else
         lookAt(mapSize_ * 0.5f, mapSize_ * 0.5f);
     return true;
@@ -418,7 +425,8 @@ void Game::update(float dt, const InputState &in) {
 // Picks the SLP frame for a graphic given a world-space facing and time.
 // Genie stores angles starting at "south" (screen-down) going clockwise; the
 // east half is mirrored from the west half when mirroringMode is set.
-static bool pickFrame(const dat::Graphic &g, size_t slpFrames, float facing, float t, size_t &frame, bool &flip) {
+static bool pickFrame(const dat::Graphic &g, size_t slpFrames, float facing, float t, int initialFrame,
+                      size_t &frame, bool &flip) {
     int angles = std::max<int>(1, g.angleCount);
     int perAngle = std::max<int>(1, g.frameCount);
     // World direction -> screen direction (iso projection), y grows downwards.
@@ -441,11 +449,11 @@ static bool pickFrame(const dat::Graphic &g, size_t slpFrames, float facing, flo
             a = a % stored;
         }
     }
-    int f = 0;
-    if (g.frameDuration > 0 && perAngle > 1) {
+    int f = perAngle > 0 ? initialFrame % perAngle : 0;
+    if ((g.sequenceType & kSequenceAnimated) && g.frameDuration > 0 && perAngle > 1) {
         float cycle = perAngle * g.frameDuration + std::max(0.0f, g.replayDelay);
         float tt = std::fmod(t, cycle);
-        f = std::min(perAngle - 1, (int)(tt / g.frameDuration));
+        f = (f + std::min(perAngle - 1, (int)(tt / g.frameDuration))) % perAngle;
     }
     frame = (size_t)a * perAngle + f;
     if (frame >= slpFrames) frame = slpFrames ? slpFrames - 1 : 0;
@@ -455,7 +463,7 @@ static bool pickFrame(const dat::Graphic &g, size_t slpFrames, float facing, flo
 static std::vector<SpriteDraw> g_draws; // reused between frames
 
 void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float facing, float animTime, int player,
-                       int depth) {
+                       int initialFrame, int depth) {
     const dat::Graphic *g = assets_.dat().graphic(graphicId);
     if (!g) return;
     if (!g->deltas.empty() && depth < 3) {
@@ -467,13 +475,14 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
                 const SpriteSheet *sh = assets_.sheet(self.slp, playerColorBase(player));
                 if (!sh) continue;
                 size_t fr; bool flip;
-                if (!pickFrame(self, sh->frames.size(), facing, animTime, fr, flip)) continue;
+                if (!pickFrame(self, sh->frames.size(), facing, animTime, initialFrame, fr, flip)) continue;
                 const SpriteFrame &f = sh->frames[fr];
                 float x = sx + d.offsetX - (flip ? f.w - f.hotX : f.hotX), y = sy + d.offsetY - f.hotY;
                 Quad q{x, y, (float)f.w, (float)f.h, flip ? f.u + f.w : f.u, f.v, flip ? f.u : f.u + f.w, f.v + f.h};
                 g_draws.push_back({(int64_t)std::min<int>(g->layer, 20) << 40 | (int64_t)(sy * 16 + 65536) << 8, f.tex, q});
             } else {
-                drawGraphic(r, d.graphicId, sx + d.offsetX, sy + d.offsetY, facing, animTime, player, depth + 1);
+                drawGraphic(r, d.graphicId, sx + d.offsetX, sy + d.offsetY, facing, animTime, player,
+                            initialFrame, depth + 1);
             }
         }
         return;
@@ -482,7 +491,7 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
     if (!sh) return;
     size_t fr;
     bool flip;
-    if (!pickFrame(*g, sh->frames.size(), facing, animTime, fr, flip)) return;
+    if (!pickFrame(*g, sh->frames.size(), facing, animTime, initialFrame, fr, flip)) return;
     const SpriteFrame &f = sh->frames[fr];
     if (f.w == 0 || f.h == 0) return;
     float x = sx - (flip ? f.w - f.hotX : f.hotX), y = sy - f.hotY;
@@ -494,7 +503,7 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
 
 void Game::drawGraphicNow(Renderer &r, int graphicId, float sx, float sy, float facing, float t, int player) {
     g_draws.clear();
-    drawGraphic(r, graphicId, sx, sy, facing, t, player, 0);
+    drawGraphic(r, graphicId, sx, sy, facing, t, player, 0, 0);
     std::stable_sort(g_draws.begin(), g_draws.end(),
                      [](const SpriteDraw &a, const SpriteDraw &b) { return a.key < b.key; });
     for (const SpriteDraw &d : g_draws) r.draw(d.tex, d.q);
@@ -610,7 +619,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         if (sx < -400 || sx > viewW + 400 || sy < -100 || sy > viewH + 500) continue;
         int gid = o.unit->standingGraphic[0];
         if (o.state == State::Walk && o.unit->walkingGraphic >= 0) gid = o.unit->walkingGraphic;
-        drawGraphic(r, gid, sx, sy, o.facing, o.animTime, o.player, 0);
+        drawGraphic(r, gid, sx, sy, o.facing, o.animTime, o.player, o.initialFrame, 0);
     }
     g_draws.clear();
     r.beginFrame(screenW, screenH, zoom_, 0, 0, 0);
@@ -714,7 +723,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         if (sx < -400 || sx > viewW + 400 || sy < -100 || sy > viewH + 500) continue;
         int gid = o.unit->standingGraphic[0];
         if (o.state == State::Walk && o.unit->walkingGraphic >= 0) gid = o.unit->walkingGraphic;
-        drawGraphic(r, gid, sx, sy, o.facing, o.animTime, o.player, 0);
+        drawGraphic(r, gid, sx, sy, o.facing, o.animTime, o.player, o.initialFrame, 0);
     }
     std::stable_sort(g_draws.begin(), g_draws.end(),
                      [](const SpriteDraw &a, const SpriteDraw &b) { return a.key < b.key; });

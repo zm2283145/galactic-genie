@@ -114,9 +114,12 @@ static int cmdUnit(const char *dataDir, int id) {
             const auto &unit = units[(size_t)id];
             const int graphicId = unit.standingGraphic[0];
             const auto *graphic = assets.dat().graphic(graphicId);
-            printf("civ %zu %-24s unit '%s', type %u, graphic %d, slp %d\n", civ,
+            printf("civ %zu %-24s unit '%s', type %u, graphic %d, slp %d, frames %d, angles %d, "
+                   "duration %.3f, sequence 0x%02x\n", civ,
                    assets.dat().civs[civ].name.c_str(), unit.name.c_str(), unit.type, graphicId,
-                   graphic ? graphic->slp : -1);
+                   graphic ? graphic->slp : -1, graphic ? graphic->frameCount : 0,
+                   graphic ? graphic->angleCount : 0, graphic ? graphic->frameDuration : 0,
+                   graphic ? graphic->sequenceType : 0);
         }
         return 0;
 }
