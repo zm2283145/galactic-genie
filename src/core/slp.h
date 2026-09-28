@@ -40,7 +40,8 @@ public:
     bool parse(std::vector<uint8_t> data, std::string *err = nullptr);
     size_t frameCount() const { return frames_.size(); }
     const SlpFrameInfo &frame(size_t i) const { return frames_[i]; }
-    bool decode(size_t frame, SlpImage &out, std::string *err = nullptr) const;
+    bool decode(size_t frame, SlpImage &out, std::string *err = nullptr,
+                std::vector<uint8_t> *commandPalette = nullptr) const;
 
 private:
     std::vector<uint8_t> data_;

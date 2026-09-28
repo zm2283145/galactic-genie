@@ -2,7 +2,9 @@
 #include "game.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <map>
 
 namespace swgb {
 
@@ -21,6 +23,58 @@ struct SpriteDraw {
     Texture *tex;
     Quad q;
 };
+
+struct TerrainInfluence {
+    int terrain = 0;
+    uint8_t directions = 0;
+};
+
+int blendModeFor(int here, int there) {
+    static constexpr int modes[10][10] = {
+        {2, 3, 2, 1, 1, 6, 5, 4, 8, 9},
+        {3, 3, 3, 3, 3, 3, 3, 3, 3, 3},
+        {2, 3, 2, 1, 1, 6, 1, 4, 8, 9},
+        {1, 3, 1, 0, 7, 6, 5, 4, 10, 9},
+        {1, 3, 1, 7, 7, 6, 5, 4, 8, 9},
+        {6, 3, 6, 6, 6, 6, 5, 4, 8, 9},
+        {5, 3, 1, 5, 5, 5, 5, 4, 5, 9},
+        {4, 3, 4, 4, 4, 4, 4, 4, 4, 9},
+        {8, 3, 8, 10, 8, 8, 5, 4, 8, 10},
+        {9, 3, 9, 9, 9, 9, 9, 9, 10, 9},
+    };
+    here = std::max(0, std::min(9, here));
+    there = std::max(0, std::min(9, there));
+    return modes[here][there];
+}
+
+int blendMasksFor(uint8_t bits, int tx, int ty, std::array<int, 5> &masks) {
+    int count = 0, edge = -1;
+    switch (bits & 0xAA) {
+    case 0x08: edge = 0; break;
+    case 0x02: edge = 4; break;
+    case 0x20: edge = 8; break;
+    case 0x80: edge = 12; break;
+    case 0x22: edge = 20; break;
+    case 0x88: edge = 21; break;
+    case 0xA0: edge = 22; break;
+    case 0x82: edge = 23; break;
+    case 0x28: edge = 24; break;
+    case 0x0A: edge = 25; break;
+    case 0x2A: edge = 26; break;
+    case 0xA8: edge = 27; break;
+    case 0xA2: edge = 28; break;
+    case 0x8A: edge = 29; break;
+    case 0xAA: edge = 30; break;
+    }
+    if (edge >= 0) {
+        if (edge <= 12) edge += (tx + ty) & 3;
+        masks[count++] = edge;
+    }
+    static constexpr int cornerMasks[4] = {18, 16, 17, 19};
+    for (int i = 0; i < 4; i++)
+        if (bits & (1 << (i * 2))) masks[count++] = cornerMasks[i];
+    return count;
+}
 
 // Cheap deterministic value noise for map generation.
 float hash2(int x, int y, uint32_t seed) {
@@ -42,6 +96,19 @@ float valueNoise(float x, float y, uint32_t seed) {
 float fbm(float x, float y, uint32_t seed) {
     return valueNoise(x, y, seed) * 0.6f + valueNoise(x * 2.1f, y * 2.1f, seed + 17) * 0.3f +
            valueNoise(x * 4.3f, y * 4.3f, seed + 41) * 0.1f;
+}
+
+uint8_t slopeForCorners(uint8_t north, uint8_t east, uint8_t south, uint8_t west, uint8_t &base) {
+    base = std::min(std::min(north, east), std::min(south, west));
+    const uint8_t high = std::max(std::max(north, east), std::max(south, west));
+    if (high == base) return 0;
+    if (high != base + 1) return 0;
+    uint8_t bits = (north > base ? 1 : 0) | (east > base ? 2 : 0) |
+                   (south > base ? 4 : 0) | (west > base ? 8 : 0);
+    static constexpr uint8_t slopes[16] = {
+        0, 2, 4, 8, 1, 10, 7, 15, 3, 6, 12, 14, 5, 16, 13, 0,
+    };
+    return slopes[bits];
 }
 
 inline void toScreen(float x, float y, float &sx, float &sy) {
@@ -77,6 +144,9 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
 
 void Game::generateTerrain(int size) {
     terrain_.assign((size_t)size * size, T_GRASS1);
+    cornerElevation_.assign((size_t)(size + 1) * (size + 1), 0);
+    tileElevation_.assign((size_t)size * size, 0);
+    tileSlope_.assign((size_t)size * size, 0);
     uint32_t seed = rng_();
     for (int y = 0; y < size; y++) {
         for (int x = 0; x < size; x++) {
@@ -92,6 +162,44 @@ void Game::generateTerrain(int size) {
             terrain_[(size_t)y * size + x] = t;
         }
     }
+
+    // A deterministic two-level hill exercises every elevation-aware path in
+    // the prototype while leaving the generated terrain and base layout intact.
+    const float hillX = size * 0.30f - 7.0f;
+    const float hillY = size * 0.35f - 7.0f;
+    for (int y = 0; y <= size; y++) {
+        for (int x = 0; x <= size; x++) {
+            const float dx = x - hillX, dy = y - hillY;
+            const float distance = std::sqrt(dx * dx + dy * dy);
+            cornerElevation_[(size_t)y * (size + 1) + x] =
+                distance < 3.25f ? 2 : distance < 5.75f ? 1 : 0;
+        }
+    }
+    for (int y = 0; y < size; y++) {
+        for (int x = 0; x < size; x++) {
+            const uint8_t north = cornerElevation_[(size_t)y * (size + 1) + x];
+            const uint8_t east = cornerElevation_[(size_t)y * (size + 1) + x + 1];
+            const uint8_t south = cornerElevation_[(size_t)(y + 1) * (size + 1) + x + 1];
+            const uint8_t west = cornerElevation_[(size_t)(y + 1) * (size + 1) + x];
+            uint8_t &elevation = tileElevation_[(size_t)y * size + x];
+            tileSlope_[(size_t)y * size + x] = slopeForCorners(north, east, south, west, elevation);
+        }
+    }
+}
+
+float Game::elevationAt(float x, float y) const {
+    if (cornerElevation_.empty()) return 0;
+    int tx = std::max(0, std::min(mapSize_ - 1, (int)std::floor(x)));
+    int ty = std::max(0, std::min(mapSize_ - 1, (int)std::floor(y)));
+    float fx = std::max(0.0f, std::min(1.0f, x - tx));
+    float fy = std::max(0.0f, std::min(1.0f, y - ty));
+    const size_t stride = (size_t)mapSize_ + 1;
+    float north = cornerElevation_[(size_t)ty * stride + tx];
+    float east = cornerElevation_[(size_t)ty * stride + tx + 1];
+    float south = cornerElevation_[(size_t)(ty + 1) * stride + tx + 1];
+    float west = cornerElevation_[(size_t)(ty + 1) * stride + tx];
+    return north * (1 - fx) * (1 - fy) + east * fx * (1 - fy) +
+           south * fx * fy + west * (1 - fx) * fy;
 }
 
 const dat::Unit *Game::findUnit(int civ, const std::string &name) const {
@@ -312,24 +420,92 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     int y0 = std::max(0, (int)std::floor(*std::min_element(cy, cy + 4)) - 1);
     int y1 = std::min(mapSize_ - 1, (int)std::ceil(*std::max_element(cy, cy + 4)) + 1);
 
+    auto frameIndexFor = [](const SpriteSheet *sheet, int tx, int ty) -> size_t {
+        if (!sheet || sheet->frames.empty()) return 0;
+        int dim = (int)std::lround(std::sqrt((double)sheet->frames.size()));
+        if (dim < 1) dim = 1;
+        size_t index = (size_t)((tx % dim) + (ty % dim) * dim);
+        if (index >= sheet->frames.size()) index = 0;
+        return index;
+    };
+    static constexpr int neighborX[8] = {-1, 0, 1, 1, 1, 0, -1, -1};
+    static constexpr int neighborY[8] = {-1, -1, -1, 0, 1, 1, 1, 0};
+
     for (int ty = y0; ty <= y1; ty++) {
         for (int tx = x0; tx <= x1; tx++) {
             float sx, sy;
             toScreen((float)tx, (float)ty, sx, sy);
+            const size_t tileIndex = (size_t)ty * mapSize_ + tx;
+            const int slope = tileSlope_[tileIndex];
+            const int elevation = tileElevation_[tileIndex];
+            sy -= elevation * assets_.dat().terrainBlock.elevHeight;
             sx -= ox;
             sy -= oy;
-            if (sx + kTileHalfW < 0 || sx - kTileHalfW > viewW || sy > viewH || sy + 2 * kTileHalfH < 0) continue;
-            const dat::Terrain &t = terrains[terrainAt(tx, ty)];
-            const SpriteSheet *sh = assets_.terrainSheet(t.slp);
-            if (!sh || sh->frames.empty()) continue;
-            int dim = (int)std::lround(std::sqrt((double)sh->frames.size()));
-            if (dim < 1) dim = 1;
-            size_t fi = (size_t)((tx % dim) + (ty % dim) * dim);
-            if (fi >= sh->frames.size()) fi = 0;
-            const SpriteFrame &f = sh->frames[fi];
-            Quad q{sx - kTileHalfW, sy, (float)f.w, (float)f.h, f.u, f.v, f.u + f.w, f.v + f.h};
+            if (sx + kTileHalfW < 0 || sx - kTileHalfW > viewW || sy > viewH + 48 || sy + 3 * kTileHalfH < 0)
+                continue;
+            const int terrainId = terrainAt(tx, ty);
+            const dat::Terrain &t = terrains[terrainId];
+            const SpriteSheet *flatBase = assets_.terrainSheet(t.slp);
+            const size_t terrainFrame = frameIndexFor(flatBase, tx, ty);
+            const SpriteFrame *baseFrame = assets_.terrainSlopeFrame(t.slp, slope, terrainFrame);
+            if (!baseFrame) continue;
+            const SpriteFrame &f = *baseFrame;
+            const int deltaY = slope < (int)assets_.dat().terrainBlock.tileSizes.size()
+                                   ? assets_.dat().terrainBlock.tileSizes[(size_t)slope].deltaY
+                                   : 0;
+            const float tileY = sy - deltaY - (slope ? 12.0f : 0.0f);
+            Quad q{sx - kTileHalfW, tileY, (float)f.w, (float)f.h, f.u, f.v, f.u + f.w, f.v + f.h};
             r.draw(f.tex, q);
             stats_.tiles++;
+
+            if (!assets_.hasBlendMasks()) continue;
+            std::array<int, 8> neighbors;
+            neighbors.fill(-1);
+            auto influences = [&](int direction) {
+                int nx = tx + neighborX[direction], ny = ty + neighborY[direction];
+                if (nx < 0 || ny < 0 || nx >= mapSize_ || ny >= mapSize_) return false;
+                int id = terrainAt(nx, ny);
+                neighbors[direction] = id;
+                return id != terrainId && (size_t)id < terrains.size() &&
+                       terrains[id].blendPriority > t.blendPriority;
+            };
+            std::array<bool, 8> active;
+            for (int i = 0; i < 8; i++) active[i] = influences(i);
+
+            std::map<int, uint8_t> grouped;
+            for (int i = 0; i < 8; i++) {
+                if (!active[i]) continue;
+                if ((i & 1) == 0 && (active[(i + 7) & 7] || active[(i + 1) & 7])) continue;
+                grouped[neighbors[i]] |= (uint8_t)(1u << i);
+            }
+            std::vector<TerrainInfluence> ordered;
+            ordered.reserve(grouped.size());
+            for (const auto &entry : grouped) ordered.push_back({entry.first, entry.second});
+            std::sort(ordered.begin(), ordered.end(), [&](const TerrainInfluence &a, const TerrainInfluence &b) {
+                int ap = terrains[a.terrain].blendPriority, bp = terrains[b.terrain].blendPriority;
+                return ap != bp ? ap < bp : a.terrain < b.terrain;
+            });
+
+            for (const TerrainInfluence &influence : ordered) {
+                const dat::Terrain &overlayTerrain = terrains[influence.terrain];
+                const SpriteSheet *flatOverlay = assets_.terrainSheet(overlayTerrain.slp);
+                const size_t overlayFrame = frameIndexFor(flatOverlay, tx, ty);
+                const SpriteFrame *overlay =
+                    assets_.terrainSlopeFrame(overlayTerrain.slp, slope, overlayFrame);
+                if (!overlay) continue;
+                Quad overlayQ{sx - kTileHalfW, tileY, (float)overlay->w, (float)overlay->h,
+                              overlay->u, overlay->v, overlay->u + overlay->w, overlay->v + overlay->h};
+                std::array<int, 5> maskIds;
+                int maskCount = blendMasksFor(influence.directions, tx, ty, maskIds);
+                int mode = blendModeFor(t.blendType, overlayTerrain.blendType);
+                for (int i = 0; i < maskCount; i++) {
+                    const SpriteFrame *mask = assets_.blendMask(mode, maskIds[i]);
+                    if (!mask) continue;
+                    Quad maskQ{0, 0, (float)mask->w, (float)mask->h,
+                               mask->u, mask->v, mask->u + mask->w, mask->v + mask->h};
+                    r.drawMasked(overlay->tex, overlayQ, mask->tex, maskQ);
+                }
+            }
         }
     }
 
@@ -338,6 +514,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     for (const Object &o : objects_) {
         float sx, sy;
         toScreen(o.x, o.y, sx, sy);
+        sy -= elevationAt(o.x, o.y) * assets_.dat().terrainBlock.elevHeight;
         sx -= ox;
         sy -= oy;
         if (sx < -400 || sx > viewW + 400 || sy < -100 || sy > viewH + 500) continue;

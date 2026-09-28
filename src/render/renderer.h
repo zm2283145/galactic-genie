@@ -24,10 +24,13 @@ public:
 
     // rgba: width*height*4 bytes, tightly packed, straight alpha.
     virtual Texture *createTexture(int width, int height, const uint8_t *rgba) = 0;
+    // alpha: width*height bytes. Sampling yields white RGB and the stored alpha.
+    virtual Texture *createMaskTexture(int width, int height, const uint8_t *alpha) = 0;
     virtual void destroyTexture(Texture *t) = 0;
 
     virtual void beginFrame(int screenW, int screenH, float scale, uint8_t r, uint8_t g, uint8_t b) = 0;
     virtual void draw(Texture *tex, const Quad &q) = 0;
+    virtual void drawMasked(Texture *tex, const Quad &q, Texture *mask, const Quad &maskQ) = 0;
     virtual void fillRect(float x, float y, float w, float h, uint8_t r, uint8_t g, uint8_t b, uint8_t a) = 0;
     virtual void endFrame() = 0;
 };

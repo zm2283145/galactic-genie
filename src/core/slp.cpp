@@ -47,7 +47,7 @@ bool Slp::parse(std::vector<uint8_t> data, std::string *err) {
     return true;
 }
 
-bool Slp::decode(size_t fi, SlpImage &out, std::string *err) const {
+bool Slp::decode(size_t fi, SlpImage &out, std::string *err, std::vector<uint8_t> *commandPalette) const {
     if (fi >= frames_.size()) {
         if (err) *err = "frame out of range";
         return false;
@@ -60,6 +60,7 @@ bool Slp::decode(size_t fi, SlpImage &out, std::string *err) const {
     const size_t npx = (size_t)f.width * f.height;
     out.kind.assign(npx, PX_TRANSPARENT);
     out.index.assign(npx, 0);
+    if (commandPalette) commandPalette->clear();
 
     try {
         ByteReader edges(data_);
@@ -67,6 +68,9 @@ bool Slp::decode(size_t fi, SlpImage &out, std::string *err) const {
         ByteReader cmds(data_);
         ByteReader rowOffsets(data_);
         rowOffsets.seek(f.cmdTableOffset);
+        ByteReader firstRow(data_);
+        firstRow.seek(f.cmdTableOffset);
+        const uint32_t commandBase = f.height > 0 ? firstRow.u32() : 0;
 
         for (int32_t y = 0; y < f.height; y++) {
             uint16_t left = edges.u16();
@@ -89,6 +93,17 @@ bool Slp::decode(size_t fi, SlpImage &out, std::string *err) const {
                 uint32_t c = cmd >> shift;
                 return c ? c : cmds.u8();
             };
+            auto paletteByte = [&]() {
+                size_t offset = cmds.pos();
+                uint8_t value = cmds.u8();
+                if (commandPalette) {
+                    if (offset < commandBase) throw FormatError("SLP command precedes first terrain row");
+                    size_t relative = offset - commandBase;
+                    if (commandPalette->size() <= relative) commandPalette->resize(relative + 1);
+                    (*commandPalette)[relative] = value;
+                }
+                return value;
+            };
 
             for (;;) {
                 uint8_t cmd = cmds.u8();
@@ -96,7 +111,7 @@ bool Slp::decode(size_t fi, SlpImage &out, std::string *err) const {
                 switch (cmd & 0x03) {
                 case 0x00: { // lesser draw
                     uint32_t c = cmd >> 2;
-                    for (uint32_t i = 0; i < c; i++) put(PX_COLOR, cmds.u8());
+                    for (uint32_t i = 0; i < c; i++) put(PX_COLOR, paletteByte());
                     continue;
                 }
                 case 0x01: { // lesser skip
@@ -108,7 +123,7 @@ bool Slp::decode(size_t fi, SlpImage &out, std::string *err) const {
                 switch (cmd & 0x0F) {
                 case 0x02: { // greater draw
                     uint32_t c = ((cmd & 0xF0u) << 4) + cmds.u8();
-                    for (uint32_t i = 0; i < c; i++) put(PX_COLOR, cmds.u8());
+                    for (uint32_t i = 0; i < c; i++) put(PX_COLOR, paletteByte());
                     break;
                 }
                 case 0x03: { // greater skip
@@ -117,18 +132,18 @@ bool Slp::decode(size_t fi, SlpImage &out, std::string *err) const {
                 }
                 case 0x06: { // player color draw
                     uint32_t c = countOrNext(cmd, 4);
-                    for (uint32_t i = 0; i < c; i++) put(PX_PLAYER, cmds.u8());
+                    for (uint32_t i = 0; i < c; i++) put(PX_PLAYER, paletteByte());
                     break;
                 }
                 case 0x07: { // fill
                     uint32_t c = countOrNext(cmd, 4);
-                    uint8_t v = cmds.u8();
+                    uint8_t v = paletteByte();
                     for (uint32_t i = 0; i < c; i++) put(PX_COLOR, v);
                     break;
                 }
                 case 0x0A: { // fill player color
                     uint32_t c = countOrNext(cmd, 4);
-                    uint8_t v = cmds.u8();
+                    uint8_t v = paletteByte();
                     for (uint32_t i = 0; i < c; i++) put(PX_PLAYER, v);
                     break;
                 }

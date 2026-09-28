@@ -13,6 +13,7 @@ namespace swgb {
 namespace {
 struct SoftTexture : Texture {
     std::vector<uint8_t> px;
+    bool alphaOnly = false;
 };
 } // namespace
 
@@ -25,6 +26,15 @@ Texture *SoftRenderer::createTexture(int width, int height, const uint8_t *rgba)
     t->width = width;
     t->height = height;
     t->px.assign(rgba, rgba + (size_t)width * height * 4);
+    return t;
+}
+
+Texture *SoftRenderer::createMaskTexture(int width, int height, const uint8_t *alpha) {
+    auto *t = new SoftTexture();
+    t->width = width;
+    t->height = height;
+    t->alphaOnly = true;
+    t->px.assign(alpha, alpha + (size_t)width * height);
     return t;
 }
 
@@ -73,6 +83,35 @@ void SoftRenderer::draw(Texture *tex, const Quad &q) {
             int tu = (int)std::floor(u);
             if (tu < 0 || tu >= t->width) continue;
             blend(drow + x * 4, srow + tu * 4);
+        }
+    }
+}
+
+void SoftRenderer::drawMasked(Texture *tex, const Quad &q, Texture *mask, const Quad &maskQ) {
+    drawCalls_++;
+    auto *t = static_cast<SoftTexture *>(tex);
+    auto *m = static_cast<SoftTexture *>(mask);
+    float x0 = q.x * scale_, y0 = q.y * scale_, x1 = (q.x + q.w) * scale_, y1 = (q.y + q.h) * scale_;
+    int ix0 = std::max(0, (int)std::floor(x0)), iy0 = std::max(0, (int)std::floor(y0));
+    int ix1 = std::min(w_, (int)std::ceil(x1)), iy1 = std::min(h_, (int)std::ceil(y1));
+    if (ix0 >= ix1 || iy0 >= iy1) return;
+    float du = (q.u1 - q.u0) / (x1 - x0), dv = (q.v1 - q.v0) / (y1 - y0);
+    float dmu = (maskQ.u1 - maskQ.u0) / (x1 - x0), dmv = (maskQ.v1 - maskQ.v0) / (y1 - y0);
+    for (int y = iy0; y < iy1; y++) {
+        int tv = (int)std::floor(q.v0 + (y + 0.5f - y0) * dv);
+        int mv = (int)std::floor(maskQ.v0 + (y + 0.5f - y0) * dmv);
+        if (tv < 0 || tv >= t->height || mv < 0 || mv >= m->height) continue;
+        uint8_t *drow = &fb_[((size_t)y * w_) * 4];
+        const uint8_t *srow = &t->px[(size_t)tv * t->width * 4];
+        const uint8_t *mrow = &m->px[(size_t)mv * m->width];
+        for (int x = ix0; x < ix1; x++) {
+            int tu = (int)std::floor(q.u0 + (x + 0.5f - x0) * du);
+            int mu = (int)std::floor(maskQ.u0 + (x + 0.5f - x0) * dmu);
+            if (tu < 0 || tu >= t->width || mu < 0 || mu >= m->width) continue;
+            const uint8_t *source = srow + tu * 4;
+            uint8_t masked[4] = {source[0], source[1], source[2],
+                                 (uint8_t)((unsigned)source[3] * mrow[mu] / 255)};
+            blend(drow + x * 4, masked);
         }
     }
 }

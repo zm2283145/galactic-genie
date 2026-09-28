@@ -66,6 +66,7 @@ private:
     Object *spawn(int civ, const std::string &name, int player, float x, float y, float facing);
     int playerColorBase(int player) const;
     int terrainAt(int x, int y) const { return terrain_[(size_t)y * mapSize_ + x]; }
+    float elevationAt(float x, float y) const;
 
     void drawGraphic(Renderer &r, int graphicId, float sx, float sy, float facing, float animTime, int player,
                      int depth);
@@ -74,6 +75,9 @@ private:
     std::mt19937 rng_;
     int mapSize_ = 0;
     std::vector<uint8_t> terrain_;
+    std::vector<uint8_t> cornerElevation_;
+    std::vector<uint8_t> tileElevation_;
+    std::vector<uint8_t> tileSlope_;
     std::vector<Object> objects_;
     float camX_ = 0, camY_ = 0; // world-pixel position of the screen centre
     float zoom_ = 1.0f;

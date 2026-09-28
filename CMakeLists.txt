@@ -11,7 +11,9 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 set(SWGB_CORE_SOURCES
+    src/core/blendomatic.cpp
     src/core/drs.cpp
+    src/core/elevation.cpp
     src/core/palette.cpp
     src/core/slp.cpp
     src/core/genie_dat.cpp

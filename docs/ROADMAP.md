@@ -7,8 +7,10 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 - Terrain and sprite rendering, animated units, a camera, and the Vita build.
 
 ## Milestone 2: map and visual fidelity
-- Terrain blending with `blendomatic.dat` (blend modes per terrain `blendType`, priority from `blendPriority`).
-- Elevation: the 19 tile types and `LoQMaps`/`lightMaps` shading.
+- Terrain blending with `blendomatic.dat` (including SWGB's 11 modes, terrain `blendType` lookup and `blendPriority`) (done).
+- Elevation: all 17 rendered slope shapes, high-quality `FilterMaps` resampling, tile/object height
+  placement, and a memory-bounded per-frame slope cache are done. Neighbor-sensitive
+  `PatternMasks`/`lightMaps` shading and exact slope-deformed blend masks remain.
 - Cliffs, trees and gaia resources (carbon, ore, nova, fruit, animals).
 - Scenario (`.scx`) loader, so real maps can be shown instead of the procedural test map.
 - Fog of war and explored/visible tile state.

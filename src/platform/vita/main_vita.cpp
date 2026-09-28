@@ -16,9 +16,10 @@
 #include <memory>
 #include <string>
 
-// Same heap budget as the other vitaGL ports on this setup; needs the
-// unsafe (full permission) self and -pm 0x2000000 set in CMake.
-int _newlib_heap_size_user = 256 * 1024 * 1024;
+// Leave enough of the 256 MiB game partition for the executable, runtime
+// modules and allocations made before main(). A 256 MiB newlib heap exhausts
+// the partition during vitaGL's static initialization.
+int _newlib_heap_size_user = 192 * 1024 * 1024;
 
 namespace {
 
@@ -152,9 +153,9 @@ int main() {
 
             frames++;
             if (now - statT >= 5000000) {
-                logf("fps=%.1f draws=%d quads=%d tiles=%d sprites=%d sheets=%zu tex=%.1fMB zoom=%.2f",
+                logf("fps=%.1f draws=%d quads=%d tiles=%d sprites=%d sheets=%u tex=%.1fMB zoom=%.2f",
                      frames * 1e6 / (double)(now - statT), renderer.drawCalls(), renderer.quads(),
-                     game.stats().tiles, game.stats().sprites, assets.sheetCount(),
+                     game.stats().tiles, game.stats().sprites, (unsigned)assets.sheetCount(),
                      assets.textureBytes() / 1048576.0, game.zoom());
                 frames = 0;
                 statT = now;

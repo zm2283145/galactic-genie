@@ -51,7 +51,8 @@ Ftp-MkDir "ux0:/data/swgb"
 if ($GameData) {
     Ftp-MkDir "ux0:/data/swgb/Data"
     $files = "genie_x1.dat", "GRAPHICS.DRS", "graphics_x1.drs", "TERRAIN.DRS", "terrain_x1.drs",
-             "INTERFAC.DRS", "interfac_x1.drs", "blendomatic.dat"
+             "INTERFAC.DRS", "interfac_x1.drs", "blendomatic.dat", "STemplet.dat", "FilterMaps.dat",
+             "VIEW_ICM.DAT"
     foreach ($f in $files) { Ftp-Put (Join-Path $GameDir $f) "ux0:/data/swgb/Data/$($f.ToLower())" }
 }
 if ($Vpk) { Ftp-Put (Join-Path $repo "build-vita\swgb.vpk") "ux0:/data/swgb/swgb.vpk" }
