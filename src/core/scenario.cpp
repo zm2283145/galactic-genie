@@ -91,7 +91,12 @@ void skipPlayerData(ByteReader &reader, Scenario &scenario) {
     if (versionAbove(version, 1.13f)) {
         reader.skip(kPlayers * 256);
         if (versionAbove(version, 1.15f)) reader.skip(kPlayers * 4);
-        reader.skip(kPlayers * 4 * 4);
+        for (size_t i = 0; i < kPlayers; i++) {
+            reader.u32();
+            reader.u32();
+            scenario.civilizations[i] = reader.u32();
+            reader.u32();
+        }
     }
     if (versionAbove(version, 1.06f)) reader.u8();
     skipTimeline(reader);
@@ -157,11 +162,57 @@ void skipPlayerData(ByteReader &reader, Scenario &scenario) {
     if (versionAbove(version, 1.05f)) reader.skip(kPlayers * 4);
     if (versionAbove(version, 1.01f)) expectSeparator(reader, "camera");
     if (versionAbove(version, 1.18f)) {
-        scenario.cameraX = reader.i32();
-        scenario.cameraY = reader.i32();
+        scenario.cameraX = (float)reader.i32();
+        scenario.cameraY = (float)reader.i32();
     }
     if (versionAbove(version, 1.2f)) reader.i32();
     if (versionAbove(version, 1.23f)) reader.skip(kPlayers);
+}
+
+void readScenarioObjects(ByteReader &reader, Scenario &scenario) {
+    const uint32_t playerBlocks = reader.u32();
+    if (!playerBlocks || playerBlocks > 16) throw FormatError("invalid scenario player-unit block count");
+
+    // SWGB SCX 1.21 uses internal scenario version 1.15: food, carbon,
+    // nova, ore, an additional ore slot, and population limit.
+    reader.skip(8 * 6 * sizeof(float));
+
+    scenario.units.clear();
+    for (uint32_t player = 0; player < playerBlocks; player++) {
+        const uint32_t unitCount = reader.u32();
+        if (unitCount > 20000) throw FormatError("scenario player contains too many units");
+        if (unitCount > std::numeric_limits<size_t>::max() - scenario.units.size())
+            throw FormatError("scenario unit count overflow");
+        scenario.units.reserve(scenario.units.size() + unitCount);
+        for (uint32_t i = 0; i < unitCount; i++) {
+            ScenarioUnit unit;
+            unit.x = reader.f32();
+            unit.y = reader.f32();
+            unit.z = reader.f32();
+            unit.spawnId = reader.u32();
+            unit.unitId = reader.u16();
+            unit.state = reader.u8();
+            unit.rotation = reader.f32();
+            unit.initialFrame = reader.u16();
+            unit.garrisonedInId = reader.i32();
+            unit.player = (uint8_t)player;
+            if (!std::isfinite(unit.x) || !std::isfinite(unit.y) || !std::isfinite(unit.z) ||
+                !std::isfinite(unit.rotation))
+                throw FormatError("scenario unit has a non-finite value");
+            scenario.units.push_back(unit);
+        }
+    }
+
+    const uint32_t playerCount = reader.u32();
+    if (!playerCount || playerCount > 16) throw FormatError("invalid secondary scenario player count");
+    const uint16_t playerNameLength = reader.u16();
+    reader.skip(playerNameLength);
+    const float cameraX = reader.f32();
+    const float cameraY = reader.f32();
+    if (std::isfinite(cameraX) && std::isfinite(cameraY) && cameraX >= 0 && cameraY >= 0) {
+        scenario.cameraX = cameraX;
+        scenario.cameraY = cameraY;
+    }
 }
 
 } // namespace
@@ -206,6 +257,7 @@ bool Scenario::load(const std::vector<uint8_t> &scx, std::string *err) {
             const uint8_t unused = reader.u8();
             if (unused != 0) throw FormatError("nonzero scenario map tile padding");
         }
+        readScenarioObjects(reader, *this);
     } catch (const std::exception &e) {
         if (err) *err = std::string("invalid SCX: ") + e.what();
         *this = Scenario{};

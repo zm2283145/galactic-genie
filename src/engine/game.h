@@ -60,12 +60,14 @@ private:
         float stateTime = 0;
         float targetX = 0, targetY = 0;
         float homeX = 0, homeY = 0;
+        bool wander = true;
     };
 
     void generateTerrain(int size);
     void buildTileElevation();
     void spawnBase(int player, int civ, char civLetter, float cx, float cy);
     const dat::Unit *findUnit(int civ, const std::string &name) const;
+    const dat::Unit *findUnit(int civ, int id) const;
     Object *spawn(int civ, const std::string &name, int player, float x, float y, float facing);
     int playerColorBase(int player) const;
     int terrainAt(int x, int y) const { return terrain_[(size_t)y * mapSize_ + x]; }

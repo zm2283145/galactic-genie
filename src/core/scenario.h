@@ -2,6 +2,7 @@
 // SWGB scenario header and terrain-map reader.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -19,6 +20,19 @@ struct ScenarioMap {
     std::vector<ScenarioTile> tiles;
 };
 
+struct ScenarioUnit {
+    float x = 0;
+    float y = 0;
+    float z = 0;
+    uint32_t spawnId = 0;
+    uint16_t unitId = 0;
+    uint8_t state = 0;
+    float rotation = 0;
+    uint16_t initialFrame = 0;
+    int32_t garrisonedInId = -1;
+    uint8_t player = 0;
+};
+
 struct Scenario {
     std::string version;
     int32_t saveType = 0;
@@ -31,9 +45,11 @@ struct Scenario {
     std::string originalFilename;
     std::string hints;
     std::string scouts;
-    int32_t cameraX = -1;
-    int32_t cameraY = -1;
+    float cameraX = -1;
+    float cameraY = -1;
+    std::array<uint32_t, 16> civilizations{};
     ScenarioMap map;
+    std::vector<ScenarioUnit> units;
 
     bool load(const std::vector<uint8_t> &scx, std::string *err = nullptr);
 };

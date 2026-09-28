@@ -117,8 +117,9 @@ int main() {
             sceKernelExitProcess(0);
             return 0;
         }
-        logf("scenario %s loaded: %ux%u, player data %.2f", scenario.originalFilename.c_str(),
-             (unsigned)scenario.map.width, (unsigned)scenario.map.height, scenario.playerDataVersion);
+        logf("scenario %s loaded: %ux%u, %u units, player data %.2f", scenario.originalFilename.c_str(),
+             (unsigned)scenario.map.width, (unsigned)scenario.map.height, (unsigned)scenario.units.size(),
+             scenario.playerDataVersion);
 
         swgb::Game game(assets);
         if (!game.initScenario(scenario, &err)) {

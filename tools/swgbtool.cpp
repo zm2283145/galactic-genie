@@ -26,13 +26,16 @@ static int usage() {
     fprintf(stderr,
             "usage:\n"
             "  swgbtool info   <DataDir>\n"
+            "  swgbtool terrain <DataDir> <terrainId>\n"
+            "  swgbtool unit <DataDir> <unitId>\n"
             "  swgbtool drs    <file.drs>\n"
             "  swgbtool slp    <DataDir> <slpId> <out.png> [playerBase]\n"
             "  swgbtool slopes <DataDir> <slpId> <out.png> [frame]\n"
             "  swgbtool render <DataDir> <out.png> [seed] [seconds] [zoom]\n"
             "  swgbtool campaign <file.cpx>\n"
             "  swgbtool scenario <file.cpx> <entry>\n"
-            "  swgbtool render-scenario <DataDir> <file.cpx> <entry> <out.png> [x] [y] [zoom]\n");
+            "  swgbtool render-scenario <DataDir> <file.cpx> <entry> <out.png> [x] [y] [zoom]\n"
+            "  swgbtool stress-scenario <DataDir> <file.cpx> <entry>\n");
     return 2;
 }
 
@@ -73,8 +76,49 @@ static int cmdInfo(const char *dataDir) {
             printf("  terrain %zu %-16s blend type %d, priority %d\n", i, terrain.name2.c_str(),
                    terrain.blendType, terrain.blendPriority);
     }
-
     return 0;
+}
+
+static int cmdTerrain(const char *dataDir, int id) {
+        SoftRenderer renderer;
+        Assets assets(&renderer);
+        std::string err;
+        if (!assets.init(dataDir, &err)) {
+            fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+        const auto &terrains = assets.dat().terrainBlock.terrains;
+        if (id < 0 || (size_t)id >= terrains.size()) {
+            fprintf(stderr, "error: terrain ID out of range\n");
+            return 1;
+        }
+        const auto &terrain = terrains[(size_t)id];
+        printf("terrain %d: '%s' / '%s', slp %d, draw %d, blend type %d, priority %d, dimensions %dx%d\n",
+               id, terrain.name.c_str(), terrain.name2.c_str(), terrain.slp, terrain.terrainToDraw,
+               terrain.blendType, terrain.blendPriority, terrain.terrainDimensions[0],
+               terrain.terrainDimensions[1]);
+        return 0;
+}
+
+static int cmdUnit(const char *dataDir, int id) {
+        SoftRenderer renderer;
+        Assets assets(&renderer);
+        std::string err;
+        if (!assets.init(dataDir, &err)) {
+            fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+        for (size_t civ = 0; civ < assets.dat().civs.size(); civ++) {
+            const auto &units = assets.dat().civs[civ].units;
+            if (id < 0 || (size_t)id >= units.size() || !units[(size_t)id].exists) continue;
+            const auto &unit = units[(size_t)id];
+            const int graphicId = unit.standingGraphic[0];
+            const auto *graphic = assets.dat().graphic(graphicId);
+            printf("civ %zu %-24s unit '%s', type %u, graphic %d, slp %d\n", civ,
+                   assets.dat().civs[civ].name.c_str(), unit.name.c_str(), unit.type, graphicId,
+                   graphic ? graphic->slp : -1);
+        }
+        return 0;
 }
 
 static int cmdDrs(const char *path) {
@@ -130,10 +174,11 @@ static int cmdScenario(const char *path, int entryNumber) {
         fprintf(stderr, "error: %s\n", err.c_str());
         return 1;
     }
-    printf("%s: SCX %s, player data %.2f, %ux%u map, %u players, next unit %u\n",
+    printf("%s: SCX %s, player data %.2f, %ux%u map, %u players, %zu units, next unit %u\n",
            scenario.originalFilename.c_str(), scenario.version.c_str(), scenario.playerDataVersion,
-           scenario.map.width, scenario.map.height, scenario.enabledPlayerCount, scenario.nextUnitId);
-    printf("camera %d,%d\n", scenario.cameraX, scenario.cameraY);
+           scenario.map.width, scenario.map.height, scenario.enabledPlayerCount, scenario.units.size(),
+           scenario.nextUnitId);
+    printf("camera %.1f,%.1f\n", scenario.cameraX, scenario.cameraY);
     printf("instructions: %s\n", scenario.instructions.c_str());
     return 0;
 }
@@ -257,6 +302,48 @@ static int cmdRenderScenario(const char *dataDir, const char *campaignPath, int 
     return 0;
 }
 
+static int cmdStressScenario(const char *dataDir, const char *campaignPath, int entryNumber) {
+    Scenario scenario;
+    std::string err;
+    if (!loadScenario(campaignPath, entryNumber, scenario, err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    Game game(assets);
+    if (!game.initScenario(scenario, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    game.setZoom(0.4f);
+    constexpr int steps = 5;
+    size_t peakBytes = 0, peakSheets = 0;
+    for (int row = 0; row < steps; row++) {
+        for (int column = 0; column < steps; column++) {
+            const int orderedColumn = row & 1 ? steps - 1 - column : column;
+            const float x = 12.0f + orderedColumn * (scenario.map.width - 24.0f) / (steps - 1);
+            const float y = 12.0f + row * (scenario.map.height - 24.0f) / (steps - 1);
+            game.lookAt(x, y);
+            game.render(renderer, 960, 544);
+            peakBytes = std::max(peakBytes, assets.textureBytes());
+            peakSheets = std::max(peakSheets, assets.sheetCount());
+        }
+    }
+    printf("stress rendered %d views: final %.1f MB/%zu sheets, peak %.1f MB/%zu sheets\n",
+           steps * steps, assets.textureBytes() / 1048576.0, assets.sheetCount(),
+           peakBytes / 1048576.0, peakSheets);
+    if (peakBytes > 70u * 1024u * 1024u) {
+        fprintf(stderr, "error: terrain texture cache exceeded stress limit\n");
+        return 1;
+    }
+    return 0;
+}
+
 // Renders one graphic at 8 world facings (0 = +x, then +45 deg steps) in a row.
 static int cmdAngles(const char *dataDir, int gid, const char *out) {
     SoftRenderer r;
@@ -286,6 +373,8 @@ int main(int argc, char **argv) {
     if (argc < 3) return usage();
     const char *cmd = argv[1];
     if (!strcmp(cmd, "info")) return cmdInfo(argv[2]);
+    if (!strcmp(cmd, "terrain") && argc >= 4) return cmdTerrain(argv[2], atoi(argv[3]));
+    if (!strcmp(cmd, "unit") && argc >= 4) return cmdUnit(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "drs")) return cmdDrs(argv[2]);
     if (!strcmp(cmd, "campaign")) return cmdCampaign(argv[2]);
     if (!strcmp(cmd, "scenario") && argc >= 4) return cmdScenario(argv[2], atoi(argv[3]));
@@ -301,5 +390,7 @@ int main(int argc, char **argv) {
                                  argc > 6 ? (float)atof(argv[6]) : -1.0f,
                                  argc > 7 ? (float)atof(argv[7]) : -1.0f,
                                  argc > 8 ? (float)atof(argv[8]) : 0.4f);
+    if (!strcmp(cmd, "stress-scenario") && argc >= 5)
+        return cmdStressScenario(argv[2], argv[3], atoi(argv[4]));
     return usage();
 }

@@ -14,7 +14,9 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 - Cliffs, trees and gaia resources (carbon, ore, nova, fruit, animals).
 - CPX campaign archive and SCX terrain/elevation loading are done. The Vita vertical slice now opens
   Galactic Empire mission 2, “Breaking Bread,” directly from the original `XCAM3.CPX`.
-- Scenario units, player initialization, triggers, objectives, and campaign progression.
+- Initial scenario objects and the saved camera are loaded, including trees, resources, buildings, and
+  units. Terrain aliases and civilization-specific farm terrain are resolved from the original data.
+- Player resources/state, triggers, objectives, scripted behavior, and campaign progression.
 - Fog of war and explored/visible tile state.
 - Shadow and player-outline passes (PX_OUTLINE pixels drawn only when occluded).
 
@@ -38,7 +40,9 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 - A skirmish setup screen, and victory/defeat conditions.
 
 ## Vita performance notes
-- The main memory cost is texture atlases (about 27 MB for the test scene). Plan: evict unused SLP sheets with an LRU cache, and consider 8-bit paletted textures with a palette shader to cut memory by 4x.
+- The main memory cost is texture atlases. Terrain and sprite working sets are capped at 64 MB,
+  stale sheets are evicted before cache misses, and atlas widths adapt to their actual contents.
+  An 8-bit paletted texture path could reduce this further.
 - Terrain tiles are batched by terrain type, and sprites are batched by atlas page after depth sort.
 - The dat parses in well under a second on PC; measure on hardware (the log reports load time and FPS).
 

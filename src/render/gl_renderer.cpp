@@ -25,6 +25,7 @@ GlRenderer::GlRenderer() {
 GlRenderer::~GlRenderer() { destroyTexture(white_); }
 
 Texture *GlRenderer::createTexture(int width, int height, const uint8_t *rgba) {
+    while (glGetError() != GL_NO_ERROR) {}
     auto *t = new GlTexture();
     t->width = width;
     t->height = height;
@@ -37,11 +38,17 @@ Texture *GlRenderer::createTexture(int width, int height, const uint8_t *rgba) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    if (!t->id || glGetError() != GL_NO_ERROR) {
+        if (t->id) glDeleteTextures(1, &t->id);
+        delete t;
+        return nullptr;
+    }
     current_ = nullptr; // binding changed
     return t;
 }
 
 Texture *GlRenderer::createMaskTexture(int width, int height, const uint8_t *alpha) {
+    while (glGetError() != GL_NO_ERROR) {}
     auto *t = new GlTexture();
     t->width = width;
     t->height = height;
@@ -54,6 +61,11 @@ Texture *GlRenderer::createMaskTexture(int width, int height, const uint8_t *alp
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, width, height, 0, GL_ALPHA, GL_UNSIGNED_BYTE, alpha);
+    if (!t->id || glGetError() != GL_NO_ERROR) {
+        if (t->id) glDeleteTextures(1, &t->id);
+        delete t;
+        return nullptr;
+    }
     current_ = currentMask_ = nullptr;
     return t;
 }

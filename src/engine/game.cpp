@@ -15,7 +15,8 @@ constexpr float kPi = 3.14159265358979f;
 // Terrain ids from genie_x1.dat's terrain table.
 enum : uint8_t {
     T_GRASS1 = 0, T_WATER1 = 1, T_SHORE = 2, T_DIRT3 = 3, T_DIRT1 = 6, T_GRASS3 = 9,
-    T_DIRT2 = 11, T_GRASS2 = 12, T_SAND = 14, T_WATER2 = 22, T_WATER3 = 23,
+    T_FARM = 7, T_DIRT2 = 11, T_GRASS2 = 12, T_SAND = 14, T_WATER2 = 22, T_WATER3 = 23,
+    T_FARM_GUNGAN = 48,
 };
 
 struct SpriteDraw {
@@ -111,6 +112,16 @@ uint8_t slopeForCorners(uint8_t north, uint8_t east, uint8_t south, uint8_t west
     return slopes[bits];
 }
 
+const dat::Terrain &drawTerrain(const std::vector<dat::Terrain> &terrains, int id) {
+    const dat::Terrain *terrain = &terrains[(size_t)id];
+    for (size_t depth = 0; depth < terrains.size(); depth++) {
+        const int alias = terrain->terrainToDraw;
+        if (alias < 0 || (size_t)alias >= terrains.size() || &terrains[(size_t)alias] == terrain) break;
+        terrain = &terrains[(size_t)alias];
+    }
+    return *terrain;
+}
+
 inline void toScreen(float x, float y, float &sx, float &sy) {
     sx = (x - y) * Game::kTileHalfW;
     sy = (x + y) * Game::kTileHalfH;
@@ -165,6 +176,28 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     terrain_.resize(scenario.map.tiles.size());
     for (size_t i = 0; i < scenario.map.tiles.size(); i++) terrain_[i] = scenario.map.tiles[i].terrain;
 
+    // Player-unit block 0 is Gaia; block N belongs to player N and uses
+    // player-info entry N-1. Gungans are the only civilization with their
+    // own garden terrain. Scenario saves can retain TERR-FARMG for every
+    // garden, so normalize it when the map has no Gungan player.
+    auto civilizationFor = [&](uint8_t player) -> int {
+        if (player == 0) return 0;
+        const size_t index = (size_t)player - 1;
+        return index < scenario.civilizations.size() ? (int)scenario.civilizations[index] : -1;
+    };
+    for (const ScenarioUnit &unit : scenario.units) {
+        if (unit.unitId != 50) continue; // BLDG-GARDEN
+        const uint8_t farmTerrain = civilizationFor(unit.player) == 2 ? T_FARM_GUNGAN : T_FARM;
+        const int centerX = (int)std::floor(unit.x);
+        const int centerY = (int)std::floor(unit.y);
+        for (int y = centerY - 1; y <= centerY + 1; y++)
+            for (int x = centerX - 1; x <= centerX + 1; x++) {
+                if (x < 0 || y < 0 || x >= mapSize_ || y >= mapSize_) continue;
+                uint8_t &terrain = terrain_[(size_t)y * mapSize_ + x];
+                if (terrain == T_FARM || terrain == T_FARM_GUNGAN) terrain = farmTerrain;
+            }
+    }
+
     const size_t stride = (size_t)mapSize_ + 1;
     cornerElevation_.resize(stride * stride);
     for (int y = 0; y <= mapSize_; y++) {
@@ -177,8 +210,23 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     }
     buildTileElevation();
     objects_.clear();
+    objects_.reserve(scenario.units.size());
+    for (const ScenarioUnit &source : scenario.units) {
+        if (source.garrisonedInId >= 0) continue;
+        const int civilization = civilizationFor(source.player);
+        const dat::Unit *unit = findUnit(civilization, source.unitId);
+        if (!unit) continue;
+        Object object;
+        object.unit = unit;
+        object.player = source.player;
+        object.x = object.homeX = object.targetX = source.x;
+        object.y = object.homeY = object.targetY = source.y;
+        object.facing = source.rotation;
+        object.wander = false;
+        objects_.push_back(object);
+    }
     if (scenario.cameraX >= 0 && scenario.cameraY >= 0)
-        lookAt((float)scenario.cameraX, (float)scenario.cameraY);
+        lookAt(scenario.cameraX, scenario.cameraY);
     else
         lookAt(mapSize_ * 0.5f, mapSize_ * 0.5f);
     return true;
@@ -260,6 +308,13 @@ const dat::Unit *Game::findUnit(int civ, const std::string &name) const {
     return nullptr;
 }
 
+const dat::Unit *Game::findUnit(int civ, int id) const {
+    const auto &civs = assets_.dat().civs;
+    if (civ < 0 || (size_t)civ >= civs.size()) return nullptr;
+    const auto &units = civs[(size_t)civ].units;
+    return id >= 0 && (size_t)id < units.size() && units[(size_t)id].exists ? &units[(size_t)id] : nullptr;
+}
+
 Game::Object *Game::spawn(int civ, const std::string &name, int player, float x, float y, float facing) {
     const dat::Unit *u = findUnit(civ, name);
     if (!u) return nullptr;
@@ -328,7 +383,9 @@ void Game::update(float dt, const InputState &in) {
     std::uniform_real_distribution<float> r01(0, 1);
     for (Object &o : objects_) {
         o.animTime += dt;
-        if (o.unit->type < dat::UT_DeadFish || o.unit->speed <= 0 || o.unit->type == dat::UT_Building) continue;
+        if (!o.wander || o.unit->type < dat::UT_DeadFish || o.unit->speed <= 0 ||
+            o.unit->type == dat::UT_Building)
+            continue;
         o.stateTime -= dt;
         if (o.state == State::Idle) {
             if (o.stateTime <= 0) {
@@ -446,6 +503,7 @@ void Game::drawGraphicNow(Renderer &r, int graphicId, float sx, float sy, float 
 
 void Game::render(Renderer &r, int screenW, int screenH) {
     stats_ = FrameStats{};
+    assets_.beginTerrainFrame(64u * 1024u * 1024u);
     const float viewW = screenW / zoom_, viewH = screenH / zoom_;
     const float ox = camX_ - viewW / 2, oy = camY_ - viewH / 2; // world-pixel of screen top-left
 
@@ -503,8 +561,9 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             }
             const int terrainId = terrainAt(tx, ty);
             const dat::Terrain &terrain = terrains[terrainId];
-            const SpriteSheet *flat = assets_.terrainSheet(terrain.slp);
-            assets_.terrainSlopeFrame(terrain.slp, slope, frameIndexFor(flat, tx, ty), neighborSlopes);
+            const dat::Terrain &draw = drawTerrain(terrains, terrainId);
+            const SpriteSheet *flat = assets_.terrainSheet(draw.slp);
+            assets_.terrainSlopeFrame(draw.slp, slope, frameIndexFor(flat, tx, ty), neighborSlopes);
 
             if (!assets_.hasBlendMasks()) continue;
             std::array<int, 8> neighbors;
@@ -529,8 +588,9 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             }
             for (const auto &entry : grouped) {
                 const dat::Terrain &overlay = terrains[entry.first];
-                const SpriteSheet *flatOverlay = assets_.terrainSheet(overlay.slp);
-                assets_.terrainSlopeFrame(overlay.slp, slope, frameIndexFor(flatOverlay, tx, ty),
+                const dat::Terrain &drawOverlay = drawTerrain(terrains, entry.first);
+                const SpriteSheet *flatOverlay = assets_.terrainSheet(drawOverlay.slp);
+                assets_.terrainSlopeFrame(drawOverlay.slp, slope, frameIndexFor(flatOverlay, tx, ty),
                                           neighborSlopes);
                 std::array<int, 5> maskIds;
                 int maskCount = blendMasksFor(entry.second, tx, ty, maskIds);
@@ -569,6 +629,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 continue;
             const int terrainId = terrainAt(tx, ty);
             const dat::Terrain &t = terrains[terrainId];
+            const dat::Terrain &draw = drawTerrain(terrains, terrainId);
             std::array<int8_t, 8> neighborSlopes;
             neighborSlopes.fill(-1);
             for (size_t i = 0; i < neighborSlopes.size(); i++) {
@@ -576,10 +637,10 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 if (nx >= 0 && ny >= 0 && nx < mapSize_ && ny < mapSize_)
                     neighborSlopes[i] = tileSlope_[(size_t)ny * mapSize_ + nx];
             }
-            const SpriteSheet *flatBase = assets_.terrainSheet(t.slp);
+            const SpriteSheet *flatBase = assets_.terrainSheet(draw.slp);
             const size_t terrainFrame = frameIndexFor(flatBase, tx, ty);
             const SpriteFrame *baseFrame =
-                assets_.terrainSlopeFrame(t.slp, slope, terrainFrame, neighborSlopes);
+                assets_.terrainSlopeFrame(draw.slp, slope, terrainFrame, neighborSlopes);
             if (!baseFrame) continue;
             const SpriteFrame &f = *baseFrame;
             const int deltaY = slope < (int)assets_.dat().terrainBlock.tileSizes.size()
@@ -620,10 +681,11 @@ void Game::render(Renderer &r, int screenW, int screenH) {
 
             for (const TerrainInfluence &influence : ordered) {
                 const dat::Terrain &overlayTerrain = terrains[influence.terrain];
-                const SpriteSheet *flatOverlay = assets_.terrainSheet(overlayTerrain.slp);
+                const dat::Terrain &drawOverlay = drawTerrain(terrains, influence.terrain);
+                const SpriteSheet *flatOverlay = assets_.terrainSheet(drawOverlay.slp);
                 const size_t overlayFrame = frameIndexFor(flatOverlay, tx, ty);
                 const SpriteFrame *overlay =
-                    assets_.terrainSlopeFrame(overlayTerrain.slp, slope, overlayFrame, neighborSlopes);
+                    assets_.terrainSlopeFrame(drawOverlay.slp, slope, overlayFrame, neighborSlopes);
                 if (!overlay) continue;
                 Quad overlayQ{sx - kTileHalfW, tileY, (float)overlay->w, (float)overlay->h,
                               overlay->u, overlay->v, overlay->u + overlay->w, overlay->v + overlay->h};

@@ -56,6 +56,9 @@ public:
     const SpriteFrame *blendMask(int mode, int mask, int slope = 0);
     bool hasBlendMasks() const { return blendMaskTexture_ != nullptr; }
     bool hasElevationMaps() const { return elevationMaps_ != nullptr; }
+    // Starts a terrain preparation pass. Generated slope textures not touched
+    // by the current pass may be evicted before a cache miss exceeds budget.
+    void beginTerrainFrame(size_t textureBudget);
 
     size_t textureBytes() const { return textureBytes_; }
     size_t sheetCount() const { return sheets_.size() + slopeFrames_.size() + slopeBlendMasks_.size(); }
@@ -72,6 +75,8 @@ private:
     };
 
     const SpriteFrame *buildTerrainSlopeFrame(const SlopeFrameKey &key);
+    void ensureTerrainCacheSpace(size_t additionalBytes);
+    void destroySheet(std::unique_ptr<SpriteSheet> &sheet);
     std::unique_ptr<SpriteSheet> pack(const std::vector<SlpImage> &imgs, int playerColorBase);
     bool buildBlendMasks(const Blendomatic &blendomatic, std::string *err);
     const SpriteFrame *buildSlopeBlendMask(int mode, int mask, int slope, uint32_t key);
@@ -85,12 +90,17 @@ private:
     std::unique_ptr<Blendomatic> blendomatic_;
     std::unique_ptr<ElevationMaps> elevationMaps_;
     std::map<uint64_t, std::unique_ptr<SpriteSheet>> sheets_;
+    std::map<uint64_t, uint64_t> sheetUse_;
     std::map<SlopeFrameKey, std::unique_ptr<SpriteSheet>> slopeFrames_;
+    std::map<SlopeFrameKey, uint64_t> slopeFrameUse_;
     std::map<uint32_t, std::unique_ptr<SpriteSheet>> slopeBlendMasks_;
+    std::map<uint32_t, uint64_t> slopeBlendMaskUse_;
     std::map<int32_t, std::unique_ptr<Slp>> terrainSlps_;
     Texture *blendMaskTexture_ = nullptr;
     std::vector<std::vector<SpriteFrame>> blendMasks_;
     size_t textureBytes_ = 0;
+    size_t terrainTextureBudget_ = SIZE_MAX;
+    uint64_t terrainGeneration_ = 0;
 };
 
 // Finds a file in dir, tolerating case differences (the GOG/CD installs mix

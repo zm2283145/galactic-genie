@@ -41,6 +41,70 @@ Assets::~Assets() {
     renderer_->destroyTexture(blendMaskTexture_);
 }
 
+void Assets::destroySheet(std::unique_ptr<SpriteSheet> &sheet) {
+    if (!sheet) return;
+    for (Texture *texture : sheet->pages) renderer_->destroyTexture(texture);
+    textureBytes_ = sheet->bytes <= textureBytes_ ? textureBytes_ - sheet->bytes : 0;
+    sheet.reset();
+}
+
+void Assets::beginTerrainFrame(size_t textureBudget) {
+    terrainTextureBudget_ = textureBudget;
+    terrainGeneration_++;
+    if (terrainGeneration_ == 0) {
+        terrainGeneration_ = 1;
+        for (auto &entry : sheetUse_) entry.second = 0;
+        for (auto &entry : slopeFrameUse_) entry.second = 0;
+        for (auto &entry : slopeBlendMaskUse_) entry.second = 0;
+    }
+}
+
+void Assets::ensureTerrainCacheSpace(size_t additionalBytes) {
+    if (additionalBytes <= terrainTextureBudget_ &&
+        textureBytes_ <= terrainTextureBudget_ - additionalBytes)
+        return;
+
+    for (auto it = sheets_.begin(); it != sheets_.end();) {
+        auto used = sheetUse_.find(it->first);
+        if (used != sheetUse_.end() && used->second == terrainGeneration_) {
+            ++it;
+            continue;
+        }
+        destroySheet(it->second);
+        if (used != sheetUse_.end()) sheetUse_.erase(used);
+        it = sheets_.erase(it);
+        if (additionalBytes <= terrainTextureBudget_ &&
+            textureBytes_ <= terrainTextureBudget_ - additionalBytes)
+            return;
+    }
+    for (auto it = slopeFrames_.begin(); it != slopeFrames_.end();) {
+        auto used = slopeFrameUse_.find(it->first);
+        if (used != slopeFrameUse_.end() && used->second == terrainGeneration_) {
+            ++it;
+            continue;
+        }
+        destroySheet(it->second);
+        if (used != slopeFrameUse_.end()) slopeFrameUse_.erase(used);
+        it = slopeFrames_.erase(it);
+        if (additionalBytes <= terrainTextureBudget_ &&
+            textureBytes_ <= terrainTextureBudget_ - additionalBytes)
+            return;
+    }
+    for (auto it = slopeBlendMasks_.begin(); it != slopeBlendMasks_.end();) {
+        auto used = slopeBlendMaskUse_.find(it->first);
+        if (used != slopeBlendMaskUse_.end() && used->second == terrainGeneration_) {
+            ++it;
+            continue;
+        }
+        destroySheet(it->second);
+        if (used != slopeBlendMaskUse_.end()) slopeBlendMaskUse_.erase(used);
+        it = slopeBlendMasks_.erase(it);
+        if (additionalBytes <= terrainTextureBudget_ &&
+            textureBytes_ <= terrainTextureBudget_ - additionalBytes)
+            return;
+    }
+}
+
 bool Assets::init(const std::string &dataDir, std::string *err) {
     struct Want {
         ResourceSet *set;
@@ -182,8 +246,10 @@ const SpriteFrame *Assets::blendMask(int mode, int mask, int slope) {
         uint32_t key = (uint32_t)(uint8_t)mode << 16 | (uint32_t)(uint8_t)mask << 8 |
                        (uint32_t)(uint8_t)slope;
         auto it = slopeBlendMasks_.find(key);
-        if (it != slopeBlendMasks_.end())
+        if (it != slopeBlendMasks_.end()) {
+            slopeBlendMaskUse_[key] = terrainGeneration_;
             return it->second && !it->second->frames.empty() ? &it->second->frames[0] : nullptr;
+        }
         return buildSlopeBlendMask(mode, mask, slope, key);
     }
     return &blendMasks_[mode][mask];
@@ -193,11 +259,13 @@ const SpriteFrame *Assets::buildSlopeBlendMask(int mode, int mask, int slope, ui
     if (!blendomatic_ || (size_t)mode >= blendomatic_->modes().size() ||
         (size_t)mask >= blendomatic_->modes()[(size_t)mode].masks.size()) {
         slopeBlendMasks_[key] = nullptr;
+        slopeBlendMaskUse_[key] = terrainGeneration_;
         return nullptr;
     }
     const BlendMask &source = blendomatic_->modes()[(size_t)mode].masks[(size_t)mask];
     if (source.width != 97 || source.height != 49) {
         slopeBlendMasks_[key] = nullptr;
+        slopeBlendMaskUse_[key] = terrainGeneration_;
         return nullptr;
     }
 
@@ -238,12 +306,16 @@ const SpriteFrame *Assets::buildSlopeBlendMask(int mode, int mask, int slope, ui
     if (!valid) {
         log("slope blend mask references invalid source data");
         slopeBlendMasks_[key] = nullptr;
+        slopeBlendMaskUse_[key] = terrainGeneration_;
         return nullptr;
     }
 
+    ensureTerrainCacheSpace(alpha.size());
     Texture *texture = renderer_->createMaskTexture(shape.width, shape.height, alpha.data());
     if (!texture) {
+        log("slope blend mask texture allocation failed");
         slopeBlendMasks_[key] = nullptr;
+        slopeBlendMaskUse_[key] = terrainGeneration_;
         return nullptr;
     }
     auto sheet = std::make_unique<SpriteSheet>();
@@ -253,20 +325,27 @@ const SpriteFrame *Assets::buildSlopeBlendMask(int mode, int mask, int slope, ui
     textureBytes_ += sheet->bytes;
     const SpriteFrame *result = &sheet->frames[0];
     slopeBlendMasks_[key] = std::move(sheet);
+    slopeBlendMaskUse_[key] = terrainGeneration_;
     return result;
 }
 
 const SpriteSheet *Assets::sheet(int32_t slpId, int playerColorBase) {
     uint64_t key = ((uint64_t)(uint32_t)slpId << 16) | (uint16_t)playerColorBase;
     auto it = sheets_.find(key);
-    if (it != sheets_.end()) return it->second.get();
+    if (it != sheets_.end()) {
+        sheetUse_[key] = terrainGeneration_;
+        return it->second.get();
+    }
     return build(graphics_, slpId, playerColorBase, key);
 }
 
 const SpriteSheet *Assets::terrainSheet(int32_t slpId) {
     uint64_t key = ((uint64_t)(uint32_t)slpId << 16) | 0xFFFF;
     auto it = sheets_.find(key);
-    if (it != sheets_.end()) return it->second.get();
+    if (it != sheets_.end()) {
+        sheetUse_[key] = terrainGeneration_;
+        return it->second.get();
+    }
     return build(terrain_, slpId, 16, key);
 }
 
@@ -288,8 +367,10 @@ const SpriteFrame *Assets::terrainSlopeFrame(int32_t slpId, int slope, size_t fr
     SlopeFrameKey key{
         slpId, (uint32_t)frame, (uint8_t)slope, selectSlopeLighting((uint8_t)slope, neighbors)};
     auto it = slopeFrames_.find(key);
-    if (it != slopeFrames_.end())
+    if (it != slopeFrames_.end()) {
+        slopeFrameUse_[key] = terrainGeneration_;
         return it->second && !it->second->frames.empty() ? &it->second->frames[0] : nullptr;
+    }
     return buildTerrainSlopeFrame(key);
 }
 
@@ -297,6 +378,7 @@ const SpriteSheet *Assets::build(ResourceSet &set, int32_t slpId, int playerColo
     std::vector<uint8_t> data;
     if (slpId < 0 || !set.read(slpId, data)) {
         sheets_[key] = nullptr;
+        sheetUse_[key] = terrainGeneration_;
         return nullptr;
     }
     Slp slp;
@@ -304,6 +386,7 @@ const SpriteSheet *Assets::build(ResourceSet &set, int32_t slpId, int playerColo
     if (!slp.parse(std::move(data), &err)) {
         log("slp " + std::to_string(slpId) + ": " + err);
         sheets_[key] = nullptr;
+        sheetUse_[key] = terrainGeneration_;
         return nullptr;
     }
 
@@ -319,11 +402,13 @@ const SpriteSheet *Assets::build(ResourceSet &set, int32_t slpId, int playerColo
     auto sheet = pack(imgs, playerColorBase);
     if (!sheet) {
         sheets_[key] = nullptr;
+        sheetUse_[key] = terrainGeneration_;
         return nullptr;
     }
     textureBytes_ += sheet->bytes;
     const SpriteSheet *res = sheet.get();
     sheets_[key] = std::move(sheet);
+    sheetUse_[key] = terrainGeneration_;
     return res;
 }
 
@@ -337,12 +422,14 @@ const SpriteFrame *Assets::buildTerrainSlopeFrame(const SlopeFrameKey &key) {
         std::vector<uint8_t> data;
         if (slpId < 0 || !terrain_.read(slpId, data)) {
             slopeFrames_[key] = nullptr;
+            slopeFrameUse_[key] = terrainGeneration_;
             return nullptr;
         }
         auto parsed = std::make_unique<Slp>();
         if (!parsed->parse(std::move(data), &err)) {
             log("terrain slp " + std::to_string(slpId) + ": " + err);
             slopeFrames_[key] = nullptr;
+            slopeFrameUse_[key] = terrainGeneration_;
             return nullptr;
         }
         slpIt = terrainSlps_.emplace(slpId, std::move(parsed)).first;
@@ -350,6 +437,7 @@ const SpriteFrame *Assets::buildTerrainSlopeFrame(const SlopeFrameKey &key) {
     Slp &slp = *slpIt->second;
     if (frame >= slp.frameCount()) {
         slopeFrames_[key] = nullptr;
+        slopeFrameUse_[key] = terrainGeneration_;
         return nullptr;
     }
 
@@ -360,6 +448,7 @@ const SpriteFrame *Assets::buildTerrainSlopeFrame(const SlopeFrameKey &key) {
     if (!slp.decode(frame, source, &err, &commandPalette)) {
         log("terrain slp " + std::to_string(slpId) + " frame " + std::to_string(frame) + ": " + err);
         slopeFrames_[key] = nullptr;
+        slopeFrameUse_[key] = terrainGeneration_;
         return nullptr;
     }
 
@@ -404,15 +493,19 @@ const SpriteFrame *Assets::buildTerrainSlopeFrame(const SlopeFrameKey &key) {
         log("terrain slp " + std::to_string(slpId) + " frame " + std::to_string(frame) +
             ": filter map references invalid source data");
         slopeFrames_[key] = nullptr;
+        slopeFrameUse_[key] = terrainGeneration_;
         return nullptr;
     }
 
     std::vector<uint8_t> pixels((size_t)out.width * out.height * 4, 0);
     ColorizeOptions options;
     colorize(out, palette_, options, pixels.data(), out.width);
+    ensureTerrainCacheSpace(pixels.size());
     Texture *texture = renderer_->createTexture(out.width, out.height, pixels.data());
     if (!texture) {
+        log("terrain slope texture allocation failed");
         slopeFrames_[key] = nullptr;
+        slopeFrameUse_[key] = terrainGeneration_;
         return nullptr;
     }
     auto sheet = std::make_unique<SpriteSheet>();
@@ -422,6 +515,7 @@ const SpriteFrame *Assets::buildTerrainSlopeFrame(const SlopeFrameKey &key) {
     textureBytes_ += sheet->bytes;
     const SpriteFrame *result = &sheet->frames[0];
     slopeFrames_[key] = std::move(sheet);
+    slopeFrameUse_[key] = terrainGeneration_;
     return result;
 }
 
@@ -432,8 +526,16 @@ std::unique_ptr<SpriteSheet> Assets::pack(const std::vector<SlpImage> &imgs, int
     struct Place { int page, x, y; };
     std::vector<Place> place(n);
     std::vector<std::pair<int, int>> pageSize; // w, h
-    int maxW = 1024;
-    for (auto &im : imgs) maxW = std::max(maxW, im.width + 2);
+    int maxW = 1;
+    size_t totalArea = 0;
+    for (const auto &image : imgs) {
+        maxW = std::max(maxW, image.width + 2);
+        totalArea += (size_t)std::max(1, image.width + 1) * std::max(1, image.height + 1);
+    }
+    int packedWidth = 1;
+    while (packedWidth < maxW) packedWidth *= 2;
+    while (packedWidth < 1024 && (size_t)packedWidth * packedWidth < totalArea) packedWidth *= 2;
+    maxW = std::max(maxW, packedWidth);
     const int maxH = 2048;
     int page = 0, cx = 0, cy = 0, rowH = 0;
     pageSize.push_back({maxW, 0});
@@ -465,11 +567,19 @@ std::unique_ptr<SpriteSheet> Assets::pack(const std::vector<SlpImage> &imgs, int
         if (imgs[i].width > 0 && imgs[i].height > 0)
             colorize(imgs[i], palette_, opt, &pixels[pl.page][((size_t)pl.y * pw + pl.x) * 4], pw);
     }
+    size_t packedBytes = 0;
+    for (const auto &pagePixels : pixels) packedBytes += pagePixels.size();
+    ensureTerrainCacheSpace(packedBytes);
     for (size_t p = 0; p < pageSize.size(); p++) {
         Texture *t = renderer_->createTexture(pageSize[p].first, pageSize[p].second, pixels[p].data());
+        if (!t) {
+            for (Texture *pageTexture : sheet->pages) renderer_->destroyTexture(pageTexture);
+            log("sprite texture allocation failed");
+            return nullptr;
+        }
         sheet->pages.push_back(t);
-        sheet->bytes += pixels[p].size();
     }
+    sheet->bytes = packedBytes;
     sheet->frames.resize(n);
     for (size_t i = 0; i < n; i++) {
         SpriteFrame &f = sheet->frames[i];

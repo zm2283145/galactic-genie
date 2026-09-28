@@ -15,7 +15,7 @@ It is written clean-room style: file formats come from public documentation (ope
 | Sprite atlas builder (per SLP and player colour) | done |
 | Isometric terrain renderer with `blendomatic.dat` priority/mode edge blending | done |
 | Terrain elevation with original slope geometry and neighbor-sensitive lighting | done |
-| CPX/SCX campaign map loading (`XCAM3.CPX`, “Breaking Bread”) | done |
+| CPX/SCX terrain, elevation, saved camera, and initial object loading (“Breaking Bread”) | done |
 | Units: idle/walk animation, 8-way facing with mirroring, graphic deltas for buildings | done |
 | Vita: vitaGL batched fixed-function renderer, stick/d-pad/touch scroll, L/R zoom | done |
 | PC `swgbtool`: data inspection, CPX/SCX listing, and procedural/scenario PNG rendering | done |
@@ -52,7 +52,7 @@ cmake -B build-pc && cmake --build build-pc
 ## Installing on the Vita
 
 1. Copy these files from the game's `Game/Data` folder to `ux0:data/swgb/Data/`: `genie_x1.dat`, `graphics.drs`, `graphics_x1.drs`, `terrain.drs`, `terrain_x1.drs`, `interfac.drs`, `interfac_x1.drs`, `blendomatic.dat`, `STemplet.dat`, `FilterMaps.dat`, `VIEW_ICM.DAT`, `lightMaps.dat`, and `PatternMasks.dat` (about 313 MB). `tools\deploy_vita.ps1 -GameData` does this over FTP.
-2. Copy `Game/Campaign/XCAM3.CPX` to `ux0:data/swgb/Campaign/xcam3.cpx`. `tools\deploy_vita.ps1 -CampaignData` does this over FTP. The current vertical slice loads its second mission, “Breaking Bread.”
+2. Copy `Game/Campaign/XCAM3.CPX` to `ux0:data/swgb/Campaign/xcam3.cpx`. `tools\deploy_vita.ps1 -CampaignData` does this over FTP. The current vertical slice loads its second mission, “Breaking Bread,” including its initial trees, resources, buildings, and units.
 3. Install `swgb.vpk` with VitaShell. `tools\deploy_vita.ps1 -Vpk` uploads it to `ux0:data/swgb/`.
 4. The app writes a log to `ux0:data/swgb/swgb.log`. `tools\deploy_vita.ps1 -PullLog` fetches it.
 
