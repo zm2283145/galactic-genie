@@ -175,12 +175,12 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     rng_.seed(1);
     mapSize_ = (int)scenario.map.width;
     terrain_.resize(scenario.map.tiles.size());
-    // Rotate scenario world coordinates 90 degrees clockwise. Transforming
+    // Rotate scenario world coordinates 90 degrees counterclockwise. Transforming
     // the source data keeps slope geometry, objects, facings, and art aligned.
     for (int y = 0; y < mapSize_; y++)
         for (int x = 0; x < mapSize_; x++)
             terrain_[(size_t)y * mapSize_ + x] =
-                scenario.map.tiles[(size_t)(mapSize_ - 1 - x) * mapSize_ + y].terrain;
+                scenario.map.tiles[(size_t)x * mapSize_ + (mapSize_ - 1 - y)].terrain;
 
     // Player-unit block 0 is Gaia; block N belongs to player N and uses
     // player-info entry N-1. Gungans are the only civilization with their
@@ -194,8 +194,8 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     for (const ScenarioUnit &unit : scenario.units) {
         if (unit.unitId != 50) continue; // BLDG-GARDEN
         const uint8_t farmTerrain = civilizationFor(unit.player) == 2 ? T_FARM_GUNGAN : T_FARM;
-        const int centerX = (int)std::floor(mapSize_ - unit.y);
-        const int centerY = (int)std::floor(unit.x);
+        const int centerX = (int)std::floor(unit.y);
+        const int centerY = (int)std::floor(mapSize_ - unit.x);
         for (int y = centerY - 1; y <= centerY + 1; y++)
             for (int x = centerX - 1; x <= centerX + 1; x++) {
                 if (x < 0 || y < 0 || x >= mapSize_ || y >= mapSize_) continue;
@@ -208,8 +208,8 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     cornerElevation_.resize(stride * stride);
     for (int y = 0; y <= mapSize_; y++) {
         for (int x = 0; x <= mapSize_; x++) {
-            const int sourceX = std::min(y, mapSize_ - 1);
-            const int sourceY = std::max(0, std::min(mapSize_ - 1, mapSize_ - x));
+            const int sourceX = std::max(0, std::min(mapSize_ - 1, mapSize_ - y));
+            const int sourceY = std::min(x, mapSize_ - 1);
             cornerElevation_[(size_t)y * stride + x] =
                 scenario.map.tiles[(size_t)sourceY * mapSize_ + sourceX].elevation;
         }
@@ -225,15 +225,15 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
         Object object;
         object.unit = unit;
         object.player = source.player;
-        object.x = object.homeX = object.targetX = mapSize_ - source.y;
-        object.y = object.homeY = object.targetY = source.x;
-        object.facing = source.rotation + kPi * 0.5f;
+        object.x = object.homeX = object.targetX = source.y;
+        object.y = object.homeY = object.targetY = mapSize_ - source.x;
+        object.facing = source.rotation - kPi * 0.5f;
         object.wander = false;
         object.initialFrame = source.initialFrame;
         objects_.push_back(object);
     }
     if (scenario.cameraX >= 0 && scenario.cameraY >= 0)
-        lookAt(mapSize_ - scenario.cameraY, scenario.cameraX);
+        lookAt(scenario.cameraY, mapSize_ - scenario.cameraX);
     else
         lookAt(mapSize_ * 0.5f, mapSize_ * 0.5f);
     return true;
