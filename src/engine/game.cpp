@@ -19,6 +19,7 @@ constexpr float kPi = 3.14159265358979f;
 constexpr uint8_t kSequenceAnimated = 0x1;
 constexpr int kCursorSlp = 51000;
 constexpr size_t kCursorNormal = 0;
+constexpr size_t kCursorCommand = 3;
 constexpr size_t kCursorAttack = 4;
 constexpr size_t kCursorMove = 11;
 
@@ -154,13 +155,16 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     cursorVisible_ = false;
     boxSelectActive_ = false;
     commandMarkerTime_ = 0;
-    commandMarkerAttack_ = false;
     attackOrdersIssued_ = attacksLanded_ = unitsKilled_ = 0;
     projectilesLaunched_ = attackPathsComputed_ = 0;
+    automaticTargetsAcquired_ = retaliationOrders_ = armedBuildingsEngaged_ = 0;
+    attackModeChanges_ = 0;
     objects_.clear();
     objectIndices_.clear();
     projectiles_.clear();
     remains_.clear();
+    combatObjectIndices_.clear();
+    combatObjectCells_.clear();
     selectionClickAge_ = 1000.0f;
     lastSelectionUnitId_ = -1;
     nextSpawnId_ = 1;
@@ -241,12 +245,15 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     cursorVisible_ = false;
     boxSelectActive_ = false;
     commandMarkerTime_ = 0;
-    commandMarkerAttack_ = false;
     attackOrdersIssued_ = attacksLanded_ = unitsKilled_ = 0;
     projectilesLaunched_ = attackPathsComputed_ = 0;
+    automaticTargetsAcquired_ = retaliationOrders_ = armedBuildingsEngaged_ = 0;
+    attackModeChanges_ = 0;
     objectIndices_.clear();
     projectiles_.clear();
     remains_.clear();
+    combatObjectIndices_.clear();
+    combatObjectCells_.clear();
     selectionClickAge_ = 1000.0f;
     lastSelectionUnitId_ = -1;
     nextSpawnId_ = scenario.nextUnitId;
@@ -472,6 +479,9 @@ Game::Object *Game::addObject(const dat::Unit *unit, int player, float x, float 
     object.hitPoints = object.maxHitPoints = std::max(1, (int)unit->hitPoints);
     object.facing = facing;
     object.spawnId = spawnId;
+    object.autoAcquireTime = 0.1f + (spawnId % 8) * 0.05f;
+    if (unit->type == dat::UT_Building || unit->speed <= 0)
+        object.attackMode = AttackMode::StandGround;
     object.initialFrame = initialFrame;
     object.hidden = hidden;
     object.draw = unit->name.rfind("ENGINE-", 0) != 0 &&
@@ -544,11 +554,15 @@ void Game::rebuildAdjacency() {
     }
 
     mobileObjectIndices_.clear();
+    combatObjectIndices_.clear();
     staticObstructionIndices_.clear();
     staticObstructionCells_.assign((size_t)mapSize_ * mapSize_, {});
     for (size_t index = 0; index < objects_.size(); index++) {
         const Object &object = objects_[index];
         if (!object.active || object.hidden) continue;
+        if (object.draw && object.spawnId &&
+            object.unit->type >= dat::UT_Combatant)
+            combatObjectIndices_.push_back((uint32_t)index);
         const bool mobile = object.unit->speed > 0 && object.unit->type != dat::UT_Building;
         if (mobile) {
             mobileObjectIndices_.push_back((uint32_t)index);
@@ -576,6 +590,10 @@ void Game::rebuildMobileOccupancy() {
         mobileObjectCells_.assign(cellCount, {});
     else
         for (auto &cell : mobileObjectCells_) cell.clear();
+    if (combatObjectCells_.size() != cellCount)
+        combatObjectCells_.assign(cellCount, {});
+    else
+        for (auto &cell : combatObjectCells_) cell.clear();
     maxMobileCollisionRadius_ = 0;
     for (uint32_t index : mobileObjectIndices_) {
         const Object &object = objects_[(size_t)index];
@@ -587,6 +605,15 @@ void Game::rebuildMobileOccupancy() {
         const int y = std::max(
             0, std::min(mobileObjectGridWidth_ - 1, (int)std::floor(object.y / cellSize)));
         mobileObjectCells_[(size_t)y * mobileObjectGridWidth_ + x].push_back(index);
+    }
+    for (uint32_t index : combatObjectIndices_) {
+        const Object &object = objects_[(size_t)index];
+        if (!object.active || object.hidden || !object.draw || !object.spawnId) continue;
+        const int x = std::max(
+            0, std::min(mobileObjectGridWidth_ - 1, (int)std::floor(object.x / cellSize)));
+        const int y = std::max(
+            0, std::min(mobileObjectGridWidth_ - 1, (int)std::floor(object.y / cellSize)));
+        combatObjectCells_[(size_t)y * mobileObjectGridWidth_ + x].push_back(index);
     }
 }
 
@@ -836,6 +863,10 @@ CombatStats Game::combatStats() const {
     stats.activeProjectiles = projectiles_.size();
     stats.activeRemains = remains_.size();
     stats.attackPathsComputed = attackPathsComputed_;
+    stats.automaticTargetsAcquired = automaticTargetsAcquired_;
+    stats.retaliationOrders = retaliationOrders_;
+    stats.armedBuildingsEngaged = armedBuildingsEngaged_;
+    stats.attackModeChanges = attackModeChanges_;
     for (const Object &object : objects_)
         if (object.active && object.attackTargetId) stats.activeOrders++;
     return stats;
@@ -1171,20 +1202,21 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
         playUnitAcknowledgement(*acknowledgement, true);
         commandMarkerX_ = enemy->x;
         commandMarkerY_ = enemy->y;
-        commandMarkerTime_ = 0.8f;
-        commandMarkerAttack_ = true;
+        commandMarkerTime_ = 0.65f;
         return;
     }
 
     float targetX, targetY;
     screenToWorld(screenX, screenY, screenW, screenH, targetX, targetY);
-    for (Object *object : selected) object->attackTargetId = 0;
+    for (Object *object : selected) {
+        object->attackTargetId = 0;
+        object->attackAutomatic = false;
+    }
     playUnitAcknowledgement(*selected.front(), false);
     issueGroupMove(std::move(selected), targetX, targetY);
     commandMarkerX_ = targetX;
     commandMarkerY_ = targetY;
-    commandMarkerTime_ = 0.8f;
-    commandMarkerAttack_ = false;
+    commandMarkerTime_ = 0.65f;
 }
 
 void Game::playUnitAcknowledgement(const Object &object, bool attack) {
@@ -1194,15 +1226,125 @@ void Game::playUnitAcknowledgement(const Object &object, bool attack) {
     if (soundId >= 0) playUnitSound_(soundId, civilizationForPlayer(object.player));
 }
 
-void Game::issueAttack(Object &source, Object &target, float approachAngle) {
+void Game::cycleSelectedAttackMode() {
+    bool changed = false;
+    for (Object &object : objects_) {
+        if (!object.selected || !isSelectable(object) || !canAttack(object)) continue;
+        switch (object.attackMode) {
+        case AttackMode::Aggressive:
+            object.attackMode = AttackMode::Defensive;
+            break;
+        case AttackMode::Defensive:
+            object.attackMode = AttackMode::StandGround;
+            break;
+        case AttackMode::StandGround:
+            object.attackMode = AttackMode::Passive;
+            break;
+        case AttackMode::Passive:
+            object.attackMode = AttackMode::Aggressive;
+            break;
+        }
+        if (object.attackAutomatic &&
+            (object.attackMode == AttackMode::Passive ||
+             object.attackMode == AttackMode::StandGround))
+            finishAttack(object, object.attackMode != AttackMode::StandGround);
+        changed = true;
+    }
+    if (changed) attackModeChanges_++;
+}
+
+void Game::issueAttack(Object &source, Object &target, float approachAngle,
+                       bool automatic) {
     source.attackTargetId = target.spawnId;
     source.attackRepathTime = 0;
     source.attackApproachAngle = approachAngle;
+    source.attackAutomatic = automatic;
     source.path.clear();
     source.pathIndex = 0;
     source.blockedTime = 0;
     source.state = State::Idle;
     source.wander = false;
+}
+
+float Game::automaticAcquisitionRadius(const Object &source) const {
+    const float weaponRange = std::max(0.0f, source.unit->maxRange);
+    const float sight = std::max(0.0f, source.unit->lineOfSight);
+    if (source.unit->type == dat::UT_Building ||
+        source.attackMode == AttackMode::StandGround)
+        return std::max(weaponRange + 0.5f, attackRange(source, source));
+    if (source.attackMode == AttackMode::Aggressive)
+        return std::max(6.0f, std::max(sight, source.unit->searchRadius));
+    if (source.attackMode == AttackMode::Defensive)
+        return std::max(4.0f, std::max(weaponRange + 2.0f, sight * 0.75f));
+    return 0;
+}
+
+float Game::automaticPursuitLeash(const Object &source) const {
+    if (source.unit->type == dat::UT_Building ||
+        source.attackMode == AttackMode::StandGround)
+        return 0;
+    const float acquisition = automaticAcquisitionRadius(source);
+    return source.attackMode == AttackMode::Aggressive
+               ? std::max(12.0f, acquisition * 2.0f)
+               : std::max(8.0f, acquisition + 3.0f);
+}
+
+void Game::finishAttack(Object &source, bool returnToPost) {
+    source.attackTargetId = 0;
+    source.attackAutomatic = false;
+    source.path.clear();
+    source.pathIndex = 0;
+    source.blockedTime = 0;
+    source.state = State::Idle;
+    source.animTime = 0;
+    if (!returnToPost || source.unit->speed <= 0 ||
+        source.unit->type == dat::UT_Building)
+        return;
+    const float dx = source.homeX - source.x;
+    const float dy = source.homeY - source.y;
+    if (dx * dx + dy * dy > 0.04f) issueMove(source, source.homeX, source.homeY);
+}
+
+void Game::acquireAutomaticTarget(Object &source) {
+    if (!canAttack(source) || source.attackTargetId ||
+        source.attackMode == AttackMode::Passive || source.state != State::Idle ||
+        mobileObjectGridWidth_ <= 0 ||
+        combatObjectCells_.size() !=
+            (size_t)mobileObjectGridWidth_ * mobileObjectGridWidth_)
+        return;
+
+    constexpr float cellSize = 4.0f;
+    const float radius = automaticAcquisitionRadius(source);
+    if (radius <= 0) return;
+    const int centerX = (int)std::floor(source.x / cellSize);
+    const int centerY = (int)std::floor(source.y / cellSize);
+    const int cellRadius = std::max(1, (int)std::ceil(radius / cellSize));
+    const int minX = std::max(0, centerX - cellRadius);
+    const int maxX = std::min(mobileObjectGridWidth_ - 1, centerX + cellRadius);
+    const int minY = std::max(0, centerY - cellRadius);
+    const int maxY = std::min(mobileObjectGridWidth_ - 1, centerY + cellRadius);
+    Object *best = nullptr;
+    float bestDistanceSquared = radius * radius;
+    for (int cellY = minY; cellY <= maxY; cellY++)
+        for (int cellX = minX; cellX <= maxX; cellX++)
+            for (uint32_t index :
+                 combatObjectCells_[
+                     (size_t)cellY * mobileObjectGridWidth_ + cellX]) {
+                Object &candidate = objects_[(size_t)index];
+                if (!isEnemy(source, candidate)) continue;
+                const float dx = candidate.x - source.x;
+                const float dy = candidate.y - source.y;
+                const float distanceSquared = dx * dx + dy * dy;
+                if (distanceSquared > bestDistanceSquared) continue;
+                best = &candidate;
+                bestDistanceSquared = distanceSquared;
+            }
+    if (!best) return;
+    const float approachAngle =
+        std::atan2(source.y - best->y, source.x - best->x);
+    issueAttack(source, *best, approachAngle, true);
+    automaticTargetsAcquired_++;
+    if (source.unit->type == dat::UT_Building) armedBuildingsEngaged_++;
 }
 
 void Game::killObject(Object &object) {
@@ -1245,7 +1387,7 @@ void Game::killObject(Object &object) {
     if (wasStatic) rebuildAdjacency();
 }
 
-void Game::damageObject(Object &object, int damage) {
+void Game::damageObject(Object &object, int damage, uint32_t attackerId) {
     if (!object.active || damage <= 0) return;
     const float previousDamage =
         100.0f * (1.0f - object.hitPoints / std::max(1.0f, object.maxHitPoints));
@@ -1255,6 +1397,34 @@ void Game::damageObject(Object &object, int damage) {
     if (object.hitPoints <= 0) {
         killObject(object);
         return;
+    }
+
+    Object *attacker = findObject(attackerId);
+    if (attacker && attacker->active && canAttack(object) &&
+        isEnemy(object, *attacker) && object.attackMode != AttackMode::Passive &&
+        (!object.attackTargetId || object.attackAutomatic)) {
+        const float dx = attacker->x - object.x;
+        const float dy = attacker->y - object.y;
+        const float distanceSquared = dx * dx + dy * dy;
+        const float leash = automaticPursuitLeash(object);
+        const float homeDx = attacker->x - object.homeX;
+        const float homeDy = attacker->y - object.homeY;
+        const bool canReach =
+            object.attackMode == AttackMode::StandGround ||
+                    object.unit->type == dat::UT_Building
+                ? distanceSquared <=
+                      automaticAcquisitionRadius(object) *
+                          automaticAcquisitionRadius(object)
+                : homeDx * homeDx + homeDy * homeDy <= leash * leash;
+        if (canReach && object.attackTargetId != attackerId) {
+            issueAttack(object, *attacker,
+                        std::atan2(object.y - attacker->y,
+                                   object.x - attacker->x),
+                        true);
+            retaliationOrders_++;
+            if (object.unit->type == dat::UT_Building)
+                armedBuildingsEngaged_++;
+        }
     }
 
     int soundId = object.unit->damageSound;
@@ -1275,7 +1445,8 @@ void Game::launchProjectile(const Object &source, const Object &target, int dama
         const int soundId = graphicSound(source.unit->attackGraphic);
         if (playUnitSound_ && soundId >= 0)
             playUnitSound_(soundId, civilizationForPlayer(source.player));
-        if (Object *liveTarget = findObject(target.spawnId)) damageObject(*liveTarget, damage);
+        if (Object *liveTarget = findObject(target.spawnId))
+            damageObject(*liveTarget, damage, source.spawnId);
         return;
     }
 
@@ -1293,6 +1464,7 @@ void Game::launchProjectile(const Object &source, const Object &target, int dama
         std::max(0.2f, std::min(1.5f, target.unit->outlineSize[2] * 0.5f));
     projectile.facing = source.facing;
     projectile.targetId = target.spawnId;
+    projectile.sourceId = source.spawnId;
     projectile.damage = damage;
     projectiles_.push_back(projectile);
     projectilesLaunched_++;
@@ -1324,7 +1496,7 @@ void Game::updateProjectiles(float dt) {
             const int damage = projectile.damage;
             projectiles_[index] = projectiles_.back();
             projectiles_.pop_back();
-            damageObject(*target, damage);
+            damageObject(*target, damage, projectile.sourceId);
             continue;
         }
         projectile.x += dx * step / distance;
@@ -1349,15 +1521,20 @@ void Game::updateRemains(float dt) {
 void Game::updateAttack(Object &source, float dt) {
     source.attackCooldown = std::max(0.0f, source.attackCooldown - dt);
     source.attackRepathTime -= dt;
-    if (!source.attackTargetId) return;
+    source.autoAcquireTime -= dt;
+    if (!source.attackTargetId) {
+        if (source.autoAcquireTime <= 0) {
+            source.autoAcquireTime =
+                0.45f + (source.spawnId % 5) * 0.04f;
+            acquireAutomaticTarget(source);
+        }
+        if (!source.attackTargetId) return;
+    }
 
     Object *target = findObject(source.attackTargetId);
     if (!target || !isEnemy(source, *target) || !canAttack(source)) {
-        source.attackTargetId = 0;
-        source.path.clear();
-        source.pathIndex = 0;
-        source.state = State::Idle;
-        source.animTime = 0;
+        const bool returnToPost = source.attackAutomatic;
+        finishAttack(source, returnToPost);
         return;
     }
 
@@ -1365,6 +1542,18 @@ void Game::updateAttack(Object &source, float dt) {
     const float distance = std::sqrt(dx * dx + dy * dy);
     if (distance > 0.0001f) source.facing = std::atan2(dy, dx);
     const float range = attackRange(source, *target);
+    if (source.attackAutomatic) {
+        const float leash = automaticPursuitLeash(source);
+        const float targetHomeDx = target->x - source.homeX;
+        const float targetHomeDy = target->y - source.homeY;
+        if ((leash <= 0 && distance > range + 0.05f) ||
+            (leash > 0 &&
+             targetHomeDx * targetHomeDx + targetHomeDy * targetHomeDy >
+                 leash * leash)) {
+            finishAttack(source, leash > 0);
+            return;
+        }
+    }
     if (distance <= range + 0.05f && distance + 0.05f >= source.unit->minRange) {
         source.path.clear();
         source.pathIndex = 0;
@@ -1378,13 +1567,13 @@ void Game::updateAttack(Object &source, float dt) {
                 const int soundId = graphicSound(source.unit->attackGraphic);
                 if (playUnitSound_ && soundId >= 0)
                     playUnitSound_(soundId, civilizationForPlayer(source.player));
-                damageObject(*target, damage);
+                damageObject(*target, damage, source.spawnId);
             }
             source.attackCooldown = std::max(0.1f, source.unit->reloadTime);
             source.animTime = 0;
             if (!target->active) {
-                source.attackTargetId = 0;
-                source.state = State::Idle;
+                const bool returnToPost = source.attackAutomatic;
+                finishAttack(source, returnToPost);
             }
         }
         return;
@@ -1691,6 +1880,7 @@ void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float ta
     for (Object *object : targets) {
         if (object->hidden || object->unit->speed <= 0) continue;
         object->attackTargetId = 0;
+        object->attackAutomatic = false;
         float slotX = targetX, slotY = targetY;
         if (slot > 0) {
             const int ring =
@@ -1712,6 +1902,8 @@ void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float ta
             slotX += sx * slotSpacing;
             slotY += sy * slotSpacing;
         }
+        object->homeX = slotX;
+        object->homeY = slotY;
         issueMove(*object, slotX, slotY);
         slot++;
     }
@@ -2121,6 +2313,7 @@ void Game::update(float dt, const InputState &in) {
                   in.screenW, in.screenH);
     if (in.selectPressed)
         selectAtScreen(in.pointerX, in.pointerY, in.screenW, in.screenH);
+    if (in.cycleAttackMode) cycleSelectedAttackMode();
     if (in.commandPressed)
         commandAtScreen(in.pointerX, in.pointerY, in.screenW, in.screenH);
     if (in.pointerTap) {
@@ -2508,6 +2701,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                     remains.player, 0, 0, remains.drawShadows && !overview,
                     viewW, viewH);
     }
+    std::vector<std::array<float, 2>> blasterGlowPoints;
     for (const Projectile &projectile : projectiles_) {
         if (!projectile.unit) continue;
         const dat::Graphic *graphic =
@@ -2518,7 +2712,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                           sheet->frames[0].w <= 4 && sheet->frames[0].h <= 4;
         const int trailCopies = tiny ? 5 : 1;
         for (int trail = trailCopies - 1; trail >= 0; trail--) {
-            const float trailDistance = trail * 0.08f;
+            const float trailDistance = trail * 0.10f;
             const float x = projectile.x - std::cos(projectile.facing) * trailDistance;
             const float y = projectile.y - std::sin(projectile.facing) * trailDistance;
             float sx, sy;
@@ -2529,6 +2723,8 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             sy -= oy;
             if (sx < -100 || sx > viewW + 100 || sy < -100 || sy > viewH + 100)
                 continue;
+            if (tiny && graphic && graphic->slp == 2738)
+                blasterGlowPoints.push_back({sx, sy});
             drawGraphic(r, projectile.unit->standingGraphic[0], sx, sy,
                         projectile.facing, projectile.animTime, projectile.player,
                         0, 0, false, viewW, viewH);
@@ -2685,6 +2881,19 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     for (const SpriteDraw &d : g_draws) r.draw(d.tex, d.q);
     stats_.sprites = (int)g_draws.size();
 
+    for (const auto &point : blasterGlowPoints) {
+        const float glowWidth = 6.0f / zoom_;
+        const float glowHeight = 4.0f / zoom_;
+        r.fillRect(point[0] - glowWidth * 0.5f,
+                   point[1] - glowHeight * 0.5f,
+                   glowWidth, glowHeight, 255, 35, 8, 170);
+        const float coreWidth = 3.0f / zoom_;
+        const float coreHeight = 2.0f / zoom_;
+        r.fillRect(point[0] - coreWidth * 0.5f,
+                   point[1] - coreHeight * 0.5f,
+                   coreWidth, coreHeight, 255, 230, 135, 255);
+    }
+
     for (const Object &object : objects_) {
         if (!object.active || object.hidden || !object.draw || object.flashTime <= 0) continue;
         float sx, sy;
@@ -2725,8 +2934,8 @@ void Game::render(Renderer &r, int screenW, int screenH) {
               assets_.dat().terrainBlock.elevHeight;
         sx -= ox;
         sy -= oy;
-        if (commandMarkerAttack_ && cursors && kCursorAttack < cursors->frames.size()) {
-            const SpriteFrame &frame = cursors->frames[kCursorAttack];
+        if (cursors && kCursorCommand < cursors->frames.size()) {
+            const SpriteFrame &frame = cursors->frames[kCursorCommand];
             const float width = frame.w / zoom_, height = frame.h / zoom_;
             r.draw(frame.tex, {sx - width * 0.5f, sy - height * 0.5f, width, height,
                                frame.u, frame.v, frame.u + frame.w, frame.v + frame.h});
@@ -2734,9 +2943,9 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             const float radius = (10.0f + commandMarkerTime_ * 12.0f) / zoom_;
             const float line = 2.0f / zoom_;
             r.fillRect(sx - radius, sy - line * 0.5f, radius * 2, line,
-                       255, 230, 70, 230);
+                       230, 45, 25, 230);
             r.fillRect(sx - line * 0.5f, sy - radius, line, radius * 2,
-                       255, 230, 70, 230);
+                       230, 45, 25, 230);
         }
     }
 
@@ -2756,6 +2965,43 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                            t.colors[0] ? assets_.palette()[t.colors[0]].g : 120,
                            t.colors[0] ? assets_.palette()[t.colors[0]].b : 60, 255);
             }
+    }
+
+    const Object *selectedAttacker = nullptr;
+    bool mixedAttackModes = false;
+    for (const Object &object : objects_) {
+        if (!object.selected || !isSelectable(object) || !canAttack(object)) continue;
+        if (!selectedAttacker)
+            selectedAttacker = &object;
+        else if (selectedAttacker->attackMode != object.attackMode)
+            mixedAttackModes = true;
+    }
+    if (selectedAttacker) {
+        const char *mode = "MIXED";
+        if (!mixedAttackModes)
+            switch (selectedAttacker->attackMode) {
+            case AttackMode::Aggressive:
+                mode = "AGGRESSIVE";
+                break;
+            case AttackMode::Defensive:
+                mode = "DEFENSIVE";
+                break;
+            case AttackMode::StandGround:
+                mode = "STAND GROUND";
+                break;
+            case AttackMode::Passive:
+                mode = "PASSIVE";
+                break;
+            }
+        const float invZoom = 1.0f / zoom_;
+        const float boxX = 16.0f * invZoom;
+        const float boxY = (screenH - 38.0f) * invZoom;
+        const std::vector<std::string> line = {
+            std::string("STANCE: ") + mode + "  TRIANGLE"};
+        r.fillRect(boxX, boxY, 310.0f * invZoom, 26.0f * invZoom,
+                   5, 8, 16, 210);
+        drawBitmapText(r, line, boxX + 8.0f * invZoom,
+                       boxY + 6.0f * invZoom, 1.5f * invZoom);
     }
 
     if (!currentInstruction_.empty()) {

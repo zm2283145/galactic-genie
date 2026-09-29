@@ -762,6 +762,11 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     const size_t boxSelected = game.selectedObjectCount();
 
     input = {};
+    input.cycleAttackMode = true;
+    game.update(0.001f, input);
+    const size_t attackModeChanges = game.combatStats().attackModeChanges;
+
+    input = {};
     input.pointerX = 620;
     input.pointerY = 360;
     input.commandPressed = true;
@@ -779,12 +784,13 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     }
     const MovementStats movement = game.movementStats();
     printf("controls: single %zu, double %zu, box %zu, commanded %zu, sounds %zu, "
-           "overlaps %zu, terrain violations %zu\n",
+           "stance changes %zu, overlaps %zu, terrain violations %zu\n",
            singleSelected, doubleSelected, boxSelected, commanded,
-           acknowledgementSounds.size(), movement.overlappingPairs,
+           acknowledgementSounds.size(), attackModeChanges, movement.overlappingPairs,
            movement.terrainViolations);
     if (singleSelected != 1 || doubleSelected <= 1 || boxSelected < doubleSelected ||
         commanded == 0 || acknowledgementSounds.size() < 5 ||
+        attackModeChanges != 1 ||
         movement.overlappingPairs != 0 ||
         movement.terrainViolations != 0) {
         fprintf(stderr, "error: control validation failed\n");
@@ -900,7 +906,7 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
 
     // Attack the enemy command center until its first damage graphic is active,
     // then select it to validate inspection and its hostile health bar.
-    constexpr uint32_t buildingId = 18;
+    constexpr uint32_t buildingId = 19;
     const float buildingMaxHitPoints = game.objectMaxHitPoints(buildingId);
     game.lookAt(mapSize * 0.62f + 2.0f, mapSize * 0.60f + 2.0f);
     if (!game.objectScreenPosition(buildingId, screenW, screenH, screenX, screenY)) {
@@ -932,7 +938,7 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         }
     }
 
-    constexpr uint32_t destroyedBuildingId = 19;
+    constexpr uint32_t destroyedBuildingId = buildingId;
     input = {};
     input.boxSelectCommit = true;
     input.boxStartX = 0;
@@ -980,7 +986,8 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
     printf("combat: target %u hp %.0f -> %.0f, orders %zu, hits %zu, "
            "kills %zu, projectiles %zu, paths %zu, sounds %zu, elapsed %.2f; "
            "building %.0f -> %.0f selected %d, remains %d -> %zu, overlaps %zu, "
-           "building destroyed/remains/decayed %d/%d/%d, edge scroll %d\n",
+           "building destroyed/remains/decayed %d/%d/%d, edge scroll %d, "
+           "automatic/retaliation/armed %zu/%zu/%zu\n",
            targetId, initialHitPoints, finalHitPoints,
            combat.ordersIssued, combat.attacksLanded, combat.unitsKilled,
            combat.projectilesLaunched, combat.attackPathsComputed,
@@ -988,7 +995,9 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            damagedBuildingHitPoints, buildingSelected ? 1 : 0,
            sawRemains ? 1 : 0, combat.activeRemains, movement.overlappingPairs,
            buildingDestroyed ? 1 : 0, sawBuildingRemains ? 1 : 0,
-           remainsDecayed ? 1 : 0, edgeScrolled ? 1 : 0);
+           remainsDecayed ? 1 : 0, edgeScrolled ? 1 : 0,
+           combat.automaticTargetsAcquired, combat.retaliationOrders,
+           combat.armedBuildingsEngaged);
     const bool heardBlaster =
         std::find(acknowledgementSounds.begin(), acknowledgementSounds.end(), 71) !=
         acknowledgementSounds.end();
@@ -1001,7 +1010,9 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         damagedBuildingHitPoints > buildingMaxHitPoints * 0.75f ||
         !buildingSelected || !sawRemains || combat.activeRemains != 0 ||
         movement.overlappingPairs != 0 || !buildingDestroyed ||
-        !sawBuildingRemains || !remainsDecayed || !edgeScrolled) {
+        !sawBuildingRemains || !remainsDecayed || !edgeScrolled ||
+        combat.automaticTargetsAcquired == 0 ||
+        combat.retaliationOrders == 0) {
         fprintf(stderr, "error: combat validation failed\n");
         return 1;
     }

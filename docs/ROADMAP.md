@@ -39,8 +39,9 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   attack/armor classes, range and minimum range, reload timing, attack animations and sounds,
   original projectile flight and weapon sounds, health-bar depletion, death sounds, and progressive
   building damage/fire graphics. Original death/destruction animations transition into unit remains
-  or building rubble and decay over time. Accuracy, blast damage, automatic defensive targeting and
-  retaliation for units and armed buildings remain.
+  or building rubble and decay over time. Units support aggressive, defensive, stand-ground, and
+  passive stances; eligible units and armed buildings acquire targets and retaliate automatically.
+  Accuracy, blast damage, and explicit guard/patrol commands remain.
 - Economy: the four SWGB resources, drop sites, training queues, population (power cores and prefab shelters).
 - Tech effects (`Effect`/`EffectCommand`) and ages, which SWGB calls tech levels.
 - SWGB-specific mechanics: shields, air units, power cores, Jedi/Sith conversion, holocrons.

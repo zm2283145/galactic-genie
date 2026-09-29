@@ -30,6 +30,7 @@ struct InputState {
     bool cursorVisible = false;
     bool selectPressed = false;
     bool commandPressed = false;
+    bool cycleAttackMode = false;
     bool pointerTap = false;
     bool boxSelectActive = false;
     bool boxSelectCommit = false;
@@ -56,6 +57,10 @@ struct CombatStats {
     size_t activeProjectiles = 0;
     size_t activeRemains = 0;
     size_t attackPathsComputed = 0;
+    size_t automaticTargetsAcquired = 0;
+    size_t retaliationOrders = 0;
+    size_t armedBuildingsEngaged = 0;
+    size_t attackModeChanges = 0;
 };
 
 struct MovingObjectInfo {
@@ -117,6 +122,12 @@ public:
 private:
     enum class State : uint8_t { Idle, Walk, Attack };
     enum class CursorMode : uint8_t { Normal, Move, Attack };
+    enum class AttackMode : uint8_t {
+        Aggressive,
+        Defensive,
+        StandGround,
+        Passive,
+    };
 
     struct Object {
         const dat::Unit *unit = nullptr;
@@ -134,8 +145,11 @@ private:
         float attackCooldown = 0;
         float attackRepathTime = 0;
         float attackApproachAngle = 0;
+        float autoAcquireTime = 0;
         uint32_t attackTargetId = 0;
         float homeX = 0, homeY = 0;
+        AttackMode attackMode = AttackMode::Defensive;
+        bool attackAutomatic = false;
         bool wander = true;
         bool drawShadows = true;
         bool active = true;
@@ -159,6 +173,7 @@ private:
         float facing = 0;
         float animTime = 0;
         uint32_t targetId = 0;
+        uint32_t sourceId = 0;
         int damage = 0;
     };
 
@@ -231,12 +246,18 @@ private:
     void selectBox(float startX, float startY, float endX, float endY,
                    int screenW, int screenH);
     void commandAtScreen(float screenX, float screenY, int screenW, int screenH);
-    void issueAttack(Object &source, Object &target, float approachAngle);
+    void cycleSelectedAttackMode();
+    void issueAttack(Object &source, Object &target, float approachAngle,
+                     bool automatic = false);
+    void acquireAutomaticTarget(Object &source);
+    void finishAttack(Object &source, bool returnToPost);
+    float automaticAcquisitionRadius(const Object &source) const;
+    float automaticPursuitLeash(const Object &source) const;
     void updateAttack(Object &source, float dt);
     void launchProjectile(const Object &source, const Object &target, int damage);
     void updateProjectiles(float dt);
     void updateRemains(float dt);
-    void damageObject(Object &object, int damage);
+    void damageObject(Object &object, int damage, uint32_t attackerId);
     void killObject(Object &object);
     void objectScreenPosition(const Object &object, int screenW, int screenH,
                               float &screenX, float &screenY) const;
@@ -267,6 +288,8 @@ private:
     std::vector<Remains> remains_;
     std::vector<uint32_t> mobileObjectIndices_;
     std::vector<std::vector<uint32_t>> mobileObjectCells_;
+    std::vector<uint32_t> combatObjectIndices_;
+    std::vector<std::vector<uint32_t>> combatObjectCells_;
     int mobileObjectGridWidth_ = 0;
     float maxMobileCollisionRadius_ = 0;
     std::vector<uint32_t> staticObstructionIndices_;
@@ -292,7 +315,6 @@ private:
     float cursorX_ = 0, cursorY_ = 0;
     float boxStartX_ = 0, boxStartY_ = 0, boxEndX_ = 0, boxEndY_ = 0;
     float commandMarkerX_ = 0, commandMarkerY_ = 0, commandMarkerTime_ = 0;
-    bool commandMarkerAttack_ = false;
     float selectionClickAge_ = 1000.0f;
     float lastSelectionX_ = 0, lastSelectionY_ = 0;
     int lastSelectionUnitId_ = -1;
@@ -306,6 +328,10 @@ private:
     size_t unitsKilled_ = 0;
     size_t projectilesLaunched_ = 0;
     size_t attackPathsComputed_ = 0;
+    size_t automaticTargetsAcquired_ = 0;
+    size_t retaliationOrders_ = 0;
+    size_t armedBuildingsEngaged_ = 0;
+    size_t attackModeChanges_ = 0;
     std::function<void(const std::string &)> log_;
     std::function<float(const std::string &)> playSound_;
     std::function<void(int, int)> playUnitSound_;

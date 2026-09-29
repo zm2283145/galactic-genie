@@ -224,6 +224,7 @@ int main() {
             in.cursorVisible = true;
             if (pressed & SCE_CTRL_CROSS) in.selectPressed = true;
             if (pressed & SCE_CTRL_CIRCLE) in.commandPressed = true;
+            if (pressed & SCE_CTRL_TRIANGLE) in.cycleAttackMode = true;
 
             sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1);
             if (touch.reportNum > 0) {

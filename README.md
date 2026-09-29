@@ -68,15 +68,19 @@ attack order; O over terrain issues a move order. A touch tap uses the same cont
 or command behavior. Double-tap a unit or press X twice to select every matching friendly unit
 in the viewport. Hold Square and move the right stick, or hold Square while touch-dragging, to
 box-select units. The normal, move, and attack cursors are loaded from the original
-`interfac.drs`, with a procedural fallback if they are unavailable. SELECT toggles the minimap
-overlay and START quits.
+`interfac.drs`, with a procedural fallback if they are unavailable. Triangle cycles selected
+combat units through defensive, stand-ground, passive, and aggressive stances. SELECT toggles
+the minimap overlay and START quits.
 
 Combat currently includes pursuit with collision-aware A* pathfinding, attack animations and
 acknowledgements, original projectile graphics and weapon sounds, DAT attack/armor classes,
 reload timing, health-bar depletion, death sounds and animations, decaying unit remains and
 building rubble, and progressive building fire/damage graphics. X can also select a visible
 hostile unit or building for inspection without allowing it to receive orders. Accuracy, blast
-damage, and retaliation remain to be implemented.
+damage, and explicit guard/patrol commands remain to be implemented. Idle combat units acquire
+nearby hostile targets according to their stance, retaliate when attacked, return to their
+assigned post after defensive pursuits, and armed buildings fire automatically. Move and attack
+orders briefly display the original game's red target marker at the commanded location.
 
 ## License
 
