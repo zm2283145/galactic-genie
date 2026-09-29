@@ -18,7 +18,7 @@ It is written clean-room style: file formats come from public documentation (ope
 | CPX/SCX terrain, elevation, player state, triggers, saved camera, and initial object loading (“Breaking Bread”) | done |
 | Initial trigger runtime: timers, object/area/resource conditions, ordered effects, voiced dialogue, and collision-aware scripted movement | in progress |
 | Units: idle/walk animation, 8-way facing with mirroring, graphic deltas for buildings | done |
-| Combat: contextual attack orders, pursuit, DAT-driven range/reload/damage, health, and death | in progress |
+| Combat: contextual attack orders, pursuit, projectiles, DAT-driven range/reload/damage, health, building damage, and death | in progress |
 | Vita: renderer, camera controls, original cursors, unit selection/status markers, formation movement, and debug minimap | done |
 | PC `swgbtool`: data inspection, CPX/SCX listing, and procedural/scenario PNG rendering | done |
 
@@ -62,7 +62,8 @@ cmake -B build-pc && cmake --build build-pc
 5. The app writes a log to `ux0:data/swgb/swgb.log`. `tools\deploy_vita.ps1 -PullLog` fetches it.
 
 Controls: left stick, d-pad, or a touch drag scrolls; L/R zoom. The right stick moves the
-command cursor and X selects a friendly unit. O over a hostile unit issues an attack order;
+command cursor and X selects a visible unit or building for inspection. With friendly units
+selected, O over a hostile unit issues an attack order;
 O over terrain issues a move order. A touch tap uses the same contextual selection or command
 behavior. Double-tap a unit or press X twice to select every matching friendly unit in the
 viewport. Hold Square and move the right stick, or hold Square while touch-dragging, to
@@ -71,9 +72,10 @@ box-select units. The normal, move, and attack cursors are loaded from the origi
 overlay and START quits.
 
 Combat currently includes pursuit with collision-aware A* pathfinding, attack animations and
-acknowledgements, DAT attack/armor classes, reload timing, health-bar depletion, and unit death.
-Projectile travel, accuracy, blast damage, retaliation, death animations, and corpses remain to
-be implemented.
+acknowledgements, original projectile graphics and weapon sounds, DAT attack/armor classes,
+reload timing, health-bar depletion, death sounds, and progressive building fire/damage graphics.
+X can also select a visible hostile unit or building for inspection without allowing it to receive
+orders. Accuracy, blast damage, retaliation, death animations, and corpses remain to be implemented.
 
 ## License
 

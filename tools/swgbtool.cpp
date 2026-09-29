@@ -15,6 +15,7 @@
 #include "../src/engine/game.h"
 #include "../src/render/soft_renderer.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -146,10 +147,39 @@ static int cmdUnit(const char *dataDir, int id) {
                    unit.outlineSize[0], unit.outlineSize[1], unit.outlineSize[2],
                    unit.selectionSound, unit.moveSound, unit.attackSound);
             printf("  combat hp %d base armor %d range %.2f..%.2f reload %.2f "
-                   "attack graphic %d projectile %d displayed attack/armor %d/%d\n",
+                   "attack graphic %d projectile %d frame delay %d displacement %.2f,%.2f,%.2f "
+                   "displayed attack/armor %d/%d\n",
                    unit.hitPoints, unit.baseArmor, unit.minRange, unit.maxRange,
                    unit.reloadTime, unit.attackGraphic, unit.projectileUnitId,
+                   unit.frameDelay, unit.graphicDisplacement[0], unit.graphicDisplacement[1],
+                   unit.graphicDisplacement[2],
                    unit.displayedAttack, unit.displayedMeleeArmour);
+            const auto *attackGraphic = assets.dat().graphic(unit.attackGraphic);
+            const auto *dyingGraphic = assets.dat().graphic(unit.dyingGraphic);
+            const auto *projectile = unit.projectileUnitId >= 0 &&
+                                             (size_t)unit.projectileUnitId < units.size()
+                                         ? &units[(size_t)unit.projectileUnitId]
+                                         : nullptr;
+            const auto *projectileGraphic =
+                projectile ? assets.dat().graphic(projectile->standingGraphic[0]) : nullptr;
+            printf("  sounds damage/dying %d/%d, graphics stand/walk/dying %d/%d/%d, "
+                   "graphic sounds stand/attack/projectile/dying %d/%d/%d/%d\n",
+                   unit.damageSound, unit.dyingSound, unit.standingGraphic[0],
+                   unit.walkingGraphic, unit.dyingGraphic, graphic ? graphic->soundId : -1,
+                   attackGraphic ? attackGraphic->soundId : -1,
+                   projectileGraphic ? projectileGraphic->soundId : -1,
+                   dyingGraphic ? dyingGraphic->soundId : -1);
+            printf("  damage graphics:");
+            for (const auto &damage : unit.damageGraphics) {
+                const auto *damageGraphic = assets.dat().graphic(damage.graphicId);
+                printf(" %d@%d%% mode %u", damage.graphicId, damage.damagePercent,
+                       damage.applyMode);
+                if (damageGraphic)
+                    printf("(slp %d frames %d layer %u sound %d)", damageGraphic->slp,
+                           damageGraphic->frameCount, damageGraphic->layer,
+                           damageGraphic->soundId);
+            }
+            printf("\n");
             printf("  attacks:");
             for (const auto &attack : unit.attacks)
                 printf(" %d=%d", attack.cls, attack.amount);
@@ -796,6 +826,65 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
     input.commandPressed = true;
     input.cursorVisible = true;
     game.update(0.001f, input);
+
+    input = {};
+    constexpr float step = 1.0f / 30.0f;
+    float elapsed = 0;
+    bool sawProjectile = false;
+    bool savedProjectile = false;
+    int projectileFrames = 0;
+    for (; elapsed < 120.0f; elapsed += step) {
+        game.update(step, input);
+        if (game.combatStats().activeProjectiles > 0) {
+            sawProjectile = true;
+            projectileFrames++;
+        }
+        if (out && !savedProjectile && projectileFrames >= 4 &&
+            game.combatStats().activeProjectiles > 0) {
+            game.render(renderer, screenW, screenH);
+            std::string projectileOut(out);
+            const size_t extension = projectileOut.find_last_of('.');
+            projectileOut.insert(extension == std::string::npos ? projectileOut.size() : extension,
+                                 "-projectile");
+            if (!renderer.savePng(projectileOut)) {
+                fprintf(stderr, "error: could not write %s\n", projectileOut.c_str());
+                return 1;
+            }
+            savedProjectile = true;
+        }
+        if (!game.objectActive(targetId)) break;
+    }
+    if (!sawProjectile) {
+        fprintf(stderr, "error: combat sandbox rendered no projectile\n");
+        return 1;
+    }
+
+    // Attack the enemy command center until its first damage graphic is active,
+    // then select it to validate inspection and its hostile health bar.
+    constexpr uint32_t buildingId = 18;
+    const float buildingMaxHitPoints = game.objectMaxHitPoints(buildingId);
+    game.lookAt(mapSize * 0.62f + 2.0f, mapSize * 0.60f + 2.0f);
+    if (!game.objectScreenPosition(buildingId, screenW, screenH, screenX, screenY)) {
+        fprintf(stderr, "error: combat sandbox building %u is unavailable\n", buildingId);
+        return 1;
+    }
+    input = {};
+    input.pointerX = screenX;
+    input.pointerY = screenY - 36.0f;
+    input.commandPressed = true;
+    game.update(0.001f, input);
+    for (float buildingElapsed = 0;
+         buildingElapsed < 120.0f &&
+         game.objectHitPoints(buildingId) > buildingMaxHitPoints * 0.74f;
+         buildingElapsed += step)
+        game.update(step, {});
+    const float damagedBuildingHitPoints = game.objectHitPoints(buildingId);
+    input = {};
+    input.pointerX = screenX;
+    input.pointerY = screenY - 36.0f;
+    input.selectPressed = true;
+    game.update(0.001f, input);
+    const bool buildingSelected = game.objectSelected(buildingId);
     if (out) {
         game.render(renderer, screenW, screenH);
         if (!renderer.savePng(out)) {
@@ -804,23 +893,27 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         }
     }
 
-    input = {};
-    constexpr float step = 1.0f / 30.0f;
-    float elapsed = 0;
-    for (; elapsed < 120.0f; elapsed += step) {
-        game.update(step, input);
-        if (!game.objectActive(targetId)) break;
-    }
     const CombatStats combat = game.combatStats();
     const float finalHitPoints = game.objectHitPoints(targetId);
     printf("combat: target %u hp %.0f -> %.0f, orders %zu, hits %zu, "
-           "kills %zu, sounds %zu, elapsed %.2f\n",
+           "kills %zu, projectiles %zu, paths %zu, sounds %zu, elapsed %.2f; "
+           "building %.0f -> %.0f selected %d\n",
            targetId, initialHitPoints, finalHitPoints,
            combat.ordersIssued, combat.attacksLanded, combat.unitsKilled,
-           acknowledgementSounds.size(), elapsed);
-    if (combat.ordersIssued != 1 || combat.attacksLanded == 0 ||
+           combat.projectilesLaunched, combat.attackPathsComputed,
+           acknowledgementSounds.size(), elapsed, buildingMaxHitPoints,
+           damagedBuildingHitPoints, buildingSelected ? 1 : 0);
+    const bool heardBlaster =
+        std::find(acknowledgementSounds.begin(), acknowledgementSounds.end(), 71) !=
+        acknowledgementSounds.end();
+    const bool heardDeath =
+        std::find(acknowledgementSounds.begin(), acknowledgementSounds.end(), 298) !=
+        acknowledgementSounds.end();
+    if (combat.ordersIssued != 2 || combat.attacksLanded == 0 ||
         game.objectActive(targetId) || combat.unitsKilled == 0 ||
-        acknowledgementSounds.empty()) {
+        combat.projectilesLaunched == 0 || !heardBlaster || !heardDeath ||
+        damagedBuildingHitPoints > buildingMaxHitPoints * 0.75f ||
+        !buildingSelected || combat.attackPathsComputed > 1000) {
         fprintf(stderr, "error: combat validation failed\n");
         return 1;
     }

@@ -37,7 +37,7 @@ private:
     int port_ = -1;
     std::deque<std::shared_ptr<AudioClip>> queue_;
     std::map<int, std::shared_ptr<AudioClip>> effectCache_;
-    std::shared_ptr<AudioClip> pendingEffect_;
+    std::deque<std::shared_ptr<AudioClip>> pendingEffects_;
 };
 
 } // namespace swgb

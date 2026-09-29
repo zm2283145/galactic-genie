@@ -14,6 +14,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace swgb {
@@ -51,6 +52,9 @@ struct CombatStats {
     size_t ordersIssued = 0;
     size_t attacksLanded = 0;
     size_t unitsKilled = 0;
+    size_t projectilesLaunched = 0;
+    size_t activeProjectiles = 0;
+    size_t attackPathsComputed = 0;
 };
 
 struct MovingObjectInfo {
@@ -100,6 +104,8 @@ public:
     MovementStats movementStats() const;
     CombatStats combatStats() const;
     float objectHitPoints(uint32_t spawnId) const;
+    float objectMaxHitPoints(uint32_t spawnId) const;
+    bool objectSelected(uint32_t spawnId) const;
     bool objectScreenPosition(uint32_t spawnId, int screenW, int screenH,
                               float &screenX, float &screenY) const;
     std::vector<MovingObjectInfo> movingObjects() const;
@@ -143,6 +149,17 @@ private:
         uint16_t initialFrame = 0;
     };
 
+    struct Projectile {
+        const dat::Unit *unit = nullptr;
+        int player = 0;
+        float x = 0, y = 0, z = 0;
+        float targetZ = 0;
+        float facing = 0;
+        float animTime = 0;
+        uint32_t targetId = 0;
+        int damage = 0;
+    };
+
     struct TriggerRuntime {
         bool enabled = false;
         bool fired = false;
@@ -168,6 +185,7 @@ private:
     const Object *findObject(uint32_t spawnId) const;
     int civilizationForPlayer(int player) const;
     void rebuildAdjacency();
+    void rebuildMobileOccupancy();
     void updateTriggers(float dt);
     bool conditionMet(const ScenarioCondition &condition, float triggerElapsed);
     void executeEffect(const ScenarioEffect &effect);
@@ -186,8 +204,11 @@ private:
     bool canAttack(const Object &object) const;
     float attackRange(const Object &source, const Object &target) const;
     int attackDamage(const Object &source, const Object &target) const;
+    int graphicSound(int graphicId) const;
     float collisionRadius(const Object &object) const;
+    bool isInspectable(const Object &object) const;
     bool isSelectable(const Object &object) const;
+    bool hasSelectedUnit() const;
     bool hasSelectedAttacker() const;
     void clearSelection();
     Object *objectAtScreen(float screenX, float screenY, int screenW, int screenH);
@@ -198,6 +219,9 @@ private:
     void commandAtScreen(float screenX, float screenY, int screenW, int screenH);
     void issueAttack(Object &source, Object &target);
     void updateAttack(Object &source, float dt);
+    void launchProjectile(const Object &source, const Object &target, int damage);
+    void updateProjectiles(float dt);
+    void damageObject(Object &object, int damage);
     void killObject(Object &object);
     void objectScreenPosition(const Object &object, int screenW, int screenH,
                               float &screenX, float &screenY) const;
@@ -223,7 +247,12 @@ private:
     std::vector<uint8_t> tileElevation_;
     std::vector<uint8_t> tileSlope_;
     std::vector<Object> objects_;
+    std::unordered_map<uint32_t, size_t> objectIndices_;
+    std::vector<Projectile> projectiles_;
     std::vector<uint32_t> mobileObjectIndices_;
+    std::vector<std::vector<uint32_t>> mobileObjectCells_;
+    int mobileObjectGridWidth_ = 0;
+    float maxMobileCollisionRadius_ = 0;
     std::vector<uint32_t> staticObstructionIndices_;
     std::vector<std::vector<uint32_t>> staticObstructionCells_;
     std::array<ScenarioPlayer, 16> players_{};
@@ -259,6 +288,8 @@ private:
     size_t attackOrdersIssued_ = 0;
     size_t attacksLanded_ = 0;
     size_t unitsKilled_ = 0;
+    size_t projectilesLaunched_ = 0;
+    size_t attackPathsComputed_ = 0;
     std::function<void(const std::string &)> log_;
     std::function<float(const std::string &)> playSound_;
     std::function<void(int, int)> playUnitSound_;

@@ -101,6 +101,7 @@ private:
     std::map<uint32_t, std::unique_ptr<SpriteSheet>> slopeBlendMasks_;
     std::map<uint32_t, uint64_t> slopeBlendMaskUse_;
     std::map<int32_t, std::unique_ptr<Slp>> terrainSlps_;
+    std::map<int32_t, std::vector<uint8_t>> soundDataCache_;
     Texture *blendMaskTexture_ = nullptr;
     Texture *selectionRingTexture_ = nullptr;
     bool selectionRingAttempted_ = false;

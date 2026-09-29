@@ -37,8 +37,9 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 - Unit commands from the dat task lists (`UnitHeader.tasks`): move, attack, gather, build, repair, garrison.
 - The initial combat slice includes contextual hostile targeting, runtime hit points, DAT-driven
   attack/armor classes, range and minimum range, reload timing, attack animations and sounds,
-  health-bar depletion, and death. Projectile travel, accuracy, blast damage, retaliation,
-  death animations, and corpses remain.
+  original projectile flight and weapon sounds, health-bar depletion, death sounds, and progressive
+  building damage/fire graphics. Accuracy, blast damage, retaliation, death animations, and corpses
+  remain.
 - Economy: the four SWGB resources, drop sites, training queues, population (power cores and prefab shelters).
 - Tech effects (`Effect`/`EffectCommand`) and ages, which SWGB calls tech levels.
 - SWGB-specific mechanics: shields, air units, power cores, Jedi/Sith conversion, holocrons.
@@ -49,8 +50,8 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 - Single, box, and visible-type selection, selection sounds, and contextual original normal/move/attack
   cursors are implemented. Unit panels and control groups remain.
 - Command panel, minimap, resource bar and the pause menu.
-- Audio: selection, move, and attack acknowledgements are implemented. World effects, volume
-  controls, and music remain.
+- Audio: selection, move, and attack acknowledgements plus weapon-fire and death effects are
+  implemented. World ambience, volume controls, and music remain.
 
 ## Milestone 5: AI and skirmish
 - A subset of the AI script interpreter (`.per` rules), checked against the original using Ghidra where needed.

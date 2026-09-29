@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <vector>
 
 namespace swgb {
 
@@ -14,6 +15,8 @@ namespace {
 constexpr int kBufferFrames = 1024;
 constexpr size_t kMaxQueuedClips = 8;
 constexpr size_t kMaxCachedEffects = 64;
+constexpr size_t kMaxActiveEffects = 8;
+constexpr size_t kMaxPendingEffects = 16;
 
 std::string normalizedName(const std::string &name) {
     const size_t slash = name.find_last_of("/\\");
@@ -119,7 +122,8 @@ bool VitaAudio::playEffect(int resourceId, const std::vector<uint8_t> &data) {
         found = effectCache_.emplace(resourceId, std::move(clip)).first;
     }
     sceKernelLockMutex(mutex_, 1, nullptr);
-    pendingEffect_ = found->second;
+    if (pendingEffects_.size() >= kMaxPendingEffects) pendingEffects_.pop_front();
+    pendingEffects_.push_back(found->second);
     sceKernelUnlockMutex(mutex_, 1);
     log("playing effect " + std::to_string(resourceId));
     return true;
@@ -132,18 +136,22 @@ int VitaAudio::threadEntry(SceSize args, void *argp) {
 }
 
 int VitaAudio::run() {
+    struct EffectVoice {
+        std::shared_ptr<AudioClip> clip;
+        size_t frame = 0;
+    };
     std::shared_ptr<AudioClip> current;
-    std::shared_ptr<AudioClip> effect;
+    std::vector<EffectVoice> effects;
     size_t frame = 0;
-    size_t effectFrame = 0;
     size_t bufferIndex = 0;
     alignas(64) int16_t buffers[2][kBufferFrames * AudioClip::kChannels];
 
     while (running_) {
         sceKernelLockMutex(mutex_, 1, nullptr);
-        if (pendingEffect_) {
-            effect = std::move(pendingEffect_);
-            effectFrame = 0;
+        while (!pendingEffects_.empty()) {
+            if (effects.size() >= kMaxActiveEffects) effects.erase(effects.begin());
+            effects.push_back({std::move(pendingEffects_.front()), 0});
+            pendingEffects_.pop_front();
         }
         if ((!current || frame >= current->frameCount()) && !queue_.empty()) {
             current = std::move(queue_.front());
@@ -155,10 +163,12 @@ int VitaAudio::run() {
             current.reset();
             frame = 0;
         }
-        if (effect && effectFrame >= effect->frameCount()) {
-            effect.reset();
-            effectFrame = 0;
-        }
+        effects.erase(std::remove_if(effects.begin(), effects.end(),
+                                     [](const EffectVoice &effect) {
+                                         return !effect.clip ||
+                                                effect.frame >= effect.clip->frameCount();
+                                     }),
+                      effects.end());
 
         int16_t *buffer = buffers[bufferIndex];
         std::memset(buffer, 0, sizeof(buffers[bufferIndex]));
@@ -169,15 +179,18 @@ int VitaAudio::run() {
                         frames * AudioClip::kChannels * sizeof(int16_t));
             frame += frames;
         }
-        if (effect) {
+        const int effectDivisor = std::max<int>(1, (int)effects.size());
+        for (EffectVoice &effect : effects) {
             const size_t frames =
-                std::min<size_t>(kBufferFrames, effect->frameCount() - effectFrame);
+                std::min<size_t>(kBufferFrames, effect.clip->frameCount() - effect.frame);
             for (size_t sample = 0; sample < frames * AudioClip::kChannels; sample++) {
                 const int mixed = (int)buffer[sample] +
-                                  (int)effect->samples[effectFrame * AudioClip::kChannels + sample];
+                                  (int)effect.clip->samples[
+                                      effect.frame * AudioClip::kChannels + sample] /
+                                      effectDivisor;
                 buffer[sample] = (int16_t)std::max(-32768, std::min(32767, mixed));
             }
-            effectFrame += frames;
+            effect.frame += frames;
         }
         const int result = sceAudioOutOutput(port_, buffer);
         if (result < 0) {

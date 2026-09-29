@@ -250,7 +250,14 @@ bool Assets::readSound(int soundId, int civilization, uint32_t choice,
     for (size_t offset = 0; offset < eligible.size(); offset++) {
         const dat::SoundItem &selected =
             *eligible[(selectedIndex + offset) % eligible.size()];
-        if (!sounds_.read(selected.resourceId, data)) continue;
+        const auto cached = soundDataCache_.find(selected.resourceId);
+        if (cached != soundDataCache_.end()) {
+            data = cached->second;
+        } else {
+            if (!sounds_.read(selected.resourceId, data)) continue;
+            if (soundDataCache_.size() >= 32) soundDataCache_.clear();
+            soundDataCache_[selected.resourceId] = data;
+        }
         if (resourceId) *resourceId = selected.resourceId;
         if (fileName) *fileName = selected.fileName;
         return true;
