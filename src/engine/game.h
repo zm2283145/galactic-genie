@@ -43,6 +43,9 @@ public:
     void lookAt(float tx, float ty);
     const FrameStats &stats() const { return stats_; }
     void setLogger(std::function<void(const std::string &)> fn) { log_ = std::move(fn); }
+    void setSoundPlayer(std::function<void(const std::string &)> fn) {
+        playSound_ = std::move(fn);
+    }
 
     // Debug helper: draws one graphic immediately at a screen position.
     void drawGraphicNow(Renderer &r, int graphicId, float sx, float sy, float facing, float t, int player);
@@ -94,6 +97,7 @@ private:
 
     struct Instruction {
         std::string text;
+        std::string sound;
         float duration = 0;
     };
 
@@ -117,7 +121,9 @@ private:
     std::vector<Object *> effectTargets(const ScenarioEffect &effect);
     bool objectMatches(const Object &object, int unitId, int player, int group, int type) const;
     bool inSourceArea(const Object &object, int x1, int y1, int x2, int y2) const;
-    void queueInstruction(const std::string &text, float duration);
+    void startInstruction(Instruction instruction);
+    void queueInstruction(const std::string &text, float duration,
+                          const std::string &sound = std::string());
     void log(const std::string &message) const;
     int playerColorBase(int player) const;
     int terrainAt(int x, int y) const { return terrain_[(size_t)y * mapSize_ + x]; }
@@ -155,6 +161,7 @@ private:
     bool debug_ = false;
     FrameStats stats_;
     std::function<void(const std::string &)> log_;
+    std::function<void(const std::string &)> playSound_;
 };
 
 } // namespace swgb

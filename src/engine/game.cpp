@@ -764,12 +764,17 @@ void Game::setTriggerEnabled(int id, bool enabled) {
     }
 }
 
-void Game::queueInstruction(const std::string &text, float duration) {
+void Game::startInstruction(Instruction instruction) {
+    currentInstruction_ = std::move(instruction.text);
+    instructionTime_ = instruction.duration;
+    if (!instruction.sound.empty() && playSound_) playSound_(instruction.sound);
+}
+
+void Game::queueInstruction(const std::string &text, float duration, const std::string &sound) {
     if (text.empty()) return;
-    Instruction instruction{text, std::max(1.0f, duration)};
+    Instruction instruction{text, sound, std::max(1.0f, duration)};
     if (currentInstruction_.empty()) {
-        currentInstruction_ = instruction.text;
-        instructionTime_ = instruction.duration;
+        startInstruction(std::move(instruction));
     } else {
         instructions_.push_back(std::move(instruction));
     }
@@ -857,11 +862,10 @@ void Game::executeEffect(const ScenarioEffect &effect) {
             log("technology research is tracked; DAT technology modifiers are not applied yet");
         break;
     case 3:
-        queueInstruction(effect.message, triggerField(effect.fields, 12));
+        queueInstruction(effect.message, triggerField(effect.fields, 12), effect.sound);
         break;
     case 4:
-        if (warnedEffects_.insert(effect.type).second)
-            log("trigger audio playback is not implemented yet");
+        if (!effect.sound.empty() && playSound_) playSound_(effect.sound);
         break;
     case 5:
         if (sourcePlayer >= 0 && (size_t)sourcePlayer < resources_.size() &&
@@ -967,7 +971,7 @@ void Game::executeEffect(const ScenarioEffect &effect) {
         rebuildAdjacency();
         break;
     case 20:
-        queueInstruction(effect.message, triggerField(effect.fields, 12));
+        queueInstruction(effect.message, triggerField(effect.fields, 12), effect.sound);
         break;
     case 21:
         instructions_.clear();
@@ -1079,9 +1083,9 @@ void Game::update(float dt, const InputState &in) {
         if (instructionTime_ <= 0) {
             currentInstruction_.clear();
             if (!instructions_.empty()) {
-                currentInstruction_ = instructions_.front().text;
-                instructionTime_ = instructions_.front().duration;
+                Instruction instruction = std::move(instructions_.front());
                 instructions_.pop_front();
+                startInstruction(std::move(instruction));
             }
         }
     }

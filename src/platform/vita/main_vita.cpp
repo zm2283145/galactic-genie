@@ -5,6 +5,7 @@
 #include "../../engine/assets.h"
 #include "../../engine/game.h"
 #include "../../render/gl_renderer.h"
+#include "vita_audio.h"
 
 #include <psp2/ctrl.h>
 #include <psp2/io/stat.h>
@@ -28,6 +29,7 @@ namespace {
 const char *kRoot = "ux0:data/swgb";
 const char *kDataDir = "ux0:data/swgb/Data";
 const char *kCampaignPath = "ux0:data/swgb/Campaign/xcam3.cpx";
+const char *kScenarioSoundDir = "ux0:data/swgb/Sound/Scenario";
 const int kScreenW = 960, kScreenH = 544;
 
 FILE *g_log = nullptr;
@@ -123,6 +125,11 @@ int main() {
 
         swgb::Game game(assets);
         game.setLogger([](const std::string &s) { logf("%s", s.c_str()); });
+        swgb::VitaAudio audio(kScenarioSoundDir);
+        audio.setLogger([](const std::string &s) { logf("audio: %s", s.c_str()); });
+        std::string audioError;
+        if (!audio.start(&audioError)) logf("audio disabled: %s", audioError.c_str());
+        game.setSoundPlayer([&audio](const std::string &name) { audio.play(name); });
         if (!game.initScenario(scenario, &err)) {
             errorScreen(err);
             sceKernelExitProcess(0);

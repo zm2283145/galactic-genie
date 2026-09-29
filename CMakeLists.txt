@@ -11,6 +11,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 set(SWGB_CORE_SOURCES
+    src/core/audio.cpp
     src/core/blendomatic.cpp
     src/core/cpx.cpp
     src/core/drs.cpp
@@ -35,6 +36,7 @@ if(VITA)
     add_executable(swgb
         ${SWGB_CORE_SOURCES}
         src/render/gl_renderer.cpp
+        src/platform/vita/vita_audio.cpp
         src/platform/vita/main_vita.cpp
     )
     target_compile_options(swgb PRIVATE -O2 -Wall -Wno-psabi)

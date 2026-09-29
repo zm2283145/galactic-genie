@@ -3,15 +3,19 @@
 #   tools\deploy_vita.ps1 -Vpk          # copies build-vita\swgb.vpk to ux0:data/swgb/swgb.vpk (install with VitaShell)
 #   tools\deploy_vita.ps1 -GameData     # one-time: copies the SWGB:CC files to ux0:data/swgb/Data
 #   tools\deploy_vita.ps1 -CampaignData # copies XCAM3.CPX for the Breaking Bread scenario
+#   tools\deploy_vita.ps1 -SoundData    # copies voices referenced by the selected campaign mission
 #   tools\deploy_vita.ps1 -PullLog      # downloads ux0:data/swgb/swgb.log to build-vita\swgb.log
 param(
     [string]$Vita = "10.1.1.93",
     [int]$Port = 1337,
     [string]$GameDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Data",
     [string]$CampaignDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Campaign",
+    [string]$SoundDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Sound\Scenario",
+    [int]$CampaignEntry = 2,
     [switch]$Vpk,
     [switch]$GameData,
     [switch]$CampaignData,
+    [switch]$SoundData,
     [switch]$PullLog
 )
 $ErrorActionPreference = "Stop"
@@ -61,6 +65,27 @@ if ($GameData) {
 if ($CampaignData) {
     Ftp-MkDir "ux0:/data/swgb/Campaign"
     Ftp-Put (Join-Path $CampaignDir "XCAM3.CPX") "ux0:/data/swgb/Campaign/xcam3.cpx"
+}
+if ($SoundData) {
+    $tool = Join-Path $repo "build-pc\swgbtool.exe"
+    if (-not (Test-Path $tool)) {
+        throw "build-pc\swgbtool.exe is required; run tools\build_vita.ps1 -Pc first"
+    }
+    $env:Path = "C:\msys64\mingw64\bin;C:\msys64\usr\bin;" + $env:Path
+    $campaign = Join-Path $CampaignDir "XCAM3.CPX"
+    $scenario = (& $tool scenario $campaign $CampaignEntry 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0) { throw "could not inspect campaign sounds: $scenario" }
+    $names = [regex]::Matches($scenario, "sound '([^']+)'") |
+        ForEach-Object { $_.Groups[1].Value } |
+        Where-Object { $_ } |
+        Sort-Object -Unique
+    Ftp-MkDir "ux0:/data/swgb/Sound"
+    Ftp-MkDir "ux0:/data/swgb/Sound/Scenario"
+    foreach ($name in $names) {
+        $local = Join-Path $SoundDir "$name.mp3"
+        if (-not (Test-Path $local)) { throw "missing scenario sound $local" }
+        Ftp-Put $local "ux0:/data/swgb/Sound/Scenario/$($name.ToLower()).mp3"
+    }
 }
 if ($Vpk) { Ftp-Put (Join-Path $repo "build-vita\swgb.vpk") "ux0:/data/swgb/swgb.vpk" }
 if ($PullLog) {

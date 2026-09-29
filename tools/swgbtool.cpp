@@ -8,6 +8,7 @@
 //   swgbtool render <DataDir> <out.png> [seed] [seconds] [zoom]
 #include "../src/core/cpx.h"
 #include "../src/core/drs.h"
+#include "../src/core/audio.h"
 #include "../src/core/genie_dat.h"
 #include "../src/core/scenario.h"
 #include "../src/engine/assets.h"
@@ -38,7 +39,8 @@ static int usage() {
             "  swgbtool scenario-units <DataDir> <file.cpx> <entry> [unitId]\n"
             "  swgbtool render-scenario <DataDir> <file.cpx> <entry> <out.png> [x] [y] [zoom]\n"
             "  swgbtool stress-scenario <DataDir> <file.cpx> <entry> [zoom]\n"
-            "  swgbtool simulate-scenario <DataDir> <file.cpx> <entry> [seconds] [out.png]\n");
+            "  swgbtool simulate-scenario <DataDir> <file.cpx> <entry> [seconds] [out.png]\n"
+            "  swgbtool mp3 <file.mp3>\n");
     return 2;
 }
 
@@ -444,6 +446,7 @@ static int cmdStressScenario(const char *dataDir, const char *campaignPath, int 
         fprintf(stderr, "error: %s\n", err.c_str());
         return 1;
     }
+
     SoftRenderer renderer;
     Assets assets(&renderer);
     if (!assets.init(dataDir, &err)) {
@@ -482,6 +485,18 @@ static int cmdStressScenario(const char *dataDir, const char *campaignPath, int 
     return 0;
 }
 
+static int cmdMp3(const char *path) {
+    AudioClip clip;
+    std::string err;
+    if (!loadMp3(path, clip, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    printf("decoded %s: %zu frames, %.2f seconds, %u Hz stereo\n", path, clip.frameCount(),
+           clip.frameCount() / (double)AudioClip::kSampleRate, AudioClip::kSampleRate);
+    return 0;
+}
+
 static int cmdSimulateScenario(const char *dataDir, const char *campaignPath, int entryNumber,
                                float seconds, const char *out) {
     Scenario scenario;
@@ -498,6 +513,7 @@ static int cmdSimulateScenario(const char *dataDir, const char *campaignPath, in
     }
     Game game(assets);
     game.setLogger([](const std::string &message) { printf("runtime: %s\n", message.c_str()); });
+    game.setSoundPlayer([](const std::string &name) { printf("sound: %s\n", name.c_str()); });
     if (!game.initScenario(scenario, &err)) {
         fprintf(stderr, "error: %s\n", err.c_str());
         return 1;
@@ -585,5 +601,6 @@ int main(int argc, char **argv) {
         return cmdSimulateScenario(argv[2], argv[3], atoi(argv[4]),
                                    argc > 5 ? (float)atof(argv[5]) : 1.1f,
                                    argc > 6 ? argv[6] : nullptr);
+    if (!strcmp(cmd, "mp3")) return cmdMp3(argv[2]);
     return usage();
 }
