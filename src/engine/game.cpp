@@ -111,7 +111,26 @@ struct SpriteDraw {
     int64_t key;
     Texture *tex;
     Quad q;
+    Texture *outlineTex = nullptr;
+    uint32_t ownerId = 0;
+    bool outlineCandidate = false;
+    bool occludes = true;
 };
+
+Quad clippedQuad(const Quad &quad, float left, float top,
+                 float right, float bottom) {
+    const float x0 = (left - quad.x) / quad.w;
+    const float y0 = (top - quad.y) / quad.h;
+    const float x1 = (right - quad.x) / quad.w;
+    const float y1 = (bottom - quad.y) / quad.h;
+    return {
+        left, top, right - left, bottom - top,
+        quad.u0 + (quad.u1 - quad.u0) * x0,
+        quad.v0 + (quad.v1 - quad.v0) * y0,
+        quad.u0 + (quad.u1 - quad.u0) * x1,
+        quad.v0 + (quad.v1 - quad.v0) * y1,
+    };
+}
 
 struct TerrainInfluence {
     int terrain = 0;
@@ -4884,7 +4903,8 @@ int Game::graphicSortLayer(int graphicId, int depth) const {
 void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float facing, float animTime, int player,
                        int initialFrame, int depth, bool drawShadows, float viewW, float viewH,
                        int sortLayerOverride, int sortBias,
-                       float sortYOverride) {
+                       float sortYOverride, uint32_t ownerId,
+                       bool outlineCandidate) {
     const dat::Graphic *g = assets_.dat().graphic(graphicId);
     if (!g) return;
     if (!drawShadows && depth > 0 && g->layer == 5) return;
@@ -4915,12 +4935,14 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
                                    65536)
                              << 8 |
                          ((sortBias + depth) & 0xFF),
-                     f.tex, q});
+                     f.tex, q, f.outlineTex, ownerId,
+                     outlineCandidate, g->layer != 5});
             } else {
                 drawGraphic(r, d.graphicId, sx + d.offsetX, sy + d.offsetY, facing, animTime, player,
                             initialFrame, depth + 1, drawShadows, viewW, viewH,
                             sortLayerOverride, sortBias,
-                            sortYOverride);
+                            sortYOverride, ownerId,
+                            outlineCandidate);
             }
         }
         return;
@@ -4947,7 +4969,9 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
     int64_t key = (int64_t)sortLayer << 40 |
                   (int64_t)(sortY * 16 + 65536) << 8 |
                   ((sortBias + depth) & 0xFF);
-    g_draws.push_back({key, f.tex, q});
+    g_draws.push_back(
+        {key, f.tex, q, f.outlineTex, ownerId,
+         outlineCandidate, g->layer != 5});
 }
 
 void Game::drawGraphicNow(Renderer &r, int graphicId, float sx, float sy, float facing, float t, int player) {
@@ -5182,7 +5206,10 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             }
         }
         drawGraphic(r, gid, sx, sy, o.facing, graphicTime, o.player, o.initialFrame, 0,
-                    o.drawShadows && !overview, viewW, viewH);
+                    o.drawShadows && !overview, viewW, viewH,
+                    -1, 0, -1000000000.0f, o.spawnId,
+                    o.player > 0 &&
+                        o.unit->type != dat::UT_Building);
 
         const float damagePercent =
             100.0f * (1.0f - o.hitPoints / std::max(1.0f, o.maxHitPoints));
@@ -5202,13 +5229,15 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             } else {
                 drawGraphic(r, damageGraphic.graphicId, sx, sy, o.facing, o.animTime,
                             o.player, 0, 0, false, viewW, viewH,
-                            damageSortLayer, 128, sy);
+                            damageSortLayer, 128, sy,
+                            o.spawnId, false);
             }
         }
         if (replacement)
             drawGraphic(r, replacement->graphicId, sx, sy, o.facing, o.animTime,
                         o.player, 0, 0, false, viewW, viewH,
-                        damageSortLayer, 128, sy);
+                        damageSortLayer, 128, sy,
+                        o.spawnId, false);
     }
     for (const Remains &remains : remains_) {
         int graphicId = remains.dyingGraphic;
@@ -5439,6 +5468,50 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                      [](const SpriteDraw &a, const SpriteDraw &b) { return a.key < b.key; });
     for (const SpriteDraw &d : g_draws) r.draw(d.tex, d.q);
     stats_.sprites = (int)g_draws.size();
+
+    for (size_t unitIndex = 0;
+         unitIndex < g_draws.size(); unitIndex++) {
+        const SpriteDraw &unit = g_draws[unitIndex];
+        if (!unit.outlineCandidate || !unit.outlineTex ||
+            unit.ownerId == 0)
+            continue;
+        const Object *object = findObject(unit.ownerId);
+        if (!object || !object->active || object->hidden)
+            continue;
+        const Rgba &color =
+            assets_.palette()[(uint8_t)(
+                playerColorBase(object->player) + 4)];
+        for (size_t foregroundIndex = unitIndex + 1;
+             foregroundIndex < g_draws.size();
+             foregroundIndex++) {
+            const SpriteDraw &foreground =
+                g_draws[foregroundIndex];
+            if (!foreground.occludes ||
+                foreground.ownerId == unit.ownerId ||
+                foreground.tex->alphaOnly)
+                continue;
+            const float left =
+                std::max(unit.q.x, foreground.q.x);
+            const float top =
+                std::max(unit.q.y, foreground.q.y);
+            const float right =
+                std::min(unit.q.x + unit.q.w,
+                         foreground.q.x + foreground.q.w);
+            const float bottom =
+                std::min(unit.q.y + unit.q.h,
+                         foreground.q.y + foreground.q.h);
+            if (left >= right || top >= bottom)
+                continue;
+            r.drawMaskedTinted(
+                unit.outlineTex,
+                clippedQuad(unit.q, left, top,
+                            right, bottom),
+                foreground.tex,
+                clippedQuad(foreground.q, left, top,
+                            right, bottom),
+                color.r, color.g, color.b, 255);
+        }
+    }
 
     for (const auto &point : blasterGlowPoints) {
         const float glowWidth = 6.0f / zoom_;

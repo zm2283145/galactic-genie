@@ -13,7 +13,6 @@ namespace swgb {
 namespace {
 struct SoftTexture : Texture {
     std::vector<uint8_t> px;
-    bool alphaOnly = false;
 };
 } // namespace
 
@@ -103,15 +102,78 @@ void SoftRenderer::drawMasked(Texture *tex, const Quad &q, Texture *mask, const 
         if (tv < 0 || tv >= t->height || mv < 0 || mv >= m->height) continue;
         uint8_t *drow = &fb_[((size_t)y * w_) * 4];
         const uint8_t *srow = &t->px[(size_t)tv * t->width * 4];
-        const uint8_t *mrow = &m->px[(size_t)mv * m->width];
+        const uint8_t *mrow = &m->px[(size_t)mv * m->width *
+                                     (m->alphaOnly ? 1 : 4)];
         for (int x = ix0; x < ix1; x++) {
             int tu = (int)std::floor(q.u0 + (x + 0.5f - x0) * du);
             int mu = (int)std::floor(maskQ.u0 + (x + 0.5f - x0) * dmu);
             if (tu < 0 || tu >= t->width || mu < 0 || mu >= m->width) continue;
             const uint8_t *source = srow + tu * 4;
-            uint8_t masked[4] = {source[0], source[1], source[2],
-                                 (uint8_t)((unsigned)source[3] * mrow[mu] / 255)};
+            const uint8_t maskAlpha =
+                mrow[mu * (m->alphaOnly ? 1 : 4) +
+                     (m->alphaOnly ? 0 : 3)];
+            uint8_t masked[4] = {
+                source[0], source[1], source[2],
+                (uint8_t)((unsigned)source[3] * maskAlpha / 255)};
             blend(drow + x * 4, masked);
+        }
+    }
+}
+
+void SoftRenderer::drawMaskedTinted(Texture *tex, const Quad &q,
+                                    Texture *mask, const Quad &maskQ,
+                                    uint8_t red, uint8_t green,
+                                    uint8_t blue, uint8_t alpha) {
+    drawCalls_++;
+    auto *t = static_cast<SoftTexture *>(tex);
+    auto *m = static_cast<SoftTexture *>(mask);
+    const float x0 = q.x * scale_, y0 = q.y * scale_;
+    const float x1 = (q.x + q.w) * scale_;
+    const float y1 = (q.y + q.h) * scale_;
+    const int ix0 = std::max(0, (int)std::floor(x0));
+    const int iy0 = std::max(0, (int)std::floor(y0));
+    const int ix1 = std::min(w_, (int)std::ceil(x1));
+    const int iy1 = std::min(h_, (int)std::ceil(y1));
+    if (ix0 >= ix1 || iy0 >= iy1) return;
+    const float du = (q.u1 - q.u0) / (x1 - x0);
+    const float dv = (q.v1 - q.v0) / (y1 - y0);
+    const float dmu = (maskQ.u1 - maskQ.u0) / (x1 - x0);
+    const float dmv = (maskQ.v1 - maskQ.v0) / (y1 - y0);
+    for (int y = iy0; y < iy1; y++) {
+        const int tv = (int)std::floor(
+            q.v0 + (y + 0.5f - y0) * dv);
+        const int mv = (int)std::floor(
+            maskQ.v0 + (y + 0.5f - y0) * dmv);
+        if (tv < 0 || tv >= t->height ||
+            mv < 0 || mv >= m->height)
+            continue;
+        uint8_t *destination =
+            &fb_[((size_t)y * w_) * 4];
+        const uint8_t *source =
+            &t->px[(size_t)tv * t->width *
+                   (t->alphaOnly ? 1 : 4)];
+        const uint8_t *maskRow =
+            &m->px[(size_t)mv * m->width *
+                   (m->alphaOnly ? 1 : 4)];
+        for (int x = ix0; x < ix1; x++) {
+            const int tu = (int)std::floor(
+                q.u0 + (x + 0.5f - x0) * du);
+            const int mu = (int)std::floor(
+                maskQ.u0 + (x + 0.5f - x0) * dmu);
+            if (tu < 0 || tu >= t->width ||
+                mu < 0 || mu >= m->width)
+                continue;
+            const uint8_t sourceAlpha =
+                source[tu * (t->alphaOnly ? 1 : 4) +
+                       (t->alphaOnly ? 0 : 3)];
+            const uint8_t maskAlpha =
+                maskRow[mu * (m->alphaOnly ? 1 : 4) +
+                        (m->alphaOnly ? 0 : 3)];
+            uint8_t tinted[4] = {
+                red, green, blue,
+                (uint8_t)((unsigned)sourceAlpha *
+                          maskAlpha * alpha / (255u * 255u))};
+            blend(destination + x * 4, tinted);
         }
     }
 }

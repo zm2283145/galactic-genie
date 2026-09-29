@@ -400,7 +400,9 @@ private:
     void drawGraphic(Renderer &r, int graphicId, float sx, float sy, float facing, float animTime, int player,
                      int initialFrame, int depth, bool drawShadows, float viewW, float viewH,
                      int sortLayerOverride = -1, int sortBias = 0,
-                     float sortYOverride = -1000000000.0f);
+                     float sortYOverride = -1000000000.0f,
+                     uint32_t ownerId = 0,
+                     bool outlineCandidate = false);
     int graphicSortLayer(int graphicId, int depth = 0) const;
 
     Assets &assets_;

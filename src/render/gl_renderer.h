@@ -20,6 +20,9 @@ public:
     void beginFrame(int screenW, int screenH, float scale, uint8_t r, uint8_t g, uint8_t b) override;
     void draw(Texture *tex, const Quad &q) override;
     void drawMasked(Texture *tex, const Quad &q, Texture *mask, const Quad &maskQ) override;
+    void drawMaskedTinted(Texture *tex, const Quad &q, Texture *mask,
+                          const Quad &maskQ, uint8_t r, uint8_t g,
+                          uint8_t b, uint8_t a) override;
     void fillRect(float x, float y, float w, float h, uint8_t r, uint8_t g, uint8_t b, uint8_t a) override;
     void endFrame() override;
 

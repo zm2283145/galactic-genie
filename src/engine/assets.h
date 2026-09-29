@@ -26,11 +26,13 @@ struct SpriteFrame {
     float u, v;       // top-left texel in the atlas page
     int w, h;
     int hotX, hotY;
+    Texture *outlineTex = nullptr;
 };
 
 struct SpriteSheet {
     std::vector<SpriteFrame> frames;
     std::vector<Texture *> pages;
+    std::vector<Texture *> outlinePages;
     size_t bytes = 0;
 };
 
