@@ -117,12 +117,14 @@ static int cmdUnit(const char *dataDir, int id) {
             const int graphicId = unit.standingGraphic[0];
             const auto *graphic = assets.dat().graphic(graphicId);
             printf("civ %zu %-24s unit '%s', type %u, graphic %d, slp %d, frames %d, angles %d, "
-                   "duration %.3f, sequence 0x%02x, mirror %u, deltas %zu\n", civ,
+                   "duration %.3f, sequence 0x%02x, mirror %u, deltas %zu, special graphic %d, "
+                   "special ability %u, adjacent mode %u, graphics angle %d\n", civ,
                    assets.dat().civs[civ].name.c_str(), unit.name.c_str(), unit.type, graphicId,
                    graphic ? graphic->slp : -1, graphic ? graphic->frameCount : 0,
                    graphic ? graphic->angleCount : 0, graphic ? graphic->frameDuration : 0,
                    graphic ? graphic->sequenceType : 0, graphic ? graphic->mirroringMode : 0,
-                   graphic ? graphic->deltas.size() : 0);
+                   graphic ? graphic->deltas.size() : 0, unit.specialGraphic, unit.specialAbility,
+                   unit.adjacentMode, unit.graphicsAngle);
             if (graphic)
                 for (const auto &delta : graphic->deltas)
                     if (const auto *child = assets.dat().graphic(delta.graphicId))

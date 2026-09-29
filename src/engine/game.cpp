@@ -228,12 +228,36 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
         object.x = object.homeX = object.targetX = source.y;
         object.y = object.homeY = object.targetY = mapSize_ - source.x;
         const dat::Graphic *graphic = assets_.dat().graphic(unit->standingGraphic[0]);
-        object.facing = graphic && graphic->angleCount == 5
+        object.facing = unit->adjacentMode && graphic && graphic->angleCount == 5
                             ? source.rotation
                             : source.rotation - kPi * 0.5f;
         object.wander = false;
         object.initialFrame = source.initialFrame;
         objects_.push_back(object);
+    }
+    std::vector<Object *> adjacentObjects;
+    for (Object &object : objects_) {
+        const dat::Graphic *graphic = assets_.dat().graphic(object.unit->standingGraphic[0]);
+        if (object.unit->adjacentMode && graphic && graphic->angleCount == 5)
+            adjacentObjects.push_back(&object);
+    }
+    for (Object *object : adjacentObjects) {
+        bool north = false, east = false, south = false, west = false;
+        for (const Object *neighbor : adjacentObjects) {
+            if (neighbor == object || neighbor->player != object->player) continue;
+            const float dx = neighbor->x - object->x;
+            const float dy = neighbor->y - object->y;
+            if (std::fabs(dx) < 0.01f && std::fabs(dy + 1.0f) < 0.01f) north = true;
+            if (std::fabs(dx - 1.0f) < 0.01f && std::fabs(dy) < 0.01f) east = true;
+            if (std::fabs(dx) < 0.01f && std::fabs(dy - 1.0f) < 0.01f) south = true;
+            if (std::fabs(dx + 1.0f) < 0.01f && std::fabs(dy) < 0.01f) west = true;
+        }
+        const int horizontal = (east ? 1 : 0) + (west ? 1 : 0);
+        const int vertical = (north ? 1 : 0) + (south ? 1 : 0);
+        int connectionFrame = 2;
+        if (horizontal && !vertical) connectionFrame = horizontal == 2 ? 1 : 4;
+        if (vertical && !horizontal) connectionFrame = vertical == 2 ? 0 : 3;
+        object->facing = connectionFrame * 2.0f * kPi / 5.0f;
     }
     if (scenario.cameraX >= 0 && scenario.cameraY >= 0)
         lookAt(scenario.cameraY, mapSize_ - scenario.cameraX);
