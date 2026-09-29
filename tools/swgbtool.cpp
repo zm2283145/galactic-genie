@@ -86,6 +86,10 @@ static int cmdInfo(const char *dataDir) {
         printf("  player color %zu: id %d, palette base %d, minimap %d, statistics %d\n",
                i, color.id, color.playerColorBase, color.minimapColor, color.statisticsText);
     }
+    for (size_t i = 0; i < d.civs.size(); i++) {
+        const auto &civ = d.civs[i];
+        printf("  civilization %zu: %-24s icon set %u\n", i, civ.name.c_str(), civ.iconSet);
+    }
     for (size_t i = 0; i < d.terrainBlock.terrains.size(); i++) {
         const auto &terrain = d.terrainBlock.terrains[i];
         if (terrain.blendType >= 8)
@@ -154,10 +158,11 @@ static int cmdUnit(const char *dataDir, int id) {
                    unit.frameDelay, unit.graphicDisplacement[0], unit.graphicDisplacement[1],
                    unit.graphicDisplacement[2],
                    unit.displayedAttack, unit.displayedMeleeArmour);
-            printf("  interface name id %d '%s', internal '%s', icon %d\n",
+            printf("  interface name id %d '%s', internal '%s', icon %d, portrait %d, kind %u\n",
                    unit.languageDllName,
                    assets.localizedString(unit.languageDllName).c_str(),
-                   unit.name2.c_str(), unit.iconId);
+                   unit.name2.c_str(), unit.iconId, unit.oldPortraitPict,
+                   unit.interfaceKind);
             const auto *attackGraphic = assets.dat().graphic(unit.attackGraphic);
             const auto *dyingGraphic = assets.dat().graphic(unit.dyingGraphic);
             const auto *projectile = unit.projectileUnitId >= 0 &&
@@ -667,10 +672,17 @@ static int cmdSimulateScenario(const char *dataDir, const char *campaignPath, in
         return 1;
     }
     Game game(assets);
+    float simulationElapsed = 0;
+    std::vector<std::array<float, 2>> unitSounds;
     game.setLogger([](const std::string &message) { printf("runtime: %s\n", message.c_str()); });
     game.setSoundPlayer([](const std::string &name) {
         printf("sound: %s\n", name.c_str());
         return 2.0f;
+    });
+    game.setUnitSoundPlayer([&](int soundId, int civilization) {
+        if (unitSounds.size() < 64)
+            unitSounds.push_back(
+                {simulationElapsed, (float)(soundId * 100 + civilization)});
     });
     if (!game.initScenario(scenario, &err)) {
         fprintf(stderr, "error: %s\n", err.c_str());
@@ -678,8 +690,8 @@ static int cmdSimulateScenario(const char *dataDir, const char *campaignPath, in
     }
     InputState input;
     const float step = 1.0f / 30.0f;
-    for (float elapsed = 0; elapsed < seconds; elapsed += step)
-        game.update(std::min(step, seconds - elapsed), input);
+    for (; simulationElapsed < seconds; simulationElapsed += step)
+        game.update(std::min(step, seconds - simulationElapsed), input);
     if (out) {
         game.render(renderer, 960, 544);
         if (!renderer.savePng(out)) {
@@ -696,6 +708,16 @@ static int cmdSimulateScenario(const char *dataDir, const char *campaignPath, in
            "%zu static obstruction violations\n",
            movement.pathingObjects, movement.overlappingPairs, movement.terrainViolations,
            movement.staticObstructionViolations);
+    const CombatStats combat = game.combatStats();
+    printf("  combat: %zu active orders, %zu automatic targets, %zu hits, "
+           "%zu kills, %zu projectiles\n",
+           combat.activeOrders, combat.automaticTargetsAcquired,
+           combat.attacksLanded, combat.unitsKilled, combat.projectilesLaunched);
+    for (const auto &sound : unitSounds) {
+        const int packed = (int)sound[1];
+        printf("    unit sound %.2fs: id %d civilization %d\n", sound[0],
+               packed / 100, packed % 100);
+    }
     for (const MovingObjectInfo &object : game.movingObjects())
         printf("    object %u unit %d player %d at %.2f,%.2f -> %.2f,%.2f "
                "via %.2f,%.2f blocked %.2f\n",
@@ -738,6 +760,13 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     }
 
     InputState input;
+    for (int i = 0; i < 30; i++) game.update(1.0f / 30.0f, input);
+    const CombatStats startupCombat = game.combatStats();
+    const bool quietStartup =
+        startupCombat.automaticTargetsAcquired == 0 &&
+        startupCombat.attacksLanded == 0 &&
+        startupCombat.unitsKilled == 0 &&
+        startupCombat.projectilesLaunched == 0;
     input.pointerX = 480;
     input.pointerY = 272;
     input.selectPressed = true;
@@ -809,11 +838,12 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     }
     const MovementStats movement = game.movementStats();
     printf("controls: single %zu, double %zu, box %zu, commanded %zu, sounds %zu, "
-           "stance changes %zu, single audio %d/%d, pending goals %zu/%zu, overlaps %zu, "
-           "terrain violations %zu\n",
+           "stance changes %zu, single audio %d/%d, quiet startup %d, "
+           "pending goals %zu/%zu, overlaps %zu, terrain violations %zu\n",
            singleSelected, doubleSelected, boxSelected, commanded,
            acknowledgementSounds.size(), attackModeChanges,
            doubleClickPlayedOnce ? 1 : 0, movePlayedOnce ? 1 : 0,
+           quietStartup ? 1 : 0,
            movement.selectedPendingMoveGoals, movement.pendingMoveGoals,
            movement.overlappingPairs,
            movement.terrainViolations);
@@ -821,6 +851,7 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
         commanded == 0 || acknowledgementSounds.size() < 5 ||
         attackModeChanges != 1 ||
         !doubleClickPlayedOnce || !movePlayedOnce ||
+        !quietStartup ||
         movement.selectedPendingMoveGoals != 0 ||
         movement.overlappingPairs != 0 ||
         movement.terrainViolations != 0) {

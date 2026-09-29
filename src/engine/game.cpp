@@ -23,6 +23,7 @@ constexpr size_t kCursorNormal = 0;
 constexpr size_t kCursorCommand = 3;
 constexpr size_t kCursorAttack = 4;
 constexpr size_t kCursorMove = 11;
+constexpr int kBuildingIconSlpBase = 53241;
 constexpr int kUnitIconSlpBase = 53251;
 
 // Terrain ids from genie_x1.dat's terrain table.
@@ -1429,7 +1430,10 @@ void Game::acquireAutomaticTarget(Object &source) {
                  combatObjectCells_[
                      (size_t)cellY * mobileObjectGridWidth_ + cellX]) {
                 Object &candidate = objects_[(size_t)index];
-                if (!isEnemy(source, candidate)) continue;
+                // Gaia wildlife/resources may be manually hunted, but defensive
+                // units should not start clearing neutral fauna on sight.
+                if (candidate.player <= 0 || !isEnemy(source, candidate))
+                    continue;
                 const float dx = candidate.x - source.x;
                 const float dy = candidate.y - source.y;
                 const float distanceSquared = dx * dx + dy * dy;
@@ -2918,8 +2922,17 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     bool panelPortraitFlipped = false;
     if (panelObject) {
         const int civilization = civilizationForPlayer(panelObject->player);
+        const int iconSet =
+            civilization >= 0 &&
+                    (size_t)civilization < assets_.dat().civs.size()
+                ? assets_.dat().civs[(size_t)civilization].iconSet
+                : 1;
+        const int iconSlpBase =
+            panelObject->unit->interfaceKind == 2
+                ? kBuildingIconSlpBase
+                : kUnitIconSlpBase;
         const SpriteSheet *icons =
-            assets_.interfaceSheet(kUnitIconSlpBase + civilization);
+            assets_.interfaceSheet(iconSlpBase + std::max(1, iconSet) - 1);
         if (icons && panelObject->unit->iconId >= 0 &&
             (size_t)panelObject->unit->iconId < icons->frames.size()) {
             panelPortrait = &icons->frames[(size_t)panelObject->unit->iconId];
