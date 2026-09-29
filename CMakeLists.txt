@@ -40,9 +40,11 @@ if(VITA)
         src/platform/vita/vita_audio.cpp
         src/platform/vita/main_vita.cpp
     )
-    target_compile_options(swgb PRIVATE -O2 -Wall -Wno-psabi)
+    target_compile_options(swgb PRIVATE
+        -Os -ffunction-sections -fdata-sections
+        -Wall -Wno-psabi)
     # -Wl,-q keeps relocations; vita-elf-create needs them for a valid velf.
-    target_link_options(swgb PRIVATE -Wl,-q)
+    target_link_options(swgb PRIVATE -Wl,-q,--gc-sections)
     target_link_libraries(swgb PRIVATE
         vitaGL vitashark SceShaccCgExt taihen_stub mathneon z
         SceGxm_stub SceDisplay_stub SceCtrl_stub SceTouch_stub SceHid_stub

@@ -35,6 +35,7 @@ static int usage() {
             "  swgbtool units <DataDir> <name-fragment>\n"
             "  swgbtool tech <DataDir> <techId>\n"
             "  swgbtool techs <DataDir> <name-fragment>\n"
+            "  swgbtool options <DataDir> <civId> <buildingId>\n"
             "  swgbtool sound <DataDir> <soundId>\n"
             "  swgbtool drs    <file.drs>\n"
             "  swgbtool drs-slps <file.drs>\n"
@@ -142,7 +143,8 @@ static int cmdUnit(const char *dataDir, int id) {
                    "duration %.3f, sequence 0x%02x, mirror %u, deltas %zu, special graphic %d, "
                    "special ability %u, adjacent mode %u, graphics angle %d, speed %.2f, "
                    "restriction %d, fly %u, obstruction %u/%u, collision %.2f,%.2f, "
-                   "outline %.2f,%.2f,%.2f, sounds select/move/attack %d/%d/%d\n", civ,
+                   "outline %.2f,%.2f,%.2f, enabled/disabled %u/%u, unit civ %u, "
+                   "sounds select/move/attack %d/%d/%d\n", civ,
                    assets.dat().civs[civ].name.c_str(), unit.name.c_str(), unit.type, unit.cls,
                    unit.hideInEditor, unit.heroMode, graphicId,
                    graphic ? graphic->slp : -1, graphic ? graphic->frameCount : 0,
@@ -153,6 +155,7 @@ static int cmdUnit(const char *dataDir, int id) {
                    unit.flyMode, unit.obstructionType, unit.obstructionClass,
                    unit.collisionSize[0], unit.collisionSize[1],
                    unit.outlineSize[0], unit.outlineSize[1], unit.outlineSize[2],
+                   unit.enabled, unit.disabled, unit.civilization,
                    unit.selectionSound, unit.moveSound, unit.attackSound);
             printf("  combat hp %d base armor %d range %.2f..%.2f reload %.2f "
                    "attack graphic %d projectile %d frame delay %d displacement %.2f,%.2f,%.2f "
@@ -317,6 +320,14 @@ static int cmdTech(const char *dataDir, int id) {
            id, assets.localizedString(tech.languageDllName).c_str(),
            tech.name2.c_str(), tech.civ, tech.locationId,
            tech.researchTime, tech.effectId);
+    printf("  required (%d):", tech.requiredTechCount);
+    for (int required : tech.requiredTechs)
+        if (required >= 0) printf(" %d", required);
+    printf("; costs");
+    for (const auto &cost : tech.costs)
+        if (cost.flag && cost.type >= 0)
+            printf(" %d=%d", cost.type, cost.amount);
+    printf("\n");
     if (tech.effectId >= 0 &&
         (size_t)tech.effectId < assets.dat().effects.size()) {
         const dat::Effect &effect =
@@ -351,6 +362,52 @@ static int cmdTechs(const char *dataDir, const char *fragment) {
                id, tech.locationId, tech.effectId, tech.researchTime,
                tech.civ, tech.buttonId, tech.name.c_str(),
                tech.name2.c_str(), localized.c_str());
+    }
+    return 0;
+}
+
+static int cmdOptions(const char *dataDir, int civId,
+                      int buildingId) {
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    std::string err;
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    if (civId < 0 ||
+        (size_t)civId >= assets.dat().civs.size()) {
+        fprintf(stderr, "error: civilization %d is unavailable\n",
+                civId);
+        return 1;
+    }
+    const auto &civ = assets.dat().civs[(size_t)civId];
+    printf("units at building %d for civ %d '%s'\n",
+           buildingId, civId, civ.name.c_str());
+    for (const dat::Unit &unit : civ.units) {
+        if (!unit.exists ||
+            unit.trainLocationId != buildingId)
+            continue;
+        printf("  unit %d button %u enabled/disabled %u/%u "
+               "hidden %u hero %u unit-civ %u '%s' '%s'\n",
+               unit.id, unit.buttonId, unit.enabled,
+               unit.disabled, unit.hideInEditor, unit.heroMode,
+               unit.civilization, unit.name.c_str(),
+               assets.localizedString(
+                   unit.languageDllName).c_str());
+    }
+    printf("technologies at building %d\n", buildingId);
+    for (size_t id = 0; id < assets.dat().techs.size(); id++) {
+        const dat::Tech &tech = assets.dat().techs[id];
+        if (tech.locationId != buildingId)
+            continue;
+        printf("  tech %zu button %u civ %d time %d effect %d "
+               "required %d '%s' '%s'\n",
+               id, tech.buttonId, tech.civ,
+               tech.researchTime, tech.effectId,
+               tech.requiredTechCount, tech.name2.c_str(),
+               assets.localizedString(
+                   tech.languageDllName).c_str());
     }
     return 0;
 }
@@ -895,6 +952,37 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
         startupCombat.unitsKilled == 0 &&
         startupCombat.projectilesLaunched == 0;
     const size_t configuredGates = game.gateCount();
+    const std::vector<int> troopOptions =
+        game.productionOptionIds(13818);
+    const std::vector<int> nurseryUnits =
+        game.productionOptionIds(23978);
+    const std::vector<int> commandOptions =
+        game.productionOptionIds(13780);
+    const std::vector<int> commandResearch =
+        game.researchOptionIds(13780);
+    const bool productionFiltered =
+        std::find(troopOptions.begin(), troopOptions.end(), 23) ==
+            troopOptions.end() &&
+        std::find(troopOptions.begin(), troopOptions.end(), 307) !=
+            troopOptions.end() &&
+        nurseryUnits.empty() &&
+        std::find(commandOptions.begin(), commandOptions.end(), 83) !=
+            commandOptions.end() &&
+        std::find(commandResearch.begin(),
+                  commandResearch.end(),
+                  33) != commandResearch.end();
+    if (!productionFiltered) {
+        auto printIds = [](const char *label,
+                           const std::vector<int> &ids) {
+            fprintf(stderr, "  %s:", label);
+            for (int id : ids) fprintf(stderr, " %d", id);
+            fprintf(stderr, "\n");
+        };
+        printIds("troop options", troopOptions);
+        printIds("nursery units", nurseryUnits);
+        printIds("command options", commandOptions);
+        printIds("command research", commandResearch);
+    }
     input.pointerX = 480;
     input.pointerY = 272;
     input.selectPressed = true;
@@ -1012,7 +1100,7 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     }
     const MovementStats movement = game.movementStats();
     printf("controls: single %zu, double %zu, box %zu, portrait %zu, commanded %zu, sounds %zu, move %.2fs, "
-           "leader double/portrait %d/%d, stance changes %zu, single audio %d/%d, quiet startup %d, gates %zu, cheat %d, "
+           "leader double/portrait %d/%d, stance changes %zu, single audio %d/%d, quiet startup %d, gates %zu, production %d, cheat %d, "
            "pending goals %zu/%zu, overlaps %zu (%u:u%d:s%d/%u:u%d:s%d), terrain violations %zu\n",
            singleSelected, doubleSelected, boxSelected, portraitSelected,
            commanded, acknowledgementSounds.size(),
@@ -1023,6 +1111,7 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
            doubleClickPlayedOnce ? 1 : 0, movePlayedOnce ? 1 : 0,
            quietStartup ? 1 : 0,
            configuredGates,
+           productionFiltered ? 1 : 0,
            forceFoodGranted ? 1 : 0,
            movement.selectedPendingMoveGoals, movement.pendingMoveGoals,
            movement.overlappingPairs,
@@ -1039,6 +1128,7 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
         attackModeChanges != 1 ||
         !doubleClickPlayedOnce || !movePlayedOnce ||
         !quietStartup || configuredGates < 3 ||
+        !productionFiltered ||
         !forceFoodGranted ||
         movement.selectedPendingMoveGoals != 0 ||
         movement.overlappingPairs != 0 ||
@@ -1076,9 +1166,170 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         fprintf(stderr, "error: %s\n", err.c_str());
         return 1;
     }
+    const std::vector<int> workerBuildings =
+        game.buildingOptionIds(6);
+    const bool workerCanBuild =
+        std::find(workerBuildings.begin(),
+                  workerBuildings.end(),
+                  70) != workerBuildings.end() &&
+        std::find(workerBuildings.begin(),
+                  workerBuildings.end(),
+                  87) != workerBuildings.end();
 
     constexpr int screenW = 960, screenH = 544;
     InputState input;
+    input.toggleCheatMenu = true;
+    game.update(0.001f, input);
+    for (int cheat = 0; cheat < 4; cheat++) {
+        if (cheat > 0) {
+            input = {};
+            input.menuDown = true;
+            game.update(0.001f, input);
+        }
+        input = {};
+        input.menuActivate = true;
+        game.update(0.001f, input);
+    }
+    input = {};
+    input.toggleCheatMenu = true;
+    game.update(0.001f, input);
+
+    constexpr uint32_t commandCenterId = 1;
+    constexpr int basicTrainingId = 33;
+    const std::vector<int> commandCenterResearch =
+        game.researchOptionIds(commandCenterId);
+    const auto basicTraining =
+        std::find(commandCenterResearch.begin(),
+                  commandCenterResearch.end(),
+                  basicTrainingId);
+    bool researchQueued = false;
+    bool researchCompleted = false;
+    bool researchCostDeducted = false;
+    float centerX = 0, centerY = 0;
+    if (basicTraining != commandCenterResearch.end() &&
+        game.objectScreenPosition(commandCenterId, screenW, screenH,
+                                  centerX, centerY)) {
+        input = {};
+        input.pointerX = centerX;
+        input.pointerY = centerY;
+        input.selectPressed = true;
+        game.update(0.001f, input);
+        input = {};
+        input.cycleAttackMode = true;
+        game.update(0.001f, input);
+        input = {};
+        input.actionTabRight = true;
+        game.update(0.001f, input);
+
+        const float novaBeforeResearch = game.resource(1, 3);
+        input = {};
+        input.pointerX = 510.0f;
+        input.pointerY =
+            64.0f +
+            42.0f * (float)std::distance(
+                         commandCenterResearch.begin(),
+                         basicTraining) +
+            20.0f;
+        input.selectPressed = true;
+        game.update(0.001f, input);
+        const std::vector<int> queuedResearch =
+            game.researchOptionIds(commandCenterId);
+        researchQueued =
+            std::find(queuedResearch.begin(),
+                      queuedResearch.end(),
+                      basicTrainingId) ==
+            queuedResearch.end();
+        researchCostDeducted =
+            std::abs(game.resource(1, 3) -
+                     (novaBeforeResearch - 50.0f)) < 0.01f;
+        input = {};
+        game.update(
+            assets.dat().techs[(size_t)basicTrainingId]
+                    .researchTime +
+                0.01f,
+            input);
+        researchCompleted =
+            game.technologyResearched(1, basicTrainingId);
+    }
+    input = {};
+    input.menuBack = true;
+    game.update(0.001f, input);
+
+    bool foundationPlaced = false;
+    bool constructionCompleted = false;
+    const auto dwelling =
+        std::find(workerBuildings.begin(),
+                  workerBuildings.end(), 70);
+    float workerX = 0, workerY = 0;
+    uint32_t selectedWorkerId = 0;
+    for (uint32_t workerId = 6;
+         workerId <= 10 && !selectedWorkerId;
+         workerId++) {
+        if (!game.objectScreenPosition(
+                workerId, screenW, screenH,
+                workerX, workerY))
+            continue;
+        input = {};
+        input.boxSelectCommit = true;
+        input.boxStartX = workerX - 2.0f;
+        input.boxStartY = workerY - 2.0f;
+        input.boxEndX = workerX + 2.0f;
+        input.boxEndY = workerY + 2.0f;
+        game.update(0.001f, input);
+        if (game.objectSelected(workerId))
+            selectedWorkerId = workerId;
+    }
+    if (dwelling != workerBuildings.end() &&
+        selectedWorkerId) {
+        input = {};
+        input.cycleAttackMode = true;
+        game.update(0.001f, input);
+        input = {};
+        input.pointerX = 510.0f;
+        input.pointerY =
+            64.0f +
+            42.0f * (float)std::distance(
+                         workerBuildings.begin(),
+                         dwelling) +
+            20.0f;
+        input.selectPressed = true;
+        game.update(0.001f, input);
+
+        const size_t objectsBeforeFoundation =
+            game.activeObjectCount();
+        game.lookAt(mapSize * 0.30f + 13.0f,
+                    mapSize * 0.35f + 10.0f);
+        input = {};
+        input.pointerX = screenW * 0.5f;
+        input.pointerY = screenH * 0.5f;
+        input.selectPressed = true;
+        game.update(0.001f, input);
+        foundationPlaced =
+            game.activeObjectCount() ==
+                objectsBeforeFoundation + 1 &&
+            game.underConstructionObjectCount() == 1;
+
+        input = {};
+        input.toggleCheatMenu = true;
+        game.update(0.001f, input);
+        input = {};
+        input.menuDown = true;
+        game.update(0.001f, input);
+        input = {};
+        input.menuActivate = true;
+        game.update(0.001f, input);
+        input = {};
+        input.toggleCheatMenu = true;
+        game.update(0.001f, input);
+        game.update(0.001f, {});
+        constructionCompleted =
+            foundationPlaced &&
+            game.underConstructionObjectCount() == 0;
+    }
+
+    game.lookAt(mapSize * 0.30f + 2.0f,
+                mapSize * 0.35f + 2.0f);
+    input = {};
     input.boxSelectCommit = true;
     input.boxStartX = 0;
     input.boxStartY = 0;
@@ -1311,6 +1562,8 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            "building destroyed/remains/decayed %d/%d/%d, edge scroll %d, "
            "attack audio %d, offscreen muted %d, approach retries %zu, "
            "automatic/retaliation/armed %zu/%zu/%zu, tech damage %d -> %d, "
+           "worker builds %d, research queued/cost/completed %d/%d/%d, "
+           "foundation placed/completed %d/%d, "
            "building damage/destroy %.2f/%.2fs\n",
            targetId, initialHitPoints, finalHitPoints,
            combat.ordersIssued, combat.attacksLanded, combat.unitsKilled,
@@ -1326,6 +1579,12 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            combat.automaticTargetsAcquired, combat.retaliationOrders,
            combat.armedBuildingsEngaged,
            baseBuildingDamage, upgradedBuildingDamage,
+           workerCanBuild ? 1 : 0,
+           researchQueued ? 1 : 0,
+           researchCostDeducted ? 1 : 0,
+           researchCompleted ? 1 : 0,
+           foundationPlaced ? 1 : 0,
+           constructionCompleted ? 1 : 0,
            buildingElapsed, destructionElapsed);
     const bool heardBlaster =
         std::find(acknowledgementSounds.begin(), acknowledgementSounds.end(), 71) !=
@@ -1344,6 +1603,10 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         combat.automaticTargetsAcquired == 0 ||
         combat.attackApproachRetries > 8 ||
         !researchedFocusCoils ||
+        !workerCanBuild ||
+        !researchQueued || !researchCostDeducted ||
+        !researchCompleted ||
+        !foundationPlaced || !constructionCompleted ||
         upgradedBuildingDamage <= baseBuildingDamage) {
         fprintf(stderr, "error: combat validation failed\n");
         return 1;
@@ -1386,6 +1649,8 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "units") && argc >= 4) return cmdUnits(argv[2], argv[3]);
     if (!strcmp(cmd, "tech") && argc >= 4) return cmdTech(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "techs") && argc >= 4) return cmdTechs(argv[2], argv[3]);
+    if (!strcmp(cmd, "options") && argc >= 5)
+        return cmdOptions(argv[2], atoi(argv[3]), atoi(argv[4]));
     if (!strcmp(cmd, "sound") && argc >= 4) return cmdSound(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "drs")) return cmdDrs(argv[2]);
     if (!strcmp(cmd, "drs-slps")) return cmdDrsSlps(argv[2]);

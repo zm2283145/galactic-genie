@@ -40,7 +40,7 @@ constexpr float kActionMenuX = 500.0f;
 constexpr float kActionMenuY = 64.0f;
 constexpr float kActionMenuWidth = 440.0f;
 constexpr float kActionMenuRowHeight = 42.0f;
-constexpr size_t kActionMenuMaxRows = 8;
+constexpr size_t kActionMenuMaxRows = 10;
 constexpr float kCheatMenuX = 170.0f;
 constexpr float kCheatMenuY = 58.0f;
 constexpr float kCheatMenuWidth = 620.0f;
@@ -240,6 +240,9 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     selectionOrder_.clear();
     actionMenuOpen_ = false;
     actionMenuObjectId_ = 0;
+    actionMenuTab_ = ActionMenuTab::Units;
+    placementUnit_ = nullptr;
+    placementBuilderId_ = 0;
     cheatMenuOpen_ = false;
     cheatMenuSelection_ = 0;
     forceBuildCheat_ = false;
@@ -290,6 +293,7 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
         return false;
     }
     rebuildAdjacency();
+    refreshAllAutomaticTechnologies();
     lookAt(mapSize * 0.30f + 2, mapSize * 0.35f + 2);
     return true;
 }
@@ -420,6 +424,9 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     selectionOrder_.clear();
     actionMenuOpen_ = false;
     actionMenuObjectId_ = 0;
+    actionMenuTab_ = ActionMenuTab::Units;
+    placementUnit_ = nullptr;
+    placementBuilderId_ = 0;
     cheatMenuOpen_ = false;
     cheatMenuSelection_ = 0;
     forceBuildCheat_ = false;
@@ -468,6 +475,7 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
                     if (Object *object = findObject(spawnId))
                         configureGate(*object);
     rebuildAdjacency();
+    refreshAllAutomaticTechnologies();
     const Object *hero = nullptr;
     size_t heroCount = 0;
     for (const Object &object : objects_) {
@@ -989,6 +997,7 @@ bool Game::researchTechnology(int player, int technologyId) {
         (size_t)technologyId >= assets_.dat().techs.size())
         return false;
     researchedTechs_[(size_t)player].insert(technologyId);
+    refreshAutomaticTechnologies(player);
     return true;
 }
 
@@ -997,11 +1006,48 @@ size_t Game::activeObjectCount() const {
                                  [](const Object &object) { return object.active; });
 }
 
+size_t Game::underConstructionObjectCount() const {
+    return (size_t)std::count_if(
+        objects_.begin(), objects_.end(),
+        [](const Object &object) {
+            return object.active && object.underConstruction;
+        });
+}
+
 size_t Game::selectedObjectCount() const {
     return (size_t)std::count_if(objects_.begin(), objects_.end(),
                                  [](const Object &object) {
                                      return object.active && object.selected;
                                  });
+}
+
+std::vector<int> Game::productionOptionIds(
+    uint32_t spawnId) const {
+    std::vector<int> ids;
+    const Object *object = findObject(spawnId);
+    if (!object) return ids;
+    for (const dat::Unit *unit :
+         productionOptions(*object))
+        ids.push_back(unit->id);
+    return ids;
+}
+
+std::vector<int> Game::researchOptionIds(
+    uint32_t spawnId) const {
+    const Object *object = findObject(spawnId);
+    return object ? researchOptions(*object)
+                  : std::vector<int>{};
+}
+
+std::vector<int> Game::buildingOptionIds(
+    uint32_t spawnId) const {
+    std::vector<int> ids;
+    const Object *object = findObject(spawnId);
+    if (!object) return ids;
+    for (const dat::Unit *unit :
+         buildingOptions(*object))
+        ids.push_back(unit->id);
+    return ids;
 }
 
 size_t Game::selectedMovingObjectCount() const {
@@ -1662,11 +1708,222 @@ std::vector<const dat::Unit *> Game::productionOptions(
     if (civilization < 0 ||
         (size_t)civilization >= civs.size())
         return options;
-    for (const dat::Unit &unit :
+    std::set<int> added;
+    for (const dat::Unit &source :
          civs[(size_t)civilization].units) {
-        if (!unit.exists || unit.disabled ||
-            unit.trainLocationId != building.unit->id ||
-            unit.type < dat::UT_Creatable)
+        if (!source.exists ||
+            !unitAvailable(building.player, source.id))
+            continue;
+        const dat::Unit *unit =
+            effectiveUnitForPlayer(building.player, &source);
+        if (!unit || unit->disabled || unit->hideInEditor ||
+            unit->heroMode || unit->buttonId == 0 ||
+            unit->type < dat::UT_Creatable ||
+            unit->type == dat::UT_Building)
+            continue;
+        const int location = unit->trainLocationId;
+        if (location != building.unit->id &&
+            location != building.unit->baseId &&
+            location != building.unit->copyId)
+            continue;
+        if (!added.insert(unit->id).second)
+            continue;
+        options.push_back(unit);
+    }
+    std::stable_sort(
+        options.begin(), options.end(),
+        [](const dat::Unit *a, const dat::Unit *b) {
+            if (a->buttonId != b->buttonId)
+                return a->buttonId < b->buttonId;
+            return a->id < b->id;
+        });
+    return options;
+}
+
+bool Game::technologyRequirementsMet(
+    int player, const dat::Tech &technology) const {
+    if (player < 0 ||
+        (size_t)player >= researchedTechs_.size())
+        return false;
+    int satisfied = 0;
+    for (int required : technology.requiredTechs)
+        if (required >= 0 &&
+            researchedTechs_[(size_t)player].count(required))
+            satisfied++;
+    return satisfied >= technology.requiredTechCount;
+}
+
+void Game::refreshAutomaticTechnologies(int player) {
+    if (player <= 0 ||
+        (size_t)player >= researchedTechs_.size())
+        return;
+    const int civilization = civilizationForPlayer(player);
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (size_t id = 0; id < assets_.dat().techs.size();
+             id++) {
+            if (researchedTechs_[(size_t)player].count((int)id) ||
+                disabledTechs_[(size_t)player].count((int)id))
+                continue;
+            const dat::Tech &technology =
+                assets_.dat().techs[id];
+            if (technology.civ >= 0 &&
+                technology.civ != civilization)
+                continue;
+            const bool availability =
+                technology.name2.rfind("AVAIL-", 0) == 0;
+            const bool made =
+                technology.name2.rfind("MADE-", 0) == 0;
+            const bool prerequisite =
+                technology.effectId < 0 &&
+                technology.locationId < 0 &&
+                technology.researchTime == 0 &&
+                technology.requiredTechCount > 0;
+            if (id != 0 && !availability && !made &&
+                !prerequisite)
+                continue;
+            if (made) {
+                const std::string unitName =
+                    technology.name2.substr(5);
+                bool exists = false;
+                for (const Object &object : objects_)
+                    if (object.active &&
+                        object.player == player &&
+                        object.unit->type == dat::UT_Building &&
+                        object.unit->name2 == unitName) {
+                        exists = true;
+                        break;
+                    }
+                if (!exists) continue;
+            } else if (!technologyRequirementsMet(
+                        player, technology))
+                    continue;
+            researchedTechs_[(size_t)player].insert((int)id);
+            changed = true;
+        }
+    }
+}
+
+void Game::refreshAllAutomaticTechnologies() {
+    for (int player = 1; player <= 8; player++)
+        refreshAutomaticTechnologies(player);
+}
+
+bool Game::unitAvailable(int player, int unitId) const {
+    if (player < 0 ||
+        (size_t)player >= researchedTechs_.size())
+        return false;
+    bool available = false;
+    for (int technologyId :
+         researchedTechs_[(size_t)player]) {
+        if (technologyId < 0 ||
+            (size_t)technologyId >= assets_.dat().techs.size())
+            continue;
+        const dat::Tech &technology =
+            assets_.dat().techs[(size_t)technologyId];
+        if (technology.effectId < 0 ||
+            (size_t)technology.effectId >=
+                assets_.dat().effects.size())
+            continue;
+        for (const dat::EffectCommand &command :
+             assets_.dat().effects[
+                 (size_t)technology.effectId].commands)
+            if (command.type == 2 &&
+                command.a == unitId)
+                available = command.b != 0;
+    }
+    return available;
+}
+
+const dat::Unit *Game::effectiveUnitForPlayer(
+    int player, const dat::Unit *unit) const {
+    if (!unit || player < 0 ||
+        (size_t)player >= researchedTechs_.size())
+        return unit;
+    int unitId = unit->id;
+    const int civilization = civilizationForPlayer(player);
+    for (int technologyId :
+         researchedTechs_[(size_t)player]) {
+        if (technologyId < 0 ||
+            (size_t)technologyId >= assets_.dat().techs.size())
+            continue;
+        const dat::Tech &technology =
+            assets_.dat().techs[(size_t)technologyId];
+        if (technology.effectId < 0 ||
+            (size_t)technology.effectId >=
+                assets_.dat().effects.size())
+            continue;
+        for (const dat::EffectCommand &command :
+             assets_.dat().effects[
+                 (size_t)technology.effectId].commands)
+            if (command.type == 3 &&
+                command.a == unitId)
+                unitId = command.b;
+    }
+    return findUnit(civilization, unitId);
+}
+
+std::vector<int> Game::researchOptions(
+    const Object &building) const {
+    std::vector<int> options;
+    const int player = building.player;
+    const int civilization = civilizationForPlayer(player);
+    for (size_t id = 0; id < assets_.dat().techs.size();
+         id++) {
+        const dat::Tech &technology =
+            assets_.dat().techs[id];
+        if (technology.researchTime <= 0 ||
+            technology.buttonId == 0 ||
+            technology.effectId < 0 ||
+            (technology.civ >= 0 &&
+             technology.civ != civilization) ||
+            (technology.locationId != building.unit->id &&
+             technology.locationId != building.unit->baseId &&
+             technology.locationId != building.unit->copyId) ||
+            researchedTechs_[(size_t)player].count((int)id) ||
+            disabledTechs_[(size_t)player].count((int)id) ||
+            !technologyRequirementsMet(player, technology) ||
+            assets_.localizedString(
+                technology.languageDllName).empty())
+            continue;
+        bool queued = false;
+        for (const ProductionItem &item :
+             building.productionQueue)
+            if (item.technologyId == (int)id) {
+                queued = true;
+                break;
+            }
+        if (!queued) options.push_back((int)id);
+    }
+    std::stable_sort(
+        options.begin(), options.end(),
+        [&](int a, int b) {
+            const dat::Tech &left =
+                assets_.dat().techs[(size_t)a];
+            const dat::Tech &right =
+                assets_.dat().techs[(size_t)b];
+            if (left.buttonId != right.buttonId)
+                return left.buttonId < right.buttonId;
+            return a < b;
+        });
+    return options;
+}
+
+std::vector<const dat::Unit *> Game::buildingOptions(
+    const Object &worker) const {
+    std::vector<const dat::Unit *> options;
+    const int civilization =
+        civilizationForPlayer(worker.player);
+    if (civilization < 0 ||
+        (size_t)civilization >= assets_.dat().civs.size())
+        return options;
+    for (const dat::Unit &unit :
+         assets_.dat().civs[(size_t)civilization].units) {
+        if (!unit.exists || unit.type != dat::UT_Building ||
+            unit.hideInEditor || unit.disabled ||
+            unit.heroMode || unit.buttonId == 0 ||
+            !unitAvailable(worker.player, unit.id))
             continue;
         options.push_back(&unit);
     }
@@ -1680,81 +1937,331 @@ std::vector<const dat::Unit *> Game::productionOptions(
     return options;
 }
 
+std::string Game::unitDisplayName(
+    const dat::Unit &unit) const {
+    if (unit.name2 == "UNIT-WORKER")
+        return "Worker";
+    return displayUnitName(
+        unit,
+        assets_.localizedString(unit.languageDllName));
+}
+
+bool Game::isWorker(const Object &object) const {
+    return object.active && object.unit &&
+           object.unit->type >= dat::UT_Bird &&
+           object.unit->cls == 58 &&
+           object.player == localPlayer_;
+}
+
 bool Game::openSelectedActionMenu() {
-    Object *building = nullptr;
+    Object *subject = nullptr;
     for (Object &object : objects_) {
         if (!object.selected || !isInspectable(object)) continue;
-        if (building) return false;
-        building = &object;
+        if (subject) return false;
+        subject = &object;
     }
-    if (!building || building->player != localPlayer_ ||
-        building->unit->type != dat::UT_Building)
+    if (!subject || subject->player != localPlayer_)
         return false;
-    if (productionOptions(*building).empty()) {
+    if (subject->underConstruction) {
+        statusMessage_ = "BUILDING UNDER CONSTRUCTION";
+        statusTime_ = 3.0f;
+        return true;
+    }
+    if (isWorker(*subject)) {
+        actionMenuTab_ = ActionMenuTab::Buildings;
+        if (buildingOptions(*subject).empty()) {
+            statusMessage_ = "NO BUILDINGS AVAILABLE";
+            statusTime_ = 3.0f;
+            return true;
+        }
+    } else if (subject->unit->type == dat::UT_Building) {
+        actionMenuTab_ =
+            productionOptions(*subject).empty()
+                ? ActionMenuTab::Research
+                : ActionMenuTab::Units;
+    } else {
+        return false;
+    }
+    if (productionOptions(*subject).empty() &&
+        researchOptions(*subject).empty() &&
+        buildingOptions(*subject).empty()) {
         statusMessage_ = "NO PRODUCTION AVAILABLE";
         statusTime_ = 3.0f;
         return true;
     }
     actionMenuOpen_ = true;
-    actionMenuObjectId_ = building->spawnId;
+    actionMenuObjectId_ = subject->spawnId;
     return true;
 }
 
 bool Game::handleActionMenuClick(float screenX, float screenY,
                                  int screenW, int screenH) {
     if (!actionMenuOpen_) return false;
-    Object *building = findObject(actionMenuObjectId_);
-    if (!building || !building->active ||
-        building->player != localPlayer_) {
+    Object *subject = findObject(actionMenuObjectId_);
+    if (!subject || !subject->active ||
+        subject->player != localPlayer_) {
         actionMenuOpen_ = false;
         actionMenuObjectId_ = 0;
         return true;
     }
-    const std::vector<const dat::Unit *> options =
-        productionOptions(*building);
     if (screenX < kActionMenuX ||
         screenX >= std::min((float)screenW,
                             kActionMenuX + kActionMenuWidth) ||
-        screenY < kActionMenuY)
+        screenY < 28.0f)
         return true;
+    if (!isWorker(*subject) && screenY < kActionMenuY) {
+        actionMenuTab_ =
+            screenX < kActionMenuX +
+                          kActionMenuWidth * 0.5f
+                ? ActionMenuTab::Units
+                : ActionMenuTab::Research;
+        return true;
+    }
     const int row =
         (int)((screenY - kActionMenuY) /
               kActionMenuRowHeight);
-    if (row < 0 || (size_t)row >= options.size() ||
+    if (row < 0 ||
         (size_t)row >= kActionMenuMaxRows)
         return true;
-    if (building->productionQueue.size() >= 5) {
+
+    if (isWorker(*subject)) {
+        const std::vector<const dat::Unit *> options =
+            buildingOptions(*subject);
+        if ((size_t)row >= options.size()) return true;
+        return beginBuildingPlacement(
+            *subject, *options[(size_t)row]);
+    }
+
+    if (subject->productionQueue.size() >= 5) {
         statusMessage_ = "PRODUCTION QUEUE FULL";
         statusTime_ = 3.0f;
         return true;
     }
-    const dat::Unit *unit = options[(size_t)row];
-    for (const dat::ResourceCost &cost : unit->costs) {
-        if (!cost.flag || cost.type < 0 || cost.amount <= 0)
+
+    ProductionItem item;
+    if (actionMenuTab_ == ActionMenuTab::Research) {
+        const std::vector<int> options =
+            researchOptions(*subject);
+        if ((size_t)row >= options.size()) return true;
+        const int technologyId = options[(size_t)row];
+        const dat::Tech &technology =
+            assets_.dat().techs[(size_t)technologyId];
+        for (const dat::Tech::Cost &cost : technology.costs) {
+            if (!cost.flag || cost.type < 0 ||
+                cost.amount <= 0)
+                continue;
+            if (resource(localPlayer_, cost.type) + 0.001f <
+                cost.amount) {
+                statusMessage_ = "NOT ENOUGH RESOURCES";
+                statusTime_ = 3.0f;
+                return true;
+            }
+        }
+        for (const dat::Tech::Cost &cost : technology.costs)
+            if (cost.flag && cost.type >= 0 &&
+                cost.amount > 0)
+                resources_[(size_t)localPlayer_][cost.type] -=
+                    cost.amount;
+        item.technologyId = technologyId;
+        item.duration =
+            std::max(0.1f, (float)technology.researchTime);
+        statusMessage_ = "RESEARCH QUEUED";
+    } else {
+        const std::vector<const dat::Unit *> options =
+            productionOptions(*subject);
+        if ((size_t)row >= options.size()) return true;
+        const dat::Unit *unit = options[(size_t)row];
+        for (const dat::ResourceCost &cost : unit->costs) {
+            if (!cost.flag || cost.type < 0 ||
+                cost.amount <= 0)
+                continue;
+            if (resource(localPlayer_, cost.type) + 0.001f <
+                cost.amount) {
+                statusMessage_ = "NOT ENOUGH RESOURCES";
+                statusTime_ = 3.0f;
+                return true;
+            }
+        }
+        for (const dat::ResourceCost &cost : unit->costs)
+            if (cost.flag && cost.type >= 0 &&
+                cost.amount > 0)
+                resources_[(size_t)localPlayer_][cost.type] -=
+                    cost.amount;
+        item.unit = unit;
+        item.duration =
+            std::max(0.1f, (float)unit->trainTime);
+        statusMessage_ = "UNIT QUEUED";
+    }
+    subject->productionQueue.push_back(item);
+    if (subject->productionQueue.size() == 1)
+        subject->productionRemaining = item.duration;
+    statusTime_ = 2.0f;
+    return true;
+}
+
+bool Game::beginBuildingPlacement(
+    Object &worker, const dat::Unit &building) {
+    placementUnit_ = &building;
+    placementBuilderId_ = worker.spawnId;
+    actionMenuOpen_ = false;
+    actionMenuObjectId_ = 0;
+    statusMessage_ =
+        "PLACE " + unitDisplayName(building) +
+        " WITH X; O CANCELS";
+    statusTime_ = 4.0f;
+    return true;
+}
+
+bool Game::placeBuilding(float screenX, float screenY,
+                         int screenW, int screenH) {
+    if (!placementUnit_) return false;
+    Object *worker = findObject(placementBuilderId_);
+    if (!worker || !isWorker(*worker)) {
+        placementUnit_ = nullptr;
+        placementBuilderId_ = 0;
+        return true;
+    }
+
+    float worldX = 0, worldY = 0;
+    screenToWorld(screenX, screenY, screenW, screenH,
+                  worldX, worldY);
+    Object candidate;
+    candidate.unit = placementUnit_;
+    candidate.player = localPlayer_;
+    if (!positionPassable(
+            candidate, worldX, worldY, true)) {
+        statusMessage_ = "BUILDING CANNOT BE PLACED HERE";
+        statusTime_ = 3.0f;
+        return true;
+    }
+    for (const dat::ResourceCost &cost :
+         placementUnit_->costs) {
+        if (!cost.flag || cost.type < 0 ||
+            cost.amount <= 0)
             continue;
-        const auto found =
-            resources_[(size_t)localPlayer_].find(cost.type);
-        const float available =
-            found == resources_[(size_t)localPlayer_].end()
-                ? 0.0f
-                : found->second;
-        if (available + 0.001f < cost.amount) {
+        if (resource(localPlayer_, cost.type) + 0.001f <
+            cost.amount) {
             statusMessage_ = "NOT ENOUGH RESOURCES";
             statusTime_ = 3.0f;
             return true;
         }
     }
-    for (const dat::ResourceCost &cost : unit->costs)
-        if (cost.flag && cost.type >= 0 && cost.amount > 0)
+    for (const dat::ResourceCost &cost :
+         placementUnit_->costs)
+        if (cost.flag && cost.type >= 0 &&
+            cost.amount > 0)
             resources_[(size_t)localPlayer_][cost.type] -=
                 cost.amount;
-    building->productionQueue.push_back(unit);
-    if (building->productionQueue.size() == 1)
-        building->productionRemaining =
-            std::max(0.1f, (float)unit->trainTime);
-    statusMessage_ = "UNIT QUEUED";
+
+    const uint32_t builderId = worker->spawnId;
+    const dat::Unit *unit = placementUnit_;
+    Object *building = addObject(
+        unit, localPlayer_, worldX, worldY, 0,
+        nextSpawnId_++);
+    if (!building) return true;
+    building->wander = false;
+    building->underConstruction = true;
+    building->constructionTotal =
+        std::max(1.0f, (float)unit->trainTime);
+    building->constructionRemaining =
+        forceBuildCheat_ ? 0.0f
+                         : building->constructionTotal;
+    building->constructionBuilderId = builderId;
+    building->hitPoints = 1.0f;
+
+    worker = findObject(builderId);
+    if (worker) {
+        const float angle =
+            std::atan2(worker->y - worldY,
+                       worker->x - worldX);
+        const float distance =
+            collisionRadius(*building) +
+            collisionRadius(*worker) + 0.35f;
+        issueMove(*worker,
+                  worldX + std::cos(angle) * distance,
+                  worldY + std::sin(angle) * distance);
+    }
+    placementUnit_ = nullptr;
+    placementBuilderId_ = 0;
+    rebuildAdjacency();
+    statusMessage_ = "CONSTRUCTION STARTED";
     statusTime_ = 2.0f;
     return true;
+}
+
+void Game::updateConstruction(float dt) {
+    struct CompletedBuilding {
+        const dat::Unit *unit;
+        int player;
+        float x, y, facing;
+    };
+    std::vector<CompletedBuilding> completed;
+    const size_t count = objects_.size();
+    for (size_t index = 0; index < count; index++) {
+        Object &building = objects_[index];
+        if (!building.active ||
+            !building.underConstruction)
+            continue;
+        Object *builder =
+            findObject(building.constructionBuilderId);
+        const bool forceComplete =
+            forceBuildCheat_ &&
+            building.player == localPlayer_;
+        bool working = false;
+        if (builder && builder->active) {
+            const float dx = builder->x - building.x;
+            const float dy = builder->y - building.y;
+            const float range =
+                collisionRadius(*builder) +
+                collisionRadius(building) + 0.75f;
+            working = working ||
+                      dx * dx + dy * dy <= range * range;
+        }
+        if (forceComplete)
+            building.constructionRemaining = 0.0f;
+        else if (working)
+            building.constructionRemaining =
+                std::max(
+                    0.0f,
+                    building.constructionRemaining - dt);
+        const float progress =
+            building.constructionTotal > 0
+                ? 1.0f -
+                      building.constructionRemaining /
+                          building.constructionTotal
+                : 1.0f;
+        building.hitPoints = std::max(
+            1.0f, building.maxHitPoints * progress);
+        if (building.constructionRemaining > 0)
+            continue;
+        building.underConstruction = false;
+        building.hitPoints = building.maxHitPoints;
+        building.constructionBuilderId = 0;
+        completed.push_back(
+            {building.unit, building.player, building.x,
+             building.y, building.facing});
+    }
+    for (const CompletedBuilding &building : completed) {
+        const int civilization =
+            civilizationForPlayer(building.player);
+        for (const dat::BuildingAnnex &annex :
+             building.unit->annexes) {
+            const dat::Unit *part =
+                findUnit(civilization, annex.unitId);
+            if (!part) continue;
+            Object *created = addObject(
+                part, building.player,
+                building.x + annex.misplacementY,
+                building.y - annex.misplacementX,
+                building.facing, 0, 0, false, -1,
+                false);
+            if (created) created->wander = false;
+        }
+    }
+    if (!completed.empty()) {
+        refreshAllAutomaticTechnologies();
+        rebuildAdjacency();
+    }
 }
 
 void Game::commandAtScreen(float screenX, float screenY, int screenW, int screenH) {
@@ -3477,6 +3984,7 @@ void Game::executeEffect(const ScenarioEffect &effect) {
                                                  0, false, -1, false);
                 if (createdAnnex) createdAnnex->wander = false;
             }
+            refreshAutomaticTechnologies(sourcePlayer);
         }
         rebuildAdjacency();
         break;
@@ -3524,6 +4032,7 @@ void Game::executeEffect(const ScenarioEffect &effect) {
     }
     case 18:
         for (Object *object : effectTargets(effect)) object->player = targetPlayer;
+        refreshAllAutomaticTechnologies();
         rebuildAdjacency();
         break;
     case 20:
@@ -3669,6 +4178,15 @@ void Game::update(float dt, const InputState &in) {
         if (in.menuBack)
             cheatMenuOpen_ = false;
     }
+    if (actionMenuOpen_ &&
+        (in.actionTabLeft || in.actionTabRight)) {
+        Object *subject = findObject(actionMenuObjectId_);
+        if (subject && !isWorker(*subject))
+            actionMenuTab_ =
+                actionMenuTab_ == ActionMenuTab::Units
+                    ? ActionMenuTab::Research
+                    : ActionMenuTab::Units;
+    }
 
     float scrollX =
         consumeWorldInput ? 0.0f : in.scrollX;
@@ -3696,7 +4214,7 @@ void Game::update(float dt, const InputState &in) {
     camX_ = std::max(minX, std::min(maxX, camX_));
     camY_ = std::max(0.0f, std::min(maxY, camY_));
 
-    if (!consumeWorldInput) {
+    if (!consumeWorldInput && !actionMenuOpen_) {
         if (in.zoomStep > 0)
             zoom_ = std::min(1.0f, zoom_ * 1.25f);
         if (in.zoomStep < 0)
@@ -3723,8 +4241,34 @@ void Game::update(float dt, const InputState &in) {
         else
             building.productionRemaining -= dt;
         if (building.productionRemaining > 0) continue;
-        const dat::Unit *unit =
+        const ProductionItem item =
             building.productionQueue.front();
+        if (item.technologyId >= 0) {
+            researchTechnology(
+                building.player, item.technologyId);
+            building.productionQueue.pop_front();
+            building.productionRemaining =
+                building.productionQueue.empty()
+                    ? 0.0f
+                    : building.productionQueue.front().duration;
+            statusMessage_ =
+                assets_.localizedString(
+                    assets_.dat()
+                        .techs[(size_t)item.technologyId]
+                        .languageDllName) +
+                " COMPLETE";
+            statusTime_ = 3.0f;
+            continue;
+        }
+        const dat::Unit *unit = item.unit;
+        if (!unit) {
+            building.productionQueue.pop_front();
+            building.productionRemaining =
+                building.productionQueue.empty()
+                    ? 0.0f
+                    : building.productionQueue.front().duration;
+            continue;
+        }
         Object candidate;
         candidate.unit = unit;
         candidate.player = building.player;
@@ -3762,12 +4306,9 @@ void Game::update(float dt, const InputState &in) {
             building.productionQueue.empty()
                 ? 0.0f
                 : forceBuildCheat_ &&
-                          building.player == localPlayer_
-                      ? 0.0f
-                : std::max(
-                      0.1f,
-                      (float)building.productionQueue.front()
-                          ->trainTime);
+                         building.player == localPlayer_
+                     ? 0.0f
+                : building.productionQueue.front().duration;
     }
     for (const ProductionSpawn &spawned : productionSpawns) {
         Object *created = addObject(
@@ -3775,9 +4316,13 @@ void Game::update(float dt, const InputState &in) {
             -kPi * 0.5f, nextSpawnId_++);
         if (created) {
             created->wander = false;
-            created->stateTime = 1.0f;
+            created->state = State::Idle;
+            created->animTime = 0.0f;
+            created->stateTime = 0.0f;
+            created->initialFrame = 0;
         }
     }
+    updateConstruction(dt);
     rebuildMobileOccupancy();
     for (Object &gate : objects_) {
         if (!gate.active || !gate.gate || !gate.gateClosedUnit ||
@@ -3841,7 +4386,22 @@ void Game::update(float dt, const InputState &in) {
         selectBox(in.boxStartX, in.boxStartY, in.boxEndX, in.boxEndY,
                   in.screenW, in.screenH);
     }
-    if (!consumeWorldInput && in.selectPressed) {
+    bool placementHandled = false;
+    if (!consumeWorldInput && placementUnit_ &&
+        in.commandPressed) {
+        placementUnit_ = nullptr;
+        placementBuilderId_ = 0;
+        statusMessage_ = "CONSTRUCTION CANCELLED";
+        statusTime_ = 2.0f;
+        placementHandled = true;
+    } else if (!consumeWorldInput && placementUnit_ &&
+               (in.selectPressed || in.pointerTap)) {
+        placeBuilding(in.pointerX, in.pointerY,
+                      in.screenW, in.screenH);
+        placementHandled = true;
+    }
+    if (!consumeWorldInput && !placementHandled &&
+        in.selectPressed) {
         if (actionMenuOpen_)
             handleActionMenuClick(
                 in.pointerX, in.pointerY, in.screenW, in.screenH);
@@ -3851,7 +4411,8 @@ void Game::update(float dt, const InputState &in) {
             selectAtScreen(in.pointerX, in.pointerY, in.screenW,
                            in.screenH);
     }
-    if (!consumeWorldInput && in.cycleAttackMode) {
+    if (!consumeWorldInput && !placementHandled &&
+        in.cycleAttackMode) {
         if (actionMenuOpen_) {
             actionMenuOpen_ = false;
             actionMenuObjectId_ = 0;
@@ -3859,7 +4420,8 @@ void Game::update(float dt, const InputState &in) {
             cycleSelectedAttackMode();
         }
     }
-    if (!consumeWorldInput && in.commandPressed) {
+    if (!consumeWorldInput && !placementHandled &&
+        in.commandPressed) {
         if (actionMenuOpen_) {
             actionMenuOpen_ = false;
             actionMenuObjectId_ = 0;
@@ -3868,7 +4430,8 @@ void Game::update(float dt, const InputState &in) {
                             in.screenW, in.screenH);
         }
     }
-    if (!consumeWorldInput && in.pointerTap) {
+    if (!consumeWorldInput && !placementHandled &&
+        in.pointerTap) {
         if (actionMenuOpen_) {
             handleActionMenuClick(
                 in.pointerX, in.pointerY, in.screenW, in.screenH);
@@ -4593,9 +5156,32 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         sy -= oy;
         if (sx < -400 || sx > viewW + 400 || sy < -100 || sy > viewH + 500) continue;
         int gid = o.unit->standingGraphic[0];
+        if (o.underConstruction &&
+            o.unit->constructionGraphic >= 0)
+            gid = o.unit->constructionGraphic;
         if (o.state == State::Walk && o.unit->walkingGraphic >= 0) gid = o.unit->walkingGraphic;
         if (o.state == State::Attack && o.unit->attackGraphic >= 0) gid = o.unit->attackGraphic;
-        drawGraphic(r, gid, sx, sy, o.facing, o.animTime, o.player, o.initialFrame, 0,
+        float graphicTime = o.animTime;
+        if (o.underConstruction) {
+            const dat::Graphic *construction =
+                assets_.dat().graphic(gid);
+            if (construction &&
+                construction->frameDuration > 0 &&
+                construction->frameCount > 1) {
+                const float progress =
+                    o.constructionTotal > 0
+                        ? 1.0f -
+                              o.constructionRemaining /
+                                  o.constructionTotal
+                        : 1.0f;
+                graphicTime = std::max(
+                    0.0f,
+                    std::min(0.999f, progress)) *
+                    construction->frameCount *
+                    construction->frameDuration;
+            }
+        }
+        drawGraphic(r, gid, sx, sy, o.facing, graphicTime, o.player, o.initialFrame, 0,
                     o.drawShadows && !overview, viewW, viewH);
 
         const float damagePercent =
@@ -4815,6 +5401,37 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         for (size_t point = 0; point < points.size(); point++)
             drawEdge(points[point], points[(point + 1) % points.size()],
                      1.5f / zoom_, 255);
+    }
+
+    if (placementUnit_) {
+        float worldX = 0, worldY = 0;
+        screenToWorld(cursorX_, cursorY_, screenW, screenH,
+                      worldX, worldY);
+        Object candidate;
+        candidate.unit = placementUnit_;
+        candidate.player = localPlayer_;
+        const bool valid =
+            positionPassable(
+                candidate, worldX, worldY, true);
+        float sx = 0, sy = 0;
+        toScreen(worldX, worldY, sx, sy);
+        sy -= elevationAt(worldX, worldY) *
+              assets_.dat().terrainBlock.elevHeight;
+        sx -= ox;
+        sy -= oy;
+        const int graphic =
+            placementUnit_->constructionGraphic >= 0
+                ? placementUnit_->constructionGraphic
+                : placementUnit_->standingGraphic[0];
+        drawGraphic(
+            r, graphic, sx, sy, 0, 0, localPlayer_, 0,
+            0, false, viewW, viewH);
+        const uint8_t red = valid ? 30 : 220;
+        const uint8_t green = valid ? 220 : 40;
+        r.fillRect(
+            sx - 28.0f / zoom_, sy - 4.0f / zoom_,
+            56.0f / zoom_, 4.0f / zoom_,
+            red, green, 40, 220);
     }
 
     // --- objects -------------------------------------------------------
@@ -5080,10 +5697,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         if (panelMixedUnits)
             title = std::to_string(panelSelectionCount) + " UNITS SELECTED";
         else {
-            title =
-                displayUnitName(*panelObject->unit,
-                                assets_.localizedString(
-                                    panelObject->unit->languageDllName));
+            title = unitDisplayName(*panelObject->unit);
             if (panelSelectionCount > 1)
                 title += " X" + std::to_string(panelSelectionCount);
         }
@@ -5251,16 +5865,101 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         }
     }
 
+    if (panelObject &&
+        (!panelObject->productionQueue.empty() ||
+         panelObject->underConstruction)) {
+        const float invZoom = 1.0f / zoom_;
+        const float x = 286.0f * invZoom;
+        const float y =
+            (screenH - kSelectionPanelHeight - 30.0f) *
+            invZoom;
+        float progress = 0.0f;
+        std::string label;
+        if (panelObject->underConstruction) {
+            progress =
+                panelObject->constructionTotal > 0
+                    ? 1.0f -
+                          panelObject
+                                  ->constructionRemaining /
+                              panelObject->constructionTotal
+                    : 1.0f;
+            label = "BUILDING";
+        } else {
+            const ProductionItem &item =
+                panelObject->productionQueue.front();
+            progress =
+                item.duration > 0
+                    ? 1.0f -
+                          panelObject->productionRemaining /
+                              item.duration
+                    : 1.0f;
+            if (item.unit)
+                label = unitDisplayName(*item.unit);
+            else if (item.technologyId >= 0)
+                label = assets_.localizedString(
+                    assets_.dat()
+                        .techs[(size_t)item.technologyId]
+                        .languageDllName);
+        }
+        progress = std::max(
+            0.0f, std::min(1.0f, progress));
+        if (label.size() > 19) label.resize(19);
+        r.fillRect(x, y, 388.0f * invZoom,
+                   24.0f * invZoom, 5, 8, 16, 230);
+        drawBitmapText(
+            r, {label}, x + 8.0f * invZoom,
+            y + 7.0f * invZoom, 0.85f * invZoom,
+            220, 226, 230);
+        r.fillRect(
+            x + 165.0f * invZoom,
+            y + 6.0f * invZoom, 170.0f * invZoom,
+            12.0f * invZoom, 28, 38, 48, 255);
+        r.fillRect(
+            x + 167.0f * invZoom,
+            y + 8.0f * invZoom,
+            166.0f * progress * invZoom,
+            8.0f * invZoom, 66, 180, 220, 255);
+        drawBitmapText(
+            r,
+            {std::to_string((int)std::lround(
+                 progress * 100.0f)) +
+             "%"},
+            x + 343.0f * invZoom,
+            y + 7.0f * invZoom, 0.85f * invZoom,
+            180, 220, 235);
+    }
+
     if (actionMenuOpen_) {
-        Object *building = findObject(actionMenuObjectId_);
-        if (building && building->active) {
+        Object *subject = findObject(actionMenuObjectId_);
+        if (subject && subject->active) {
             const float invZoom = 1.0f / zoom_;
-            const std::vector<const dat::Unit *> options =
-                productionOptions(*building);
-            const size_t rows =
-                std::min(options.size(), kActionMenuMaxRows);
+            const bool worker = isWorker(*subject);
+            const std::vector<const dat::Unit *> units =
+                worker
+                    ? buildingOptions(*subject)
+                    : actionMenuTab_ ==
+                              ActionMenuTab::Units
+                          ? productionOptions(*subject)
+                          : std::vector<
+                                const dat::Unit *>{};
+            const std::vector<int> technologies =
+                !worker &&
+                        actionMenuTab_ ==
+                            ActionMenuTab::Research
+                    ? researchOptions(*subject)
+                    : std::vector<int>{};
+            const size_t optionCount =
+                worker || actionMenuTab_ ==
+                              ActionMenuTab::Units
+                    ? units.size()
+                    : technologies.size();
+            const size_t rows = std::min(
+                optionCount, kActionMenuMaxRows);
+            const bool hasQueue =
+                !subject->productionQueue.empty();
             const float height =
-                42.0f + rows * kActionMenuRowHeight;
+                42.0f + rows * kActionMenuRowHeight +
+                (hasQueue ? 50.0f : 0.0f);
             r.fillRect(kActionMenuX * invZoom,
                        28.0f * invZoom,
                        kActionMenuWidth * invZoom,
@@ -5270,13 +5969,73 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                        kActionMenuWidth * invZoom,
                        3.0f * invZoom,
                        196, 188, 145, 255);
-            drawBitmapText(
-                r, {"PRODUCTION   X: QUEUE   O: CLOSE"},
-                (kActionMenuX + 12.0f) * invZoom,
-                39.0f * invZoom, 1.15f * invZoom,
-                220, 226, 230);
+            if (worker) {
+                drawBitmapText(
+                    r,
+                    {"BUILDINGS   X: PLACE   O: CLOSE"},
+                    (kActionMenuX + 12.0f) * invZoom,
+                    39.0f * invZoom,
+                    1.05f * invZoom, 220, 226, 230);
+            } else {
+                const float tabWidth =
+                    kActionMenuWidth * 0.5f;
+                r.fillRect(
+                    kActionMenuX * invZoom,
+                    34.0f * invZoom,
+                    tabWidth * invZoom,
+                    28.0f * invZoom,
+                    actionMenuTab_ ==
+                            ActionMenuTab::Units
+                        ? 75
+                        : 17,
+                    actionMenuTab_ ==
+                            ActionMenuTab::Units
+                        ? 87
+                        : 27,
+                    actionMenuTab_ ==
+                            ActionMenuTab::Units
+                        ? 103
+                        : 41,
+                    255);
+                r.fillRect(
+                    (kActionMenuX + tabWidth) *
+                        invZoom,
+                    34.0f * invZoom,
+                    tabWidth * invZoom,
+                    28.0f * invZoom,
+                    actionMenuTab_ ==
+                            ActionMenuTab::Research
+                        ? 75
+                        : 17,
+                    actionMenuTab_ ==
+                            ActionMenuTab::Research
+                        ? 87
+                        : 27,
+                    actionMenuTab_ ==
+                            ActionMenuTab::Research
+                        ? 103
+                        : 41,
+                    255);
+                drawBitmapText(
+                    r, {"L  UNITS"},
+                    (kActionMenuX + 16.0f) * invZoom,
+                    42.0f * invZoom,
+                    0.95f * invZoom, 225, 230, 235);
+                drawBitmapText(
+                    r, {"RESEARCH  R"},
+                    (kActionMenuX + tabWidth + 50.0f) *
+                        invZoom,
+                    42.0f * invZoom,
+                    0.95f * invZoom, 225, 230, 235);
+            }
             for (size_t index = 0; index < rows; index++) {
-                const dat::Unit *unit = options[index];
+                const dat::Unit *unit =
+                    units.empty() ? nullptr : units[index];
+                const dat::Tech *technology =
+                    technologies.empty()
+                        ? nullptr
+                        : &assets_.dat().techs[
+                              (size_t)technologies[index]];
                 const float y =
                     (kActionMenuY +
                      index * kActionMenuRowHeight) *
@@ -5287,7 +6046,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                     (kActionMenuRowHeight - 3.0f) * invZoom,
                     15, 23, 35, 255);
                 const int civilization =
-                    civilizationForPlayer(building->player);
+                    civilizationForPlayer(subject->player);
                 const int iconSet =
                     civilization >= 0 &&
                             (size_t)civilization <
@@ -5297,15 +6056,25 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                               .iconSet
                         : 1;
                 const SpriteSheet *icons =
-                    assets_.interfaceSheet(
-                        kUnitIconSlpBase +
-                        std::max(1, iconSet) - 1);
+                    unit
+                        ? assets_.interfaceSheet(
+                              (unit->type ==
+                                       dat::UT_Building
+                                   ? kBuildingIconSlpBase
+                                   : kUnitIconSlpBase) +
+                              std::max(1, iconSet) - 1)
+                        : nullptr;
+                const int iconId =
+                    unit ? unit->iconId
+                         : technology
+                               ? technology->iconId
+                               : -1;
                 const SpriteFrame *icon =
-                    icons && unit->iconId >= 0 &&
-                            (size_t)unit->iconId <
+                    icons && iconId >= 0 &&
+                            (size_t)iconId <
                                 icons->frames.size()
                         ? &icons->frames[
-                              (size_t)unit->iconId]
+                              (size_t)iconId]
                         : nullptr;
                 if (icon) {
                     const float scale =
@@ -5323,12 +6092,12 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                          icon->u + icon->w,
                          icon->v + icon->h});
                 }
-                std::string name = unit->name;
-                const size_t separator =
-                    name.find_last_of('-');
-                if (separator != std::string::npos &&
-                    separator + 1 < name.size())
-                    name = name.substr(separator + 1);
+                std::string name =
+                    unit
+                        ? unitDisplayName(*unit)
+                        : assets_.localizedString(
+                              technology
+                                  ->languageDllName);
                 if (name.size() > 20) name.resize(20);
                 drawBitmapText(
                     r, {name},
@@ -5338,18 +6107,31 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 std::string costs;
                 static constexpr const char *labels[] = {
                     "F", "C", "O", "N"};
-                for (const dat::ResourceCost &cost :
-                     unit->costs) {
-                    if (!cost.flag || cost.type < 0 ||
-                        cost.amount <= 0)
-                        continue;
-                    if (!costs.empty()) costs += "  ";
-                    costs +=
-                        cost.type < 4
-                            ? labels[(size_t)cost.type]
-                            : "R";
-                    costs += std::to_string(cost.amount);
-                }
+                auto appendCost =
+                    [&](int type, int amount,
+                        bool enabled) {
+                        if (!enabled || type < 0 ||
+                            amount <= 0)
+                            return;
+                        if (!costs.empty()) costs += "  ";
+                        costs +=
+                            type < 4
+                                ? labels[(size_t)type]
+                                : "R";
+                        costs += std::to_string(amount);
+                    };
+                if (unit)
+                    for (const dat::ResourceCost &cost :
+                         unit->costs)
+                        appendCost(
+                            cost.type, cost.amount,
+                            cost.flag != 0);
+                else
+                    for (const dat::Tech::Cost &cost :
+                         technology->costs)
+                        appendCost(
+                            cost.type, cost.amount,
+                            cost.flag != 0);
                 drawBitmapText(
                     r, {costs},
                     (kActionMenuX + 260.0f) * invZoom,
@@ -5358,25 +6140,65 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 drawBitmapText(
                     r,
                     {std::to_string(
-                         std::max<int16_t>(
-                             0, unit->trainTime)) +
+                         unit
+                             ? std::max<int16_t>(
+                                   0, unit->trainTime)
+                             : std::max<int16_t>(
+                                   0, technology
+                                          ->researchTime)) +
                      "S"},
                     (kActionMenuX + 390.0f) * invZoom,
                     y + 8.0f * invZoom,
                     1.0f * invZoom, 160, 175, 188);
             }
-            if (!building->productionQueue.empty())
+            if (hasQueue) {
+                const ProductionItem &current =
+                    subject->productionQueue.front();
+                const float progress =
+                    current.duration > 0
+                        ? std::max(
+                              0.0f,
+                              std::min(
+                                  1.0f,
+                                  1.0f -
+                                      subject
+                                              ->productionRemaining /
+                                          current.duration))
+                        : 1.0f;
+                const float footerY =
+                    kActionMenuY +
+                    rows * kActionMenuRowHeight + 5.0f;
                 drawBitmapText(
                     r,
                     {"QUEUE " +
                      std::to_string(
-                         building->productionQueue.size()) +
+                         subject->productionQueue.size()) +
                      "/5"},
                     (kActionMenuX + 12.0f) * invZoom,
-                    (kActionMenuY +
-                     rows * kActionMenuRowHeight + 5.0f) *
-                        invZoom,
+                    footerY * invZoom,
                     1.0f * invZoom, 120, 220, 255);
+                r.fillRect(
+                    (kActionMenuX + 100.0f) * invZoom,
+                    (footerY + 2.0f) * invZoom,
+                    255.0f * invZoom,
+                    12.0f * invZoom,
+                    28, 38, 48, 255);
+                r.fillRect(
+                    (kActionMenuX + 102.0f) * invZoom,
+                    (footerY + 4.0f) * invZoom,
+                    251.0f * progress * invZoom,
+                    8.0f * invZoom,
+                    66, 180, 220, 255);
+                drawBitmapText(
+                    r,
+                    {std::to_string(
+                         (int)std::lround(
+                             progress * 100.0f)) +
+                     "%"},
+                    (kActionMenuX + 365.0f) * invZoom,
+                    footerY * invZoom,
+                    0.95f * invZoom, 180, 220, 235);
+            }
         }
     }
 

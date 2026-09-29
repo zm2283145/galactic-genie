@@ -39,6 +39,8 @@ struct InputState {
     bool menuDown = false;
     bool menuActivate = false;
     bool menuBack = false;
+    bool actionTabLeft = false;
+    bool actionTabRight = false;
 };
 
 struct FrameStats {
@@ -123,6 +125,7 @@ public:
     bool researchTechnology(int player, int technologyId);
     const std::string &currentInstruction() const { return currentInstruction_; }
     size_t activeObjectCount() const;
+    size_t underConstructionObjectCount() const;
     size_t selectedObjectCount() const;
     size_t selectedMovingObjectCount() const;
     MovementStats movementStats() const;
@@ -133,6 +136,17 @@ public:
                            uint32_t targetId) const;
     bool objectSelected(uint32_t spawnId) const;
     std::vector<uint32_t> selectedObjectIds() const;
+    std::vector<int> productionOptionIds(
+        uint32_t spawnId) const;
+    std::vector<int> researchOptionIds(
+        uint32_t spawnId) const;
+    std::vector<int> buildingOptionIds(
+        uint32_t spawnId) const;
+    bool technologyResearched(int player, int technologyId) const {
+        return player >= 0 &&
+               (size_t)player < researchedTechs_.size() &&
+               researchedTechs_[(size_t)player].count(technologyId);
+    }
     bool objectScreenPosition(uint32_t spawnId, int screenW, int screenH,
                               float &screenX, float &screenY) const;
     std::vector<MovingObjectInfo> movingObjects() const;
@@ -143,6 +157,11 @@ public:
 private:
     enum class State : uint8_t { Idle, Walk, Attack };
     enum class CursorMode : uint8_t { Normal, Move, Attack };
+    enum class ActionMenuTab : uint8_t {
+        Units,
+        Research,
+        Buildings,
+    };
     enum class FormationType : uint8_t { Line, Box, Staggered, Flank };
     enum class AttackMode : uint8_t {
         Aggressive,
@@ -151,12 +170,18 @@ private:
         Passive,
     };
 
+    struct ProductionItem {
+        const dat::Unit *unit = nullptr;
+        int technologyId = -1;
+        float duration = 0;
+    };
+
     struct Object {
         const dat::Unit *unit = nullptr;
         const dat::Unit *gateClosedUnit = nullptr;
         const dat::Unit *gateOpenUnit = nullptr;
         const dat::Unit *gateEndUnit = nullptr;
-        std::deque<const dat::Unit *> productionQueue;
+        std::deque<ProductionItem> productionQueue;
         int player = 0; // 0 = gaia
         float x = 0, y = 0;
         float facing = 0; // radians, 0 = +x world axis
@@ -195,11 +220,15 @@ private:
         bool draw = true;
         bool locked = false;
         bool gate = false;
+        bool underConstruction = false;
         bool selected = false;
         bool triggerAddressable = true;
         float flashTime = 0;
         float gateOpenAmount = 0;
         float productionRemaining = 0;
+        float constructionRemaining = 0;
+        float constructionTotal = 0;
+        uint32_t constructionBuilderId = 0;
         uint32_t spawnId = 0;
         int32_t garrisonedInId = -1;
         uint16_t initialFrame = 0;
@@ -315,6 +344,24 @@ private:
     bool openSelectedActionMenu();
     std::vector<const dat::Unit *> productionOptions(
         const Object &building) const;
+    std::vector<int> researchOptions(
+        const Object &building) const;
+    std::vector<const dat::Unit *> buildingOptions(
+        const Object &worker) const;
+    bool unitAvailable(int player, int unitId) const;
+    const dat::Unit *effectiveUnitForPlayer(
+        int player, const dat::Unit *unit) const;
+    bool technologyRequirementsMet(int player,
+                                  const dat::Tech &technology) const;
+    void refreshAutomaticTechnologies(int player);
+    void refreshAllAutomaticTechnologies();
+    std::string unitDisplayName(const dat::Unit &unit) const;
+    bool isWorker(const Object &object) const;
+    bool beginBuildingPlacement(Object &worker,
+                               const dat::Unit &building);
+    bool placeBuilding(float screenX, float screenY,
+                       int screenW, int screenH);
+    void updateConstruction(float dt);
     void commandAtScreen(float screenX, float screenY, int screenW, int screenH);
     void cycleSelectedAttackMode();
     void issueAttack(Object &source, Object &target, float approachAngle,
@@ -411,6 +458,9 @@ private:
     FormationType selectedFormation_ = FormationType::Line;
     bool actionMenuOpen_ = false;
     uint32_t actionMenuObjectId_ = 0;
+    ActionMenuTab actionMenuTab_ = ActionMenuTab::Units;
+    const dat::Unit *placementUnit_ = nullptr;
+    uint32_t placementBuilderId_ = 0;
     bool cheatMenuOpen_ = false;
     size_t cheatMenuSelection_ = 0;
     bool forceBuildCheat_ = false;

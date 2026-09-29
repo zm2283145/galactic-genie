@@ -187,6 +187,10 @@ int main() {
             in.menuDown = (pressed & SCE_CTRL_DOWN) != 0;
             in.menuActivate = (pressed & SCE_CTRL_CROSS) != 0;
             in.menuBack = (pressed & SCE_CTRL_CIRCLE) != 0;
+            in.actionTabLeft =
+                (pressed & SCE_CTRL_LTRIGGER) != 0;
+            in.actionTabRight =
+                (pressed & SCE_CTRL_RTRIGGER) != 0;
             const int currentMenuStickY =
                 pad.ly < 64 ? -1 : pad.ly > 192 ? 1 : 0;
             if (currentMenuStickY < 0 && menuStickY >= 0)

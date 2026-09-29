@@ -48,9 +48,12 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   use outer waiting positions when contact space is full, and pass through attackers bound for
   different final slots rather than deadlocking.
   Accuracy, blast damage, and explicit guard/patrol commands remain.
-- Economy: the four SWGB resources and an initial resource-charging building training queue are visible.
-  Gathering/drop sites, worker construction, research, and population limits (power cores and prefab
-  shelters) remain.
+- Economy: the four SWGB resources drive shared building queues for units and research. Original
+  `tech-level-1`, `MADE-*`, and `AVAIL-*` technologies determine civilization-correct production
+  choices, while researched replacement effects select the current unit upgrade. Workers expose
+  technology-driven building lists, validate placement and costs, walk to foundations, and construct
+  buildings with progressive graphics and hit points. Gathering/drop sites, multiple builders,
+  repair/cancel behavior, and population limits (power cores and prefab shelters) remain.
 - Researched technology effects apply packed DAT attack/armor modifiers plus generic health, speed,
   and reload-time modifiers. Remaining attributes, resource, upgrade, and age effects still need
   to be applied.
@@ -65,11 +68,13 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   cursor scrolls the camera at screen edges. Unit panels and control groups remain.
 - The command/info panel shows the selected unit or building portrait, live health, attack,
   armor, range, stance, multi-selection portraits with individual health, formation controls,
-  Vita command hints, and a contextual building production menu. A persistent four-resource
-  bar is shown at the top. A scrollable L + R + Select test menu exposes the original base-game and
-  Clone Campaigns cheats, including resource grants, unit spawns, instant production, victory/player
-  defeat, and hidden DAT cheat technologies. Worker task buttons, research, minimap, and pause menu
-  remain.
+  Vita command hints, and contextual action menus. Buildings separate civilization-correct Units
+  and Research tabs, support touch or L/R switching, and show queue progress both in the menu and
+  on the selected-building panel. Workers open a Buildings page with a placement preview. A
+  persistent four-resource bar is shown at the top. A scrollable L + R + Select test menu exposes
+  the original base-game and Clone Campaigns cheats, including resource grants, unit spawns, instant
+  production/construction, victory/player defeat, and hidden DAT cheat technologies. General worker
+  task buttons, minimap, and pause menu remain.
 - Audio: selection, move, and attack acknowledgements plus camera-relative weapon-fire, impact, and
   death effects are implemented. World ambience, volume controls, and music remain.
 
