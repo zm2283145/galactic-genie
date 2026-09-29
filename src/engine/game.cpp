@@ -5,7 +5,9 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <map>
+#include <queue>
 #include <set>
 #include <sstream>
 
@@ -169,6 +171,7 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
         if (err) *err = "no units could be spawned (dat/graphics mismatch?)";
         return false;
     }
+    rebuildAdjacency();
     lookAt(mapSize * 0.30f + 2, mapSize * 0.35f + 2);
     return true;
 }
@@ -314,6 +317,11 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
             }
         }
     }
+    for (const ScenarioTrigger &trigger : triggers_)
+        for (const ScenarioEffect &effect : trigger.effects)
+            if (effect.type == 6 || effect.type == 7)
+                for (uint32_t spawnId : effect.selectedUnitIds)
+                    if (Object *object = findObject(spawnId)) object->gate = true;
     rebuildAdjacency();
     const Object *hero = nullptr;
     size_t heroCount = 0;
@@ -495,6 +503,30 @@ void Game::rebuildAdjacency() {
         if (horizontal && !vertical) connectionFrame = horizontal == 2 ? 1 : 4;
         if (vertical && !horizontal) connectionFrame = vertical == 2 ? 0 : 3;
         object->facing = connectionFrame * 2.0f * kPi / 5.0f;
+    }
+
+    mobileObjectIndices_.clear();
+    staticObstructionIndices_.clear();
+    staticObstructionCells_.assign((size_t)mapSize_ * mapSize_, {});
+    for (size_t index = 0; index < objects_.size(); index++) {
+        const Object &object = objects_[index];
+        if (!object.active || object.hidden) continue;
+        const bool mobile = object.unit->speed > 0 && object.unit->type != dat::UT_Building;
+        if (mobile) {
+            mobileObjectIndices_.push_back((uint32_t)index);
+            continue;
+        }
+        if (object.unit->obstructionType == 0 || (object.gate && !object.locked)) continue;
+        staticObstructionIndices_.push_back((uint32_t)index);
+        const float halfX = std::max(0.05f, object.unit->collisionSize[0]);
+        const float halfY = std::max(0.05f, object.unit->collisionSize[1]);
+        const int minX = std::max(0, (int)std::floor(object.x - halfX));
+        const int maxX = std::min(mapSize_ - 1, (int)std::floor(object.x + halfX));
+        const int minY = std::max(0, (int)std::floor(object.y - halfY));
+        const int maxY = std::min(mapSize_ - 1, (int)std::floor(object.y + halfY));
+        for (int y = minY; y <= maxY; y++)
+            for (int x = minX; x <= maxX; x++)
+                staticObstructionCells_[(size_t)y * mapSize_ + x].push_back((uint32_t)index);
     }
 }
 
@@ -695,6 +727,47 @@ size_t Game::activeObjectCount() const {
                                  [](const Object &object) { return object.active; });
 }
 
+MovementStats Game::movementStats() const {
+    MovementStats stats;
+    for (size_t i = 0; i < objects_.size(); i++) {
+        const Object &object = objects_[i];
+        if (!object.active || object.hidden || object.unit->speed <= 0 ||
+            object.unit->type == dat::UT_Building)
+            continue;
+        if (object.state == State::Walk) stats.pathingObjects++;
+        if (!terrainPassable(object, object.x, object.y)) stats.terrainViolations++;
+        else if (!positionPassable(object, object.x, object.y, false))
+            stats.staticObstructionViolations++;
+        for (size_t j = i + 1; j < objects_.size(); j++) {
+            const Object &other = objects_[j];
+            if (!other.active || other.hidden || other.unit->speed <= 0 ||
+                other.unit->type == dat::UT_Building ||
+                isAirUnit(object) != isAirUnit(other))
+                continue;
+            const float dx = object.x - other.x, dy = object.y - other.y;
+            const float separation = collisionRadius(object) + collisionRadius(other) + 0.04f;
+            if (dx * dx + dy * dy < separation * separation) stats.overlappingPairs++;
+        }
+    }
+    return stats;
+}
+
+std::vector<MovingObjectInfo> Game::movingObjects() const {
+    std::vector<MovingObjectInfo> result;
+    for (const Object &object : objects_) {
+        if (!object.active || object.hidden || object.state != State::Walk) continue;
+        MovingObjectInfo info{object.spawnId, object.unit->id, object.player, object.x, object.y,
+                              object.targetX, object.targetY};
+        if (object.pathIndex < object.path.size()) {
+            info.waypointX = object.path[object.pathIndex][0];
+            info.waypointY = object.path[object.pathIndex][1];
+        }
+        info.blockedTime = object.blockedTime;
+        result.push_back(info);
+    }
+    return result;
+}
+
 bool Game::objectMatches(const Object &object, int unitId, int player, int group, int type) const {
     if (!object.active || !object.triggerAddressable) return false;
     if (unitId >= 0 && object.unit->id != unitId) return false;
@@ -747,6 +820,252 @@ std::vector<Game::Object *> Game::effectTargets(const ScenarioEffect &effect) {
         targets.push_back(&object);
     }
     return targets;
+}
+
+bool Game::isAirUnit(const Object &object) const {
+    return object.unit->flyMode != 0;
+}
+
+float Game::collisionRadius(const Object &object) const {
+    return std::max(0.1f, std::max(object.unit->collisionSize[0],
+                                    object.unit->collisionSize[1]));
+}
+
+bool Game::terrainPassable(const Object &object, float x, float y) const {
+    if (x < 0 || y < 0 || x >= mapSize_ || y >= mapSize_) return false;
+    if (isAirUnit(object)) return true;
+    const int restriction = object.unit->terrainRestriction;
+    const auto &restrictions = assets_.dat().terrainRestrictions;
+    if (restriction < 0 || (size_t)restriction >= restrictions.size()) return false;
+    const auto &multipliers =
+        restrictions[(size_t)restriction].passableBuildableDmgMultiplier;
+    const int terrain = terrainAt((int)std::floor(x), (int)std::floor(y));
+    return terrain >= 0 && (size_t)terrain < multipliers.size() &&
+           multipliers[(size_t)terrain] > 0.0f;
+}
+
+bool Game::positionPassable(const Object &object, float x, float y, bool dynamic) const {
+    const float radius = collisionRadius(object);
+    if (x < radius || y < radius || x >= mapSize_ - radius || y >= mapSize_ - radius ||
+        !terrainPassable(object, x, y))
+        return false;
+
+    const bool air = isAirUnit(object);
+    if (dynamic) {
+        for (uint32_t index : mobileObjectIndices_) {
+            const Object &other = objects_[(size_t)index];
+            if (&other == &object || !other.active || other.hidden || isAirUnit(other) != air)
+                continue;
+            const float dx = x - other.x, dy = y - other.y;
+            const float separation = radius + collisionRadius(other) + 0.04f;
+            const float oldDx = object.x - other.x, oldDy = object.y - other.y;
+            if (dx * dx + dy * dy < separation * separation &&
+                dx * dx + dy * dy <= oldDx * oldDx + oldDy * oldDy)
+                return false;
+        }
+    }
+    if (air) return true;
+    const int minX = std::max(0, (int)std::floor(x - radius));
+    const int maxX = std::min(mapSize_ - 1, (int)std::floor(x + radius));
+    const int minY = std::max(0, (int)std::floor(y - radius));
+    const int maxY = std::min(mapSize_ - 1, (int)std::floor(y + radius));
+    for (int cellY = minY; cellY <= maxY; cellY++)
+        for (int cellX = minX; cellX <= maxX; cellX++)
+            for (uint32_t index :
+                 staticObstructionCells_[(size_t)cellY * mapSize_ + cellX]) {
+                const Object &other = objects_[(size_t)index];
+                const float halfX = std::max(0.05f, other.unit->collisionSize[0]);
+                const float halfY = std::max(0.05f, other.unit->collisionSize[1]);
+                const float extentX = halfX + radius, extentY = halfY + radius;
+                const float newDx = std::abs(x - other.x), newDy = std::abs(y - other.y);
+                if (newDx >= extentX || newDy >= extentY) continue;
+                const float oldDx = std::abs(object.x - other.x);
+                const float oldDy = std::abs(object.y - other.y);
+                const bool wasInside = oldDx < extentX && oldDy < extentY;
+                const float newPenetration = std::min(extentX - newDx, extentY - newDy);
+                const float oldPenetration = std::min(extentX - oldDx, extentY - oldDy);
+                if (!wasInside || newPenetration >= oldPenetration) return false;
+            }
+    return true;
+}
+
+bool Game::findPath(const Object &object, float targetX, float targetY,
+                    std::vector<std::array<float, 2>> &path) const {
+    constexpr int kNodesPerTile = 2;
+    constexpr int kStraightCost = 10;
+    constexpr int kDiagonalCost = 14;
+    const int width = mapSize_ * kNodesPerTile;
+    if (width <= 0) return false;
+    const int nodeCount = width * width;
+    auto nodeX = [](int x) { return (x + 0.5f) / kNodesPerTile; };
+    auto nodeY = [](int y) { return (y + 0.5f) / kNodesPerTile; };
+    auto clampNode = [width](float value) {
+        return std::max(0, std::min(width - 1, (int)std::floor(value * kNodesPerTile)));
+    };
+    auto indexOf = [width](int x, int y) { return y * width + x; };
+
+    std::vector<uint8_t> passable((size_t)nodeCount, 0);
+    const float radius = collisionRadius(object);
+    for (int y = 0; y < width; y++)
+        for (int x = 0; x < width; x++) {
+            const float worldX = nodeX(x), worldY = nodeY(y);
+            passable[(size_t)indexOf(x, y)] =
+                worldX >= radius && worldY >= radius &&
+                worldX < mapSize_ - radius && worldY < mapSize_ - radius &&
+                terrainPassable(object, worldX, worldY);
+        }
+    if (!isAirUnit(object)) {
+        for (uint32_t index : staticObstructionIndices_) {
+            const Object &other = objects_[(size_t)index];
+            const float halfX = std::max(0.05f, other.unit->collisionSize[0]);
+            const float halfY = std::max(0.05f, other.unit->collisionSize[1]);
+            const int minX = std::max(0, (int)std::floor(
+                (other.x - halfX - radius) * kNodesPerTile) - 1);
+            const int maxX = std::min(width - 1, (int)std::ceil(
+                (other.x + halfX + radius) * kNodesPerTile));
+            const int minY = std::max(0, (int)std::floor(
+                (other.y - halfY - radius) * kNodesPerTile) - 1);
+            const int maxY = std::min(width - 1, (int)std::ceil(
+                (other.y + halfY + radius) * kNodesPerTile));
+            for (int y = minY; y <= maxY; y++)
+                for (int x = minX; x <= maxX; x++)
+                    if (std::abs(nodeX(x) - other.x) < halfX + radius &&
+                        std::abs(nodeY(y) - other.y) < halfY + radius)
+                        passable[(size_t)indexOf(x, y)] = 0;
+        }
+    }
+    for (uint32_t index : mobileObjectIndices_) {
+        const Object &other = objects_[(size_t)index];
+        if (&other == &object || !other.active || other.hidden ||
+            isAirUnit(other) != isAirUnit(object))
+            continue;
+        const float separation = radius + collisionRadius(other) + 0.04f;
+        const int minX = std::max(0, (int)std::floor(
+            (other.x - separation) * kNodesPerTile) - 1);
+        const int maxX = std::min(width - 1, (int)std::ceil(
+            (other.x + separation) * kNodesPerTile));
+        const int minY = std::max(0, (int)std::floor(
+            (other.y - separation) * kNodesPerTile) - 1);
+        const int maxY = std::min(width - 1, (int)std::ceil(
+            (other.y + separation) * kNodesPerTile));
+        for (int y = minY; y <= maxY; y++)
+            for (int x = minX; x <= maxX; x++) {
+                const float dx = nodeX(x) - other.x, dy = nodeY(y) - other.y;
+                if (dx * dx + dy * dy < separation * separation)
+                    passable[(size_t)indexOf(x, y)] = 0;
+            }
+    }
+
+    const int startX = clampNode(object.x), startY = clampNode(object.y);
+    const int desiredX = clampNode(targetX), desiredY = clampNode(targetY);
+    const int start = indexOf(startX, startY);
+    passable[(size_t)start] = 1;
+
+    struct OpenNode {
+        int score;
+        int index;
+        bool operator<(const OpenNode &other) const { return score > other.score; }
+    };
+    const int infinity = std::numeric_limits<int>::max();
+    std::vector<int> cost((size_t)nodeCount, infinity);
+    std::vector<int> parent((size_t)nodeCount, -1);
+    std::priority_queue<OpenNode> open;
+    auto heuristic = [desiredX, desiredY](int x, int y) {
+        const int dx = std::abs(x - desiredX), dy = std::abs(y - desiredY);
+        return kDiagonalCost * std::min(dx, dy) +
+               kStraightCost * (std::max(dx, dy) - std::min(dx, dy));
+    };
+    cost[(size_t)start] = 0;
+    open.push({heuristic(startX, startY), start});
+    int closest = start;
+    int closestDistance = heuristic(startX, startY);
+    static constexpr int directions[8][2] = {
+        {-1, 0}, {1, 0}, {0, -1}, {0, 1},
+        {-1, -1}, {1, -1}, {-1, 1}, {1, 1},
+    };
+
+    while (!open.empty()) {
+        const OpenNode current = open.top();
+        open.pop();
+        const int cx = current.index % width, cy = current.index / width;
+        if (current.score != cost[(size_t)current.index] + heuristic(cx, cy)) continue;
+        const int distance = heuristic(cx, cy);
+        if (distance < closestDistance) {
+            closestDistance = distance;
+            closest = current.index;
+        }
+        if (cx == desiredX && cy == desiredY) {
+            closest = current.index;
+            break;
+        }
+        for (const auto &direction : directions) {
+            const int nx = cx + direction[0], ny = cy + direction[1];
+            if (nx < 0 || ny < 0 || nx >= width || ny >= width) continue;
+            const int next = indexOf(nx, ny);
+            if (!passable[(size_t)next]) continue;
+            const bool diagonal = direction[0] != 0 && direction[1] != 0;
+            if (diagonal &&
+                (!passable[(size_t)indexOf(cx + direction[0], cy)] ||
+                 !passable[(size_t)indexOf(cx, cy + direction[1])]))
+                continue;
+            const int nextCost = cost[(size_t)current.index] +
+                                 (diagonal ? kDiagonalCost : kStraightCost);
+            if (nextCost >= cost[(size_t)next]) continue;
+            cost[(size_t)next] = nextCost;
+            parent[(size_t)next] = current.index;
+            open.push({nextCost + heuristic(nx, ny), next});
+        }
+    }
+
+    if (closest == start) return closestDistance == 0;
+    std::vector<int> reverse;
+    for (int node = closest; node != start && node >= 0; node = parent[(size_t)node])
+        reverse.push_back(node);
+    if (reverse.empty() || parent[(size_t)reverse.back()] < 0) return false;
+    std::reverse(reverse.begin(), reverse.end());
+
+    path.clear();
+    int previousDx = 0, previousDy = 0;
+    for (size_t i = 0; i < reverse.size(); i++) {
+        const int node = reverse[i];
+        const int previous = i == 0 ? start : reverse[i - 1];
+        const int dx = node % width - previous % width;
+        const int dy = node / width - previous / width;
+        if (i > 0 && dx == previousDx && dy == previousDy)
+            path.back() = {nodeX(node % width), nodeY(node / width)};
+        else
+            path.push_back({nodeX(node % width), nodeY(node / width)});
+        previousDx = dx;
+        previousDy = dy;
+    }
+    if (closestDistance == 0 && positionPassable(object, targetX, targetY, false)) {
+        const auto &last = path.back();
+        const float dx = targetX - last[0], dy = targetY - last[1];
+        if (dx * dx + dy * dy > 0.0025f) path.push_back({targetX, targetY});
+    }
+    return !path.empty();
+}
+
+bool Game::issueMove(Object &object, float targetX, float targetY) {
+    object.targetX = targetX;
+    object.targetY = targetY;
+    object.pathIndex = 0;
+    object.blockedTime = 0;
+    const float dx = targetX - object.x, dy = targetY - object.y;
+    if (dx * dx + dy * dy < 0.01f) {
+        object.path.clear();
+        object.state = State::Idle;
+        return true;
+    }
+    if (!findPath(object, targetX, targetY, object.path)) {
+        object.path.clear();
+        object.state = State::Idle;
+        return false;
+    }
+    object.state = State::Walk;
+    object.wander = false;
+    object.animTime = 0;
+    return true;
 }
 
 void Game::setTriggerEnabled(int id, bool enabled) {
@@ -878,9 +1197,14 @@ void Game::executeEffect(const ScenarioEffect &effect) {
         }
         break;
     case 6:
-    case 7:
-        for (Object *object : effectTargets(effect)) object->locked = effect.type == 7;
+    case 7: {
+        for (Object *object : effectTargets(effect)) {
+            object->gate = true;
+            object->locked = effect.type == 7;
+        }
+        rebuildAdjacency();
         break;
+    }
     case 8:
         setTriggerEnabled(triggerField(effect.fields, 13), true);
         break;
@@ -938,13 +1262,36 @@ void Game::executeEffect(const ScenarioEffect &effect) {
             hasTarget = true;
         }
         if (hasTarget) {
-            for (Object *object : effectTargets(effect)) {
+            std::vector<Object *> targets = effectTargets(effect);
+            float slotSpacing = 0.6f;
+            for (const Object *object : targets)
+                if (!object->hidden && object->unit->speed > 0)
+                    slotSpacing = std::max(slotSpacing, collisionRadius(*object) * 2.0f + 0.1f);
+            size_t slot = 0;
+            for (Object *object : targets) {
                 if (object->hidden || object->unit->speed <= 0) continue;
-                object->targetX = targetX;
-                object->targetY = targetY;
-                object->state = State::Walk;
-                object->wander = false;
-                object->animTime = 0;
+                float slotX = targetX, slotY = targetY;
+                if (slot > 0) {
+                    const int ring = (int)std::ceil((std::sqrt((float)slot + 1.0f) - 1.0f) * 0.5f);
+                    const int side = ring * 2;
+                    const int first = (ring * 2 - 1) * (ring * 2 - 1);
+                    const int offset = (int)slot - first;
+                    int sx = ring, sy = ring;
+                    if (offset < side) sx -= offset;
+                    else if (offset < side * 2) {
+                        sx = -ring;
+                        sy -= offset - side;
+                    } else if (offset < side * 3) {
+                        sx = -ring + offset - side * 2;
+                        sy = -ring;
+                    } else {
+                        sy = -ring + offset - side * 3;
+                    }
+                    slotX += sx * slotSpacing;
+                    slotY += sy * slotSpacing;
+                }
+                issueMove(*object, slotX, slotY);
+                slot++;
             }
         }
         break;
@@ -1122,25 +1469,62 @@ void Game::update(float dt, const InputState &in) {
             if (o.stateTime <= 0) {
                 // Wander to a nearby point around home.
                 float a = r01(rng_) * 2 * kPi, d = 1.0f + r01(rng_) * 4.0f;
-                o.targetX = std::max(1.0f, std::min(mapSize_ - 2.0f, o.homeX + std::cos(a) * d));
-                o.targetY = std::max(1.0f, std::min(mapSize_ - 2.0f, o.homeY + std::sin(a) * d));
-                o.state = State::Walk;
-                o.animTime = 0;
+                const float targetX =
+                    std::max(1.0f, std::min(mapSize_ - 2.0f, o.homeX + std::cos(a) * d));
+                const float targetY =
+                    std::max(1.0f, std::min(mapSize_ - 2.0f, o.homeY + std::sin(a) * d));
+                issueMove(o, targetX, targetY);
+                o.wander = true;
             }
         } else {
-            float dx = o.targetX - o.x, dy = o.targetY - o.y;
-            float dist = std::sqrt(dx * dx + dy * dy);
-            float step = o.unit->speed * dt;
-            if (dist <= step) {
-                o.x = o.targetX;
-                o.y = o.targetY;
+            if (o.pathIndex >= o.path.size()) {
                 o.state = State::Idle;
                 o.stateTime = 1.5f + r01(rng_) * 5.0f;
                 o.animTime = 0;
-            } else {
-                o.x += dx / dist * step;
-                o.y += dy / dist * step;
+                continue;
+            }
+            const auto &waypoint = o.path[o.pathIndex];
+            float dx = waypoint[0] - o.x, dy = waypoint[1] - o.y;
+            float dist = std::sqrt(dx * dx + dy * dy);
+            float step = o.unit->speed * dt;
+            const float scale = dist <= step || dist <= 0.0001f ? 1.0f : step / dist;
+            float nextX = o.x + dx * scale, nextY = o.y + dy * scale;
+            bool moved = positionPassable(o, nextX, nextY, true);
+            if (!moved && std::abs(dx) > 0.0001f)
+                moved = positionPassable(o, nextX, o.y, true), nextY = o.y;
+            if (!moved && std::abs(dy) > 0.0001f) {
+                nextX = o.x;
+                nextY = o.y + dy * scale;
+                moved = positionPassable(o, nextX, nextY, true);
+            }
+            if (moved) {
+                o.x = nextX;
+                o.y = nextY;
                 o.facing = std::atan2(dy, dx);
+                o.blockedTime = 0;
+                if (dist <= step || dist <= 0.0001f) {
+                    o.pathIndex++;
+                    if (o.pathIndex >= o.path.size()) {
+                        o.state = State::Idle;
+                        o.stateTime = 1.5f + r01(rng_) * 5.0f;
+                        o.animTime = 0;
+                    }
+                }
+            } else {
+                o.blockedTime += dt;
+                const float targetDx = o.targetX - o.x, targetDy = o.targetY - o.y;
+                if (o.blockedTime >= 0.5f &&
+                    targetDx * targetDx + targetDy * targetDy <= 2.25f) {
+                    o.state = State::Idle;
+                    o.stateTime = 1.5f + r01(rng_) * 5.0f;
+                    o.animTime = 0;
+                    continue;
+                }
+                if (o.blockedTime >= 1.0f) {
+                    const bool wander = o.wander;
+                    issueMove(o, o.targetX, o.targetY);
+                    o.wander = wander;
+                }
             }
         }
     }

@@ -16,7 +16,7 @@ It is written clean-room style: file formats come from public documentation (ope
 | Isometric terrain renderer with `blendomatic.dat` priority/mode edge blending | done |
 | Terrain elevation with original slope geometry and neighbor-sensitive lighting | done |
 | CPX/SCX terrain, elevation, player state, triggers, saved camera, and initial object loading (“Breaking Bread”) | done |
-| Initial trigger runtime: timers, object/area/resource conditions, ordered effects, voiced dialogue, and scripted movement | in progress |
+| Initial trigger runtime: timers, object/area/resource conditions, ordered effects, voiced dialogue, and collision-aware scripted movement | in progress |
 | Units: idle/walk animation, 8-way facing with mirroring, graphic deltas for buildings | done |
 | Vita: vitaGL batched fixed-function renderer, stick/d-pad/touch scroll, L/R zoom | done |
 | PC `swgbtool`: data inspection, CPX/SCX listing, and procedural/scenario PNG rendering | done |

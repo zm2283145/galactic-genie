@@ -29,6 +29,7 @@ static int usage() {
             "usage:\n"
             "  swgbtool info   <DataDir>\n"
             "  swgbtool terrain <DataDir> <terrainId>\n"
+            "  swgbtool restriction <DataDir> <restrictionId>\n"
             "  swgbtool unit <DataDir> <unitId>\n"
             "  swgbtool drs    <file.drs>\n"
             "  swgbtool slp    <DataDir> <slpId> <out.png> [playerBase]\n"
@@ -126,14 +127,17 @@ static int cmdUnit(const char *dataDir, int id) {
             const auto *graphic = assets.dat().graphic(graphicId);
             printf("civ %zu %-24s unit '%s', type %u, class %d, hidden %u, hero %u, graphic %d, slp %d, frames %d, angles %d, "
                    "duration %.3f, sequence 0x%02x, mirror %u, deltas %zu, special graphic %d, "
-                   "special ability %u, adjacent mode %u, graphics angle %d\n", civ,
+                   "special ability %u, adjacent mode %u, graphics angle %d, speed %.2f, "
+                   "restriction %d, fly %u, obstruction %u/%u, collision %.2f,%.2f\n", civ,
                    assets.dat().civs[civ].name.c_str(), unit.name.c_str(), unit.type, unit.cls,
                    unit.hideInEditor, unit.heroMode, graphicId,
                    graphic ? graphic->slp : -1, graphic ? graphic->frameCount : 0,
                    graphic ? graphic->angleCount : 0, graphic ? graphic->frameDuration : 0,
                    graphic ? graphic->sequenceType : 0, graphic ? graphic->mirroringMode : 0,
                    graphic ? graphic->deltas.size() : 0, unit.specialGraphic, unit.specialAbility,
-                   unit.adjacentMode, unit.graphicsAngle);
+                   unit.adjacentMode, unit.graphicsAngle, unit.speed, unit.terrainRestriction,
+                   unit.flyMode, unit.obstructionType, unit.obstructionClass,
+                   unit.collisionSize[0], unit.collisionSize[1]);
             if (graphic)
                 for (const auto &delta : graphic->deltas)
                     if (const auto *child = assets.dat().graphic(delta.graphicId))
@@ -146,7 +150,28 @@ static int cmdUnit(const char *dataDir, int id) {
                         printf("  annex unit %d offset %.2f,%.2f\n", annex.unitId,
                                annex.misplacementX, annex.misplacementY);
         }
+
         return 0;
+}
+
+static int cmdRestriction(const char *dataDir, int id) {
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    std::string err;
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    const auto &restrictions = assets.dat().terrainRestrictions;
+    if (id < 0 || (size_t)id >= restrictions.size()) {
+        fprintf(stderr, "error: restriction ID out of range\n");
+        return 1;
+    }
+    const auto &values = restrictions[(size_t)id].passableBuildableDmgMultiplier;
+    const auto &terrains = assets.dat().terrainBlock.terrains;
+    for (size_t terrain = 0; terrain < values.size() && terrain < terrains.size(); terrain++)
+        printf("%3zu %8.3f %s\n", terrain, values[terrain], terrains[terrain].name.c_str());
+    return 0;
 }
 
 static int cmdDrs(const char *path) {
@@ -536,6 +561,17 @@ static int cmdSimulateScenario(const char *dataDir, const char *campaignPath, in
     printf("simulated %.2f seconds: %zu active objects, gate 13861 %s, instruction '%s'\n",
            seconds, game.activeObjectCount(), game.gateLocked(13861) ? "locked" : "unlocked",
            game.currentInstruction().c_str());
+    const MovementStats movement = game.movementStats();
+    printf("  movement: %zu pathing, %zu overlapping pairs, %zu terrain violations, "
+           "%zu static obstruction violations\n",
+           movement.pathingObjects, movement.overlappingPairs, movement.terrainViolations,
+           movement.staticObstructionViolations);
+    for (const MovingObjectInfo &object : game.movingObjects())
+        printf("    object %u unit %d player %d at %.2f,%.2f -> %.2f,%.2f "
+               "via %.2f,%.2f blocked %.2f\n",
+               object.spawnId, object.unitId, object.player, object.x, object.y,
+               object.targetX, object.targetY, object.waypointX, object.waypointY,
+               object.blockedTime);
     for (size_t i = 0; i < scenario.triggers.size(); i++)
         if (game.triggerEnabled(i) || game.triggerFired(i))
             printf("  trigger %zu: enabled %d fired %d '%s'\n", i, game.triggerEnabled(i),
@@ -577,6 +613,7 @@ int main(int argc, char **argv) {
     const char *cmd = argv[1];
     if (!strcmp(cmd, "info")) return cmdInfo(argv[2]);
     if (!strcmp(cmd, "terrain") && argc >= 4) return cmdTerrain(argv[2], atoi(argv[3]));
+    if (!strcmp(cmd, "restriction") && argc >= 4) return cmdRestriction(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "unit") && argc >= 4) return cmdUnit(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "drs")) return cmdDrs(argv[2]);
     if (!strcmp(cmd, "campaign")) return cmdCampaign(argv[2]);

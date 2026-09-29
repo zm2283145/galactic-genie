@@ -20,16 +20,18 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   are parsed. Trigger definitions, objective metadata, conditions, effects, display order, dialogue, and
   selected-object references are parsed and validated across all 43 original `XCAM` scenarios.
 - The first trigger runtime executes ordered trigger chains, timers, object/area/resource/difficulty
-  conditions, player/resource/diplomacy changes, object creation/removal/ownership, gate state, direct
-  scripted movement, and visible queued dialogue. Scenario MP3 dialogue is decoded and queued with its
-  matching subtitle on Vita. AI goals, full technology effects, combat-driven state changes, general
-  sound effects, music, and campaign progression remain.
+  conditions, player/resource/diplomacy changes, object creation/removal/ownership, gate state,
+  collision-aware scripted movement, and visible queued dialogue. Movement uses DAT terrain
+  restrictions, flying-unit behavior, static obstacle footprints, destination formations, dynamic
+  occupancy, and bounded A* routes. Scenario MP3 dialogue is decoded and queued with its matching
+  subtitle on Vita. AI goals, full technology effects, combat-driven state changes, general sound
+  effects, music, and campaign progression remain.
 - Fog of war and explored/visible tile state.
 - Shadow and player-outline passes (PX_OUTLINE pixels drawn only when occluded).
 
 ## Milestone 3: simulation core
 - Fixed-timestep simulation separate from rendering. Deterministic, to leave room for multiplayer later.
-- Tile passability from terrain restrictions, and A* pathing with unit clearance sizes.
+- Extend the initial terrain-restriction A* pathing into player-issued commands and task-list actions.
 - Unit commands from the dat task lists (`UnitHeader.tasks`): move, attack, gather, build, repair, garrison.
 - Combat: attack/armor classes, projectiles, reload times and blast damage.
 - Economy: the four SWGB resources, drop sites, training queues, population (power cores and prefab shelters).

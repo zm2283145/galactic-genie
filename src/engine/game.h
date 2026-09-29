@@ -30,6 +30,23 @@ struct FrameStats {
     int tiles = 0;
 };
 
+struct MovementStats {
+    size_t pathingObjects = 0;
+    size_t overlappingPairs = 0;
+    size_t terrainViolations = 0;
+    size_t staticObstructionViolations = 0;
+};
+
+struct MovingObjectInfo {
+    uint32_t spawnId = 0;
+    int unitId = -1;
+    int player = 0;
+    float x = 0, y = 0;
+    float targetX = 0, targetY = 0;
+    float waypointX = 0, waypointY = 0;
+    float blockedTime = 0;
+};
+
 class Game {
 public:
     explicit Game(Assets &assets) : assets_(assets) {}
@@ -59,6 +76,8 @@ public:
     float resource(int player, int resourceId) const;
     const std::string &currentInstruction() const { return currentInstruction_; }
     size_t activeObjectCount() const;
+    MovementStats movementStats() const;
+    std::vector<MovingObjectInfo> movingObjects() const;
 
     static constexpr int kTileHalfW = 48;
     static constexpr int kTileHalfH = 24;
@@ -75,6 +94,9 @@ private:
         float animTime = 0;
         float stateTime = 0;
         float targetX = 0, targetY = 0;
+        std::vector<std::array<float, 2>> path;
+        size_t pathIndex = 0;
+        float blockedTime = 0;
         float homeX = 0, homeY = 0;
         bool wander = true;
         bool drawShadows = true;
@@ -82,6 +104,7 @@ private:
         bool hidden = false;
         bool draw = true;
         bool locked = false;
+        bool gate = false;
         bool triggerAddressable = true;
         float flashTime = 0;
         uint32_t spawnId = 0;
@@ -121,6 +144,13 @@ private:
     std::vector<Object *> effectTargets(const ScenarioEffect &effect);
     bool objectMatches(const Object &object, int unitId, int player, int group, int type) const;
     bool inSourceArea(const Object &object, int x1, int y1, int x2, int y2) const;
+    bool issueMove(Object &object, float targetX, float targetY);
+    bool findPath(const Object &object, float targetX, float targetY,
+                  std::vector<std::array<float, 2>> &path) const;
+    bool positionPassable(const Object &object, float x, float y, bool dynamic) const;
+    bool terrainPassable(const Object &object, float x, float y) const;
+    bool isAirUnit(const Object &object) const;
+    float collisionRadius(const Object &object) const;
     void startInstruction(Instruction instruction);
     void queueInstruction(const std::string &text, float duration,
                           const std::string &sound = std::string());
@@ -140,6 +170,9 @@ private:
     std::vector<uint8_t> tileElevation_;
     std::vector<uint8_t> tileSlope_;
     std::vector<Object> objects_;
+    std::vector<uint32_t> mobileObjectIndices_;
+    std::vector<uint32_t> staticObstructionIndices_;
+    std::vector<std::vector<uint32_t>> staticObstructionCells_;
     std::array<ScenarioPlayer, 16> players_{};
     std::array<std::map<int, float>, 17> resources_{};
     std::array<std::set<int>, 17> researchedTechs_{};
