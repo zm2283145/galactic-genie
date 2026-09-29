@@ -61,8 +61,9 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   and buildings. Production locations follow each building's researched upgrade lineage, so Command
   Centers and Troop Centers retain their original production menus after advancing a Tech Level.
   Every queued unit/research item is displayed and can be cancelled for a refund.
-  Power Cores provide the original nine-tile power coverage; unpowered buildings train and research
-  at 25% speed. DAT power-indicator frames render solid green while powered and blink red while
+  Power Cores and mobile Power Droids provide the original nine-tile power coverage; selected power
+  sources show the original blue coverage ring. Unpowered buildings train and research at 25% speed.
+  DAT power-indicator frames render solid green while powered and blink red while
   unpowered. Selected buildings also show powered/unpowered and shield-coverage icons. Power Core
   placement/construction uses the original blue coverage ring, while Shield Generators retain the
   original yellow shield-boundary ring during placement and draw their original civilization-specific
@@ -75,8 +76,11 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   automatically gather a compatible nearby node; otherwise they continue onto the nearest friendly
   foundation within their original line of sight. Workers use original resource cursors, task variants,
   working/carrying animations, capacities, and civilization drop sites while gathering food,
-  carbon, ore, and nova, and multiple selected workers can share one gather order; depleted static
-  nodes are removed. Farms are available as a base economy building rather than depending on their
+  carbon, ore, and nova, and multiple selected workers can share one gather order. The panel shows
+  each worker's carried resource amount and capacity. Workers accept explicit orders to deposit a
+  partial load at any compatible building and then return to their previous node. Depleted trees and
+  other nodes transition through their original death/remains graphics instead of vanishing. Farms
+  are available as a base economy building rather than depending on their
   circular `MADE-*` technology. Neutral Nerfs and Banthas use the
   original Gaia color and convert through proximity capture. Live-animal slaughter, farms,
   fishing, automatic adjacent-node retargeting, and population-limit
@@ -104,17 +108,24 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   non-zero combat attributes, stance, multi-selection portraits with individual health, formation controls,
   Vita command hints, and an original-style five-by-three icon command grid with a high-contrast
   information pane. Buildings separate civilization-correct Units and Research tabs, support touch
-  or L/R switching, and show every cancellable queue item plus current progress. Research pages retain
-  future locked technologies and show their exact met/unmet prerequisite count, costs, duration, and
-  DAT-derived effects instead of hiding them. Gates expose lock/unlock commands rather than production;
+  or L/R switching, and show every cancellable queue item plus current progress. Research pages use
+  the Clone Campaigns technology sheets and show only technologies whose current Tech Level and
+  prerequisites are satisfied. A successor sharing a button slot replaces its prerequisite in that
+  same slot after research, while visible choices retain exact costs, duration, requirements, and
+  DAT-derived effects. Gates expose lock/unlock commands rather than production;
   selected gate footprints follow their oriented annexes. Unit/group panels use the original command sheet for
-  garrison targeting, repair targeting, gate locking, and ejection; eligible buildings provide
-  ejection and capacity feedback. Choosing a formation immediately rearranges idle combat units.
+  garrison targeting, repair targeting, gate locking, destruction, and ejection. The destroy command
+  removes one object per press in reverse selection order. Eligible buildings show their garrisoned
+  unit portraits; a portrait ejects only that unit while Eject All remains available. Attack-capable
+  selections expose a dedicated original-style stance grid while Triangle still cycles stances
+  directly. Choosing a formation immediately rearranges idle combat units.
   Multiple selected workers can open the same three categorized building pages and share the resulting
   construction order and placement preview. Empty buildings do not
   expose an action-menu hint. Selection status distinguishes the local player,
   named allies, neutral sides, and enemies using scenario diplomacy, scenario player names, and
   civilization names. Status icons expose powered, unpowered, shielded, and unshielded tooltips.
+  Player-color occlusion outlines use a thicker, high-alpha masked pass so units remain legible
+  behind buildings and resource sprites.
   A persistent resource, population, and Tech Level bar is shown at the top, including age-research
   progress. A scrollable L + R + Select test menu exposes
   the original base-game and Clone Campaigns cheats, including resource grants, unit spawns, instant

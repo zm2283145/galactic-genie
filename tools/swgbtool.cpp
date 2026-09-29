@@ -221,9 +221,11 @@ static int cmdUnit(const char *dataDir, int id) {
                    assets.localizedString(unit.languageDllName).c_str(),
                    unit.name2.c_str(), unit.iconId, unit.oldPortraitPict,
                    unit.interfaceKind, unit.unitLine);
-            printf("  creation location %d button %u time %d construction graphic %d transform %d costs",
+            printf("  creation location %d button %u time %d construction graphic %d transform %d sounds train/transform/construction %d/%d/%d costs",
                    unit.trainLocationId, unit.buttonId, unit.trainTime,
-                   unit.constructionGraphic, unit.transformUnit);
+                   unit.constructionGraphic, unit.transformUnit,
+                   unit.trainSound, unit.transformSound,
+                   unit.constructionSound);
             for (const auto &cost : unit.costs)
                 if (cost.flag && cost.type >= 0)
                     printf(" %d=%d", cost.type, cost.amount);
@@ -381,10 +383,11 @@ static int cmdTech(const char *dataDir, int id) {
         return 1;
     }
     const dat::Tech &tech = techs[(size_t)id];
-    printf("tech %d '%s' internal '%s' civ %d location %d time %d effect %d\n",
+    printf("tech %d '%s' internal '%s' civ %d location %d time %d effect %d icon %d button %u\n",
            id, assets.localizedString(tech.languageDllName).c_str(),
            tech.name2.c_str(), tech.civ, tech.locationId,
-           tech.researchTime, tech.effectId);
+           tech.researchTime, tech.effectId,
+           tech.iconId, tech.buttonId);
     printf("  required (%d):", tech.requiredTechCount);
     for (int required : tech.requiredTechs)
         if (required >= 0) printf(" %d", required);
@@ -1400,8 +1403,8 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
     bool researchCancelled = false;
     bool researchCompleted = false;
     bool researchCostDeducted = false;
-    bool lockedResearchListed = false;
-    bool lockedResearchRejected = false;
+    bool lockedResearchHidden = false;
+    bool researchChainAdvanced = false;
     float centerX = 0, centerY = 0;
     if (basicTraining != commandCenterResearch.end() &&
         game.objectScreenPosition(commandCenterId, screenW, screenH,
@@ -1419,8 +1422,8 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         game.update(0.001f, input);
 
         const float novaBeforeResearch = game.resource(1, 3);
-        const auto lockedResearch =
-            std::find_if(
+        lockedResearchHidden =
+            std::none_of(
                 commandCenterResearch.begin(),
                 commandCenterResearch.end(),
                 [&](int technologyId) {
@@ -1428,34 +1431,6 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
                         .technologyRequirementsMetForTesting(
                             1, technologyId);
                 });
-        lockedResearchListed =
-            lockedResearch !=
-            commandCenterResearch.end();
-        if (lockedResearchListed) {
-            const size_t lockedIndex =
-                (size_t)std::distance(
-                    commandCenterResearch.begin(),
-                    lockedResearch);
-            const size_t optionsBefore =
-                commandCenterResearch.size();
-            input = {};
-            input.pointerX =
-                188.0f +
-                (float)(lockedIndex % 5) *
-                    52.0f +
-                26.0f;
-            input.pointerY =
-                164.0f +
-                (float)(lockedIndex / 5) *
-                    52.0f +
-                26.0f;
-            input.selectPressed = true;
-            game.update(0.001f, input);
-            lockedResearchRejected =
-                game.researchOptionIds(
-                    commandCenterId).size() ==
-                optionsBefore;
-        }
         input = {};
         const size_t basicTrainingIndex =
             (size_t)std::distance(
@@ -1520,6 +1495,43 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
             input);
         researchCompleted =
             game.technologyResearched(1, basicTrainingId);
+        const std::vector<int> advancedResearch =
+            game.researchOptionIds(commandCenterId);
+        bool hasBasicTrainingSuccessor = false;
+        researchChainAdvanced = true;
+        for (size_t technologyId = 0;
+             technologyId < assets.dat().techs.size();
+             technologyId++) {
+            const dat::Tech &technology =
+                assets.dat().techs[technologyId];
+            if (technology.buttonId !=
+                    assets.dat().techs[
+                        basicTrainingId]
+                        .buttonId ||
+                technology.locationId !=
+                    assets.dat().techs[
+                        basicTrainingId]
+                        .locationId ||
+                std::find(
+                    std::begin(
+                        technology.requiredTechs),
+                    std::end(
+                        technology.requiredTechs),
+                    basicTrainingId) ==
+                    std::end(
+                        technology.requiredTechs))
+                continue;
+            hasBasicTrainingSuccessor = true;
+            researchChainAdvanced =
+                std::find(
+                    advancedResearch.begin(),
+                    advancedResearch.end(),
+                    (int)technologyId) !=
+                advancedResearch.end();
+            break;
+        }
+        if (!hasBasicTrainingSuccessor)
+            researchChainAdvanced = true;
     }
     input = {};
     input.menuBack = true;
@@ -1534,6 +1546,7 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
     bool builderStateEntered = false;
     bool garrisonModeActivated = false;
     bool workerGarrisoned = false;
+    bool individualGarrisonEjected = false;
     bool workerEjected = false;
     const auto dwelling =
         std::find(workerBuildings.begin(),
@@ -1581,20 +1594,51 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
             game.update(1.0f / 30.0f, {});
         workerGarrisoned =
             game.garrisonedCount(commandCenterId) == 1;
-        game.selectObjectForTesting(commandCenterId);
-        input = {};
-        input.cycleAttackMode = true;
-        game.update(0.001f, input);
-        for (int tab = 0; tab < 2; ++tab) {
+        const uint32_t secondGarrisonWorkerId =
+            selectedWorkerId == 6 ? 7 : 6;
+        if (workerGarrisoned &&
+            game.selectObjectForTesting(
+                secondGarrisonWorkerId)) {
             input = {};
-            input.actionTabRight = true;
+            input.pointerX = screenW - 280.0f;
+            input.pointerY =
+                screenH - 82.0f;
+            input.selectPressed = true;
             game.update(0.001f, input);
+            input = {};
+            input.pointerX = centerX;
+            input.pointerY = centerY;
+            input.selectPressed = true;
+            game.update(0.001f, input);
+            for (int frame = 0;
+                 frame < 900 &&
+                 game.garrisonedCount(
+                     commandCenterId) < 2;
+                 ++frame)
+                game.update(
+                    1.0f / 30.0f, {});
+            game.selectObjectForTesting(
+                commandCenterId);
+            input = {};
+            input.pointerX = 477.0f;
+            input.pointerY =
+                screenH -
+                112.0f +
+                29.0f;
+            input.selectPressed = true;
+            game.update(0.001f, input);
+            individualGarrisonEjected =
+                game.garrisonedCount(
+                    commandCenterId) == 1;
         }
-        input = {};
-        input.pointerX = 214.0f;
-        input.pointerY = 190.0f;
-        input.selectPressed = true;
-        game.update(0.001f, input);
+        if (individualGarrisonEjected) {
+            game.ejectGarrisonedUnitForTesting(
+                commandCenterId,
+                selectedWorkerId);
+            game.ejectGarrisonedUnitForTesting(
+                commandCenterId,
+                secondGarrisonWorkerId);
+        }
         workerEjected =
             game.garrisonedCount(commandCenterId) == 0;
         if (workerEjected &&
@@ -1602,7 +1646,13 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
                 selectedWorkerId, screenW, screenH,
                 workerX, workerY)) {
             const uint32_t menuWorkerId =
-                selectedWorkerId == 6 ? 7 : 6;
+                game.spawnObjectForTesting(
+                    3, 83, 1,
+                    game.objectPosition(
+                        selectedWorkerId)[0] +
+                        1.0f,
+                    game.objectPosition(
+                        selectedWorkerId)[1]);
             game.selectObjectsForTesting(
                 {selectedWorkerId, menuWorkerId});
             input = {};
@@ -2039,6 +2089,11 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
                  troopCenterId).empty();
 
     Game systems(assets);
+    std::vector<int> systemsSounds;
+    systems.setUnitSoundPlayer(
+        [&](int soundId, int) {
+            systemsSounds.push_back(soundId);
+        });
     if (!systems.init(0x51E1D, mapSize, &err)) {
         fprintf(stderr, "error: %s\n", err.c_str());
         return 1;
@@ -2200,6 +2255,108 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         multipleGatherersAssigned &&
         systems.resource(1, 0) >
             foodBeforeGathering;
+    const uint32_t manualWorkerId =
+        systems.spawnObjectForTesting(
+            3, 83, 1,
+            testBaseX + 1.0f,
+            testBaseY + 1.0f);
+    const uint32_t manualFoodId =
+        systems.spawnObjectForTesting(
+            0, 59, 0,
+            testBaseX + 1.8f,
+            testBaseY + 1.0f);
+    bool manualDropOffWorked = false;
+    if (manualWorkerId && manualFoodId &&
+        systems.issueGatherForTesting(
+            manualWorkerId, manualFoodId)) {
+        for (int frame = 0;
+             frame < 600 &&
+             systems.objectCarriedAmount(
+                 manualWorkerId) < 2.0f;
+             frame++)
+            systems.update(1.0f / 30.0f, {});
+        const float foodBeforeDrop =
+            systems.resource(1, 0);
+        const bool orderAccepted =
+            systems.issueDropOffForTesting(
+                manualWorkerId, commandCenterId);
+        for (int frame = 0;
+             frame < 900 &&
+             systems.objectCarriedAmount(
+                 manualWorkerId) > 0.001f;
+             frame++)
+            systems.update(1.0f / 30.0f, {});
+        manualDropOffWorked =
+            orderAccepted &&
+            systems.objectCarriedAmount(
+                manualWorkerId) <= 0.001f &&
+            systems.resource(1, 0) >
+                foodBeforeDrop;
+    }
+
+    const uint32_t mobilePowerId =
+        systems.spawnObjectForTesting(
+            3, 1009, 1, 34.0f, 20.0f);
+    const uint32_t mobilePoweredBuildingId =
+        systems.spawnObjectForTesting(
+            3, 335, 1, 38.0f, 20.0f);
+    const bool mobilePowerWorked =
+        mobilePowerId &&
+        mobilePoweredBuildingId &&
+        systems.objectPoweredForTesting(
+            mobilePoweredBuildingId);
+    if (mobilePowerId)
+        systems.moveObjectForTesting(
+            mobilePowerId, 15.0f, 15.0f);
+    const bool mobilePowerRemoved =
+        mobilePoweredBuildingId &&
+        !systems.objectPoweredForTesting(
+            mobilePoweredBuildingId);
+
+    const uint32_t destroyFirstId =
+        systems.spawnObjectForTesting(
+            3, 83, 1, 46.0f, 20.0f);
+    const uint32_t destroyLastId =
+        systems.spawnObjectForTesting(
+            3, 83, 1, 47.0f, 20.0f);
+    const bool destroyReverseOrder =
+        destroyFirstId && destroyLastId &&
+        systems.selectObjectsForTesting(
+            {destroyFirstId, destroyLastId}) &&
+        systems.destroyLastSelectedForTesting() &&
+        systems.objectActive(destroyFirstId) &&
+        !systems.objectActive(destroyLastId) &&
+        systems.destroyLastSelectedForTesting() &&
+        !systems.objectActive(destroyFirstId);
+    bool stanceMenuWorked = false;
+    if (systems.selectObjectForTesting(
+            manualWorkerId)) {
+        InputState stanceInput;
+        stanceInput.screenW = screenW;
+        stanceInput.screenH = screenH;
+        stanceInput.pointerX = 851.0f;
+        stanceInput.pointerY = 473.0f;
+        stanceInput.selectPressed = true;
+        systems.update(0.001f, stanceInput);
+        const bool opened =
+            systems.actionMenuOpenForTesting();
+        if (opened)
+            systems.render(
+                renderer, screenW, screenH);
+        stanceInput = {};
+        stanceInput.screenW = screenW;
+        stanceInput.screenH = screenH;
+        stanceInput.menuDown = true;
+        systems.update(0.001f, stanceInput);
+        stanceInput = {};
+        stanceInput.screenW = screenW;
+        stanceInput.screenH = screenH;
+        stanceInput.menuActivate = true;
+        systems.update(0.001f, stanceInput);
+        stanceMenuWorked =
+            opened &&
+            !systems.actionMenuOpenForTesting();
+    }
 
     const uint32_t automaticWorkerId =
         systems.spawnObjectForTesting(
@@ -2363,14 +2520,22 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
             3, 64, 1, 50.0f, 10.0f);
     systems.moveObjectForTesting(
         7, 49.0f, 10.0f);
+    systems.lookAt(50.0f, 10.0f);
+    systemsSounds.clear();
     const bool gateLocked =
         systems.setGateLockedForTesting(
             gateTestId, true);
+    const bool gateSoundPlayed =
+        std::find(
+            systemsSounds.begin(),
+            systemsSounds.end(),
+            541) != systemsSounds.end();
     const bool gatePositionPassable =
         systems.positionPassableForTesting(
             7, 50.0f, 10.0f);
     const bool lockedGateBlocks =
-        gateLocked && !gatePositionPassable;
+        gateLocked && !gatePositionPassable &&
+        gateSoundPlayed;
 
     systems.selectObjectForTesting(2);
     InputState emptyMenuInput;
@@ -2453,8 +2618,8 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            "building destroyed/remains/decayed %d/%d/%d, edge scroll %d, "
            "attack audio %d, offscreen muted %d, approach retries %zu, "
            "automatic/retaliation/armed %zu/%zu/%zu, tech damage %d -> %d, "
-           "worker builds/pages/farm %d/%d/%d, research queued/cost/cancelled/completed/upgrade/menus/locked/rejected %d/%d/%d/%d/%d/%d/%d/%d, "
-           "garrison mode/entered/ejected %d/%d/%d, "
+           "worker builds/pages/farm %d/%d/%d, research queued/cost/cancelled/completed/upgrade/menus/hidden/chain %d/%d/%d/%d/%d/%d/%d/%d, "
+           "garrison mode/entered/individual/all %d/%d/%d/%d, "
            "foundation placed/reassigned/multi/builder/completed/multi-menu %d/%d/%d/%d/%d/%d, "
            "shields building/mobile/overflow/leave/full/drain %d/%d/%d/%d/%d/%d, "
            "gather/multi/auto-gather/auto-build/repair/ally-mech/livestock/gate/empty-menu %d/%d/%d/%d/%d/%d/%d/%d/%d, "
@@ -2484,10 +2649,11 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            researchCompleted ? 1 : 0,
            buildingUpgraded ? 1 : 0,
            upgradedProductionMenusWork ? 1 : 0,
-           lockedResearchListed ? 1 : 0,
-           lockedResearchRejected ? 1 : 0,
+           lockedResearchHidden ? 1 : 0,
+           researchChainAdvanced ? 1 : 0,
            garrisonModeActivated ? 1 : 0,
            workerGarrisoned ? 1 : 0,
+           individualGarrisonEjected ? 1 : 0,
            workerEjected ? 1 : 0,
            foundationPlaced ? 1 : 0,
            constructionAssignmentCleared &&
@@ -2525,6 +2691,14 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            gateLocked ? 1 : 0,
            gatePositionPassable ? 1 : 0,
            buildingElapsed, destructionElapsed);
+    printf(
+        "compatibility: manual drop-off %d, mobile power on/off %d/%d, "
+        "reverse destroy %d, stance menu %d\n",
+        manualDropOffWorked ? 1 : 0,
+        mobilePowerWorked ? 1 : 0,
+        mobilePowerRemoved ? 1 : 0,
+        destroyReverseOrder ? 1 : 0,
+        stanceMenuWorked ? 1 : 0);
     const bool heardBlaster =
         std::find(acknowledgementSounds.begin(), acknowledgementSounds.end(), 71) !=
         acknowledgementSounds.end();
@@ -2550,11 +2724,12 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         !farmAvailable ||
         !researchQueued || !researchCostDeducted ||
         !researchCancelled || !researchCompleted ||
-        !lockedResearchListed ||
-        !lockedResearchRejected ||
+        !lockedResearchHidden ||
+        !researchChainAdvanced ||
         !buildingUpgraded ||
         !upgradedProductionMenusWork ||
         !garrisonModeActivated || !workerGarrisoned ||
+        !individualGarrisonEjected ||
         !workerEjected ||
         !foundationPlaced ||
         !constructionAssignmentCleared ||
@@ -2572,6 +2747,11 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         !unpoweredShieldDrained ||
         !workerGatheredAndDeposited ||
         !multipleGatherersAssigned ||
+        !manualDropOffWorked ||
+        !mobilePowerWorked ||
+        !mobilePowerRemoved ||
+        !destroyReverseOrder ||
+        !stanceMenuWorked ||
         !automaticGatheringAssigned ||
         !automaticConstructionChained ||
         !workerRepairedBuilding ||

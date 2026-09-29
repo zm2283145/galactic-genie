@@ -173,6 +173,12 @@ public:
         uint32_t workerId, uint32_t targetId);
     bool issueGatherForTesting(
         uint32_t workerId, uint32_t targetId);
+    bool issueDropOffForTesting(
+        uint32_t workerId, uint32_t buildingId);
+    bool objectPoweredForTesting(uint32_t spawnId) const;
+    bool destroyLastSelectedForTesting();
+    bool ejectGarrisonedUnitForTesting(
+        uint32_t buildingId, uint32_t unitId);
     void setResourceForTesting(
         int player, int resourceType,
         float amount);
@@ -254,6 +260,7 @@ private:
         Units,
         Research,
         Commands,
+        Stances,
         Economy,
         Military,
         Defense,
@@ -322,6 +329,7 @@ private:
         bool locked = false;
         bool gate = false;
         bool underConstruction = false;
+        bool manualDropOff = false;
         bool selected = false;
         bool triggerAddressable = true;
         float flashTime = 0;
@@ -487,6 +495,7 @@ private:
     int civilizationGraphic(int graphicId, int player) const;
     bool isWorker(const Object &object) const;
     bool isPowerCore(const Object &object) const;
+    bool isPowerSource(const Object &object) const;
     bool isShieldGenerator(const Object &object) const;
     bool graphicHasPowerIndicator(
         int graphicId, int depth = 0) const;
@@ -508,6 +517,8 @@ private:
         const dat::Unit &gatherer) const;
     bool issueGatherCommand(
         Object &worker, Object &resource);
+    bool issueDropOffCommand(
+        Object &worker, Object &building);
     Object *nearestDropSite(
         const Object &worker,
         const dat::Unit &gatherer);
@@ -534,7 +545,11 @@ private:
                            bool includeIncoming) const;
     bool issueGarrisonCommand(Object &building);
     void updateGarrisoning();
+    bool ejectGarrisonedUnit(
+        Object &building, Object &unit,
+        size_t placementOffset = 0);
     size_t ejectGarrisoned(Object &building);
+    bool destroyLastSelected();
     void setGateLocked(Object &gate, bool locked);
     bool beginBuildingPlacement(Object &worker,
                                const dat::Unit &building);
@@ -545,6 +560,7 @@ private:
     void updateConstruction(float dt);
     void commandAtScreen(float screenX, float screenY, int screenW, int screenH);
     void cycleSelectedAttackMode();
+    void setSelectedAttackMode(AttackMode mode);
     void issueAttack(Object &source, Object &target, float approachAngle,
                      bool automatic = false,
                      float approachDistance = 0);
@@ -558,7 +574,7 @@ private:
     void updateProjectiles(float dt);
     void updateRemains(float dt);
     void damageObject(Object &object, int damage, uint32_t attackerId);
-    void killObject(Object &object);
+    void killObject(Object &object, bool countKill = true);
     void objectScreenPosition(const Object &object, int screenW, int screenH,
                               float &screenX, float &screenY) const;
     void screenToWorld(float screenX, float screenY, int screenW, int screenH,
