@@ -691,6 +691,14 @@ void Game::render(Renderer &r, int screenW, int screenH) {
 
     g_draws.clear();
     for (const Object &o : objects_) {
+        if (zoom_ < 0.6f &&
+            (o.unit->type == dat::UT_Trees || o.unit->type == dat::UT_AoeTrees)) {
+            const uint32_t x = (uint32_t)std::lround(o.x * 2.0f);
+            const uint32_t y = (uint32_t)std::lround(o.y * 2.0f);
+            const uint32_t hash = x * 73856093u ^ y * 19349663u;
+            const uint32_t mask = zoom_ < 0.45f ? 3u : 1u;
+            if (hash & mask) continue;
+        }
         float sx, sy;
         toScreen(o.x, o.y, sx, sy);
         sy -= elevationAt(o.x, o.y) * assets_.dat().terrainBlock.elevHeight;
@@ -700,7 +708,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         int gid = o.unit->standingGraphic[0];
         if (o.state == State::Walk && o.unit->walkingGraphic >= 0) gid = o.unit->walkingGraphic;
         drawGraphic(r, gid, sx, sy, o.facing, o.animTime, o.player, o.initialFrame, 0,
-                    o.drawShadows, viewW, viewH);
+                    o.drawShadows && zoom_ >= 0.6f, viewW, viewH);
     }
     r.beginFrame(screenW, screenH, zoom_, 0, 0, 0);
 

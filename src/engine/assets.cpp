@@ -64,44 +64,62 @@ void Assets::ensureTerrainCacheSpace(size_t additionalBytes) {
         textureBytes_ <= terrainTextureBudget_ - additionalBytes)
         return;
 
-    for (auto it = sheets_.begin(); it != sheets_.end();) {
-        auto used = sheetUse_.find(it->first);
-        if (used != sheetUse_.end() && used->second == terrainGeneration_) {
-            ++it;
-            continue;
-        }
-        destroySheet(it->second);
-        if (used != sheetUse_.end()) sheetUse_.erase(used);
-        it = sheets_.erase(it);
-        if (additionalBytes <= terrainTextureBudget_ &&
-            textureBytes_ <= terrainTextureBudget_ - additionalBytes)
-            return;
+    enum class CacheKind { SlopeBlend, SlopeFrame, Sheet };
+    struct Candidate {
+        CacheKind kind;
+        uint64_t lastUse;
+        uint64_t sheetKey = 0;
+        SlopeFrameKey slopeKey{};
+        uint32_t blendKey = 0;
+    };
+    std::vector<Candidate> candidates;
+    candidates.reserve(slopeBlendMasks_.size() + slopeFrames_.size() + sheets_.size());
+    for (const auto &entry : slopeBlendMasks_) {
+        if (!entry.second || !entry.second->bytes) continue;
+        auto used = slopeBlendMaskUse_.find(entry.first);
+        const uint64_t generation = used == slopeBlendMaskUse_.end() ? 0 : used->second;
+        if (generation != terrainGeneration_)
+            candidates.push_back({CacheKind::SlopeBlend, generation, 0, {}, entry.first});
     }
-    for (auto it = slopeFrames_.begin(); it != slopeFrames_.end();) {
-        auto used = slopeFrameUse_.find(it->first);
-        if (used != slopeFrameUse_.end() && used->second == terrainGeneration_) {
-            ++it;
-            continue;
-        }
-        destroySheet(it->second);
-        if (used != slopeFrameUse_.end()) slopeFrameUse_.erase(used);
-        it = slopeFrames_.erase(it);
-        if (additionalBytes <= terrainTextureBudget_ &&
-            textureBytes_ <= terrainTextureBudget_ - additionalBytes)
-            return;
+    for (const auto &entry : slopeFrames_) {
+        if (!entry.second || !entry.second->bytes) continue;
+        auto used = slopeFrameUse_.find(entry.first);
+        const uint64_t generation = used == slopeFrameUse_.end() ? 0 : used->second;
+        if (generation != terrainGeneration_)
+            candidates.push_back({CacheKind::SlopeFrame, generation, 0, entry.first, 0});
     }
-    for (auto it = slopeBlendMasks_.begin(); it != slopeBlendMasks_.end();) {
-        auto used = slopeBlendMaskUse_.find(it->first);
-        if (used != slopeBlendMaskUse_.end() && used->second == terrainGeneration_) {
-            ++it;
-            continue;
-        }
-        destroySheet(it->second);
-        if (used != slopeBlendMaskUse_.end()) slopeBlendMaskUse_.erase(used);
-        it = slopeBlendMasks_.erase(it);
+    for (const auto &entry : sheets_) {
+        if (!entry.second || !entry.second->bytes) continue;
+        auto used = sheetUse_.find(entry.first);
+        const uint64_t generation = used == sheetUse_.end() ? 0 : used->second;
+        if (generation != terrainGeneration_)
+            candidates.push_back({CacheKind::Sheet, generation, entry.first, {}, 0});
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate &a, const Candidate &b) {
+        if (a.lastUse != b.lastUse) return a.lastUse < b.lastUse;
+        return a.kind < b.kind;
+    });
+
+    for (const Candidate &candidate : candidates) {
         if (additionalBytes <= terrainTextureBudget_ &&
             textureBytes_ <= terrainTextureBudget_ - additionalBytes)
             return;
+        if (candidate.kind == CacheKind::SlopeBlend) {
+            auto it = slopeBlendMasks_.find(candidate.blendKey);
+            destroySheet(it->second);
+            slopeBlendMasks_.erase(it);
+            slopeBlendMaskUse_.erase(candidate.blendKey);
+        } else if (candidate.kind == CacheKind::SlopeFrame) {
+            auto it = slopeFrames_.find(candidate.slopeKey);
+            destroySheet(it->second);
+            slopeFrames_.erase(it);
+            slopeFrameUse_.erase(candidate.slopeKey);
+        } else {
+            auto it = sheets_.find(candidate.sheetKey);
+            destroySheet(it->second);
+            sheets_.erase(it);
+            sheetUse_.erase(candidate.sheetKey);
+        }
     }
 }
 
