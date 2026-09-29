@@ -141,7 +141,9 @@ int main() {
         SceTouchData touch{};
         bool touching = false;
         bool touchMoved = false, touchBox = false;
+        bool stickBoxArmed = false, stickBoxMoved = false;
         float touchStartX = 0, touchStartY = 0, lastTx = 0, lastTy = 0;
+        float stickBoxStartX = 0, stickBoxStartY = 0;
         float cursorX = kScreenW * 0.5f, cursorY = kScreenH * 0.5f;
         uint64_t last = sceKernelGetProcessTimeWide();
         uint64_t statT = last;
@@ -155,6 +157,7 @@ int main() {
 
             sceCtrlPeekBufferPositive(0, &pad, 1);
             uint32_t pressed = pad.buttons & ~prev.buttons;
+            uint32_t released = prev.buttons & ~pad.buttons;
             prev = pad;
             if (pad.buttons & SCE_CTRL_START) break;
 
@@ -171,10 +174,38 @@ int main() {
             if (pressed & SCE_CTRL_LTRIGGER) in.zoomStep = -1;
             if (pressed & SCE_CTRL_SELECT) in.toggleDebug = true;
 
-            cursorX += axis(pad.rx) * 520.0f * dt;
-            cursorY += axis(pad.ry) * 520.0f * dt;
+            if (pressed & SCE_CTRL_SQUARE) {
+                stickBoxArmed = true;
+                stickBoxMoved = false;
+                stickBoxStartX = cursorX;
+                stickBoxStartY = cursorY;
+            }
+            const float cursorMoveX = axis(pad.rx) * 520.0f * dt;
+            const float cursorMoveY = axis(pad.ry) * 520.0f * dt;
+            cursorX += cursorMoveX;
+            cursorY += cursorMoveY;
             cursorX = std::max(0.0f, std::min((float)kScreenW, cursorX));
             cursorY = std::max(0.0f, std::min((float)kScreenH, cursorY));
+            if (stickBoxArmed) {
+                const float dx = cursorX - stickBoxStartX, dy = cursorY - stickBoxStartY;
+                if (dx * dx + dy * dy > 16.0f) stickBoxMoved = true;
+                if (pad.buttons & SCE_CTRL_SQUARE) {
+                    in.boxSelectActive = stickBoxMoved;
+                    in.boxStartX = stickBoxStartX;
+                    in.boxStartY = stickBoxStartY;
+                    in.boxEndX = cursorX;
+                    in.boxEndY = cursorY;
+                }
+                if (released & SCE_CTRL_SQUARE) {
+                    in.boxSelectCommit = stickBoxMoved;
+                    in.boxStartX = stickBoxStartX;
+                    in.boxStartY = stickBoxStartY;
+                    in.boxEndX = cursorX;
+                    in.boxEndY = cursorY;
+                    stickBoxArmed = false;
+                    stickBoxMoved = false;
+                }
+            }
             in.pointerX = cursorX;
             in.pointerY = cursorY;
             in.cursorVisible = true;
@@ -189,6 +220,10 @@ int main() {
                     touchStartY = lastTy = ty;
                     touchMoved = false;
                     touchBox = (pad.buttons & SCE_CTRL_SQUARE) != 0;
+                    if (touchBox) {
+                        stickBoxArmed = false;
+                        stickBoxMoved = false;
+                    }
                 } else {
                     const float totalX = tx - touchStartX, totalY = ty - touchStartY;
                     if (totalX * totalX + totalY * totalY > 100.0f) touchMoved = true;

@@ -18,7 +18,7 @@ It is written clean-room style: file formats come from public documentation (ope
 | CPX/SCX terrain, elevation, player state, triggers, saved camera, and initial object loading (“Breaking Bread”) | done |
 | Initial trigger runtime: timers, object/area/resource conditions, ordered effects, voiced dialogue, and collision-aware scripted movement | in progress |
 | Units: idle/walk animation, 8-way facing with mirroring, graphic deltas for buildings | done |
-| Vita: renderer, camera controls, unit selection, formation movement commands, and debug minimap | done |
+| Vita: renderer, camera controls, original-style unit selection/status markers, formation movement commands, and debug minimap | done |
 | PC `swgbtool`: data inspection, CPX/SCX listing, and procedural/scenario PNG rendering | done |
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for what comes next.
@@ -62,8 +62,10 @@ cmake -B build-pc && cmake --build build-pc
 
 Controls: left stick, d-pad, or a touch drag scrolls; L/R zoom. The right stick moves the
 command cursor, X selects a friendly unit, and O orders selected units to move. A touch tap
-selects a friendly unit or issues a move order on empty ground. Hold Square while touch-dragging
-to box-select units. SELECT toggles the minimap overlay and START quits.
+selects a friendly unit or issues a move order on empty ground. Double-tap a unit or press X
+twice to select every matching friendly unit in the viewport. Hold Square and move the right
+stick, or hold Square while touch-dragging, to box-select units. SELECT toggles the minimap
+overlay and START quits.
 
 ## License
 

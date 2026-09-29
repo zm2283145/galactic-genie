@@ -218,6 +218,9 @@ private:
     float cursorX_ = 0, cursorY_ = 0;
     float boxStartX_ = 0, boxStartY_ = 0, boxEndX_ = 0, boxEndY_ = 0;
     float commandMarkerX_ = 0, commandMarkerY_ = 0, commandMarkerTime_ = 0;
+    float selectionClickAge_ = 1000.0f;
+    float lastSelectionX_ = 0, lastSelectionY_ = 0;
+    int lastSelectionUnitId_ = -1;
     bool cursorVisible_ = false;
     bool boxSelectActive_ = false;
     bool debug_ = false;

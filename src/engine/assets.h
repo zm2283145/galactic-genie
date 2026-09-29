@@ -54,6 +54,7 @@ public:
     const SpriteFrame *terrainSlopeFrame(int32_t slpId, int slope, size_t frame,
                                          const std::array<int8_t, 8> &neighbors);
     const SpriteFrame *blendMask(int mode, int mask, int slope = 0);
+    Texture *selectionRing();
     bool hasBlendMasks() const { return blendMaskTexture_ != nullptr; }
     bool hasElevationMaps() const { return elevationMaps_ != nullptr; }
     // Starts a terrain preparation pass. Generated slope textures not touched
@@ -97,6 +98,8 @@ private:
     std::map<uint32_t, uint64_t> slopeBlendMaskUse_;
     std::map<int32_t, std::unique_ptr<Slp>> terrainSlps_;
     Texture *blendMaskTexture_ = nullptr;
+    Texture *selectionRingTexture_ = nullptr;
+    bool selectionRingAttempted_ = false;
     std::vector<std::vector<SpriteFrame>> blendMasks_;
     size_t textureBytes_ = 0;
     size_t terrainTextureBudget_ = SIZE_MAX;

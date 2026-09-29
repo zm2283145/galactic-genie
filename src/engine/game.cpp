@@ -150,6 +150,8 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     cursorVisible_ = false;
     boxSelectActive_ = false;
     commandMarkerTime_ = 0;
+    selectionClickAge_ = 1000.0f;
+    lastSelectionUnitId_ = -1;
     nextSpawnId_ = 1;
     victoryState_ = -1;
     warnedEffects_.clear();
@@ -221,6 +223,8 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     cursorVisible_ = false;
     boxSelectActive_ = false;
     commandMarkerTime_ = 0;
+    selectionClickAge_ = 1000.0f;
+    lastSelectionUnitId_ = -1;
     nextSpawnId_ = scenario.nextUnitId;
     victoryState_ = -1;
     warnedEffects_.clear();
@@ -909,14 +913,36 @@ Game::Object *Game::objectAtScreen(float screenX, float screenY, int screenW, in
 
 void Game::selectAtScreen(float screenX, float screenY, int screenW, int screenH) {
     Object *object = objectAtScreen(screenX, screenY, screenW, screenH);
+    const float clickDx = screenX - lastSelectionX_;
+    const float clickDy = screenY - lastSelectionY_;
+    const bool doubleClick =
+        object && object->unit->id == lastSelectionUnitId_ && selectionClickAge_ <= 0.38f &&
+        clickDx * clickDx + clickDy * clickDy <= 1600.0f;
     clearSelection();
-    if (object) object->selected = true;
+    if (doubleClick) {
+        for (Object &candidate : objects_) {
+            if (!isSelectable(candidate) || candidate.unit->id != object->unit->id) continue;
+            float candidateX, candidateY;
+            objectScreenPosition(candidate, screenW, screenH, candidateX, candidateY);
+            if (candidateX >= 0 && candidateY >= 0 &&
+                candidateX < screenW && candidateY < screenH)
+                candidate.selected = true;
+        }
+    } else if (object) {
+        object->selected = true;
+    }
+    lastSelectionUnitId_ = object ? object->unit->id : -1;
+    lastSelectionX_ = screenX;
+    lastSelectionY_ = screenY;
+    selectionClickAge_ = 0;
 }
 
 void Game::selectBox(float startX, float startY, float endX, float endY,
                      int screenW, int screenH) {
     const float minX = std::min(startX, endX), maxX = std::max(startX, endX);
     const float minY = std::min(startY, endY), maxY = std::max(startY, endY);
+    selectionClickAge_ = 1000.0f;
+    lastSelectionUnitId_ = -1;
     clearSelection();
     for (Object &object : objects_) {
         if (!isSelectable(object)) continue;
@@ -1585,6 +1611,7 @@ void Game::update(float dt, const InputState &in) {
 
     updateTriggers(dt);
     commandMarkerTime_ = std::max(0.0f, commandMarkerTime_ - dt);
+    selectionClickAge_ += dt;
     for (Object &object : objects_)
         if (object.selected && !isSelectable(object)) object.selected = false;
 
@@ -1792,6 +1819,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     const float ox = camX_ - viewW / 2, oy = camY_ - viewH / 2; // world-pixel of screen top-left
     const bool overview = zoom_ < 0.6f;
     const bool reducedTerrainLighting = overview;
+    Texture *selectionRing = assets_.selectionRing();
     // At overview zoom the blend overlays are sub-pixel detail but account for
     // hundreds of extra masked draws and slope-mask cache entries on Vita.
     const bool drawTerrainBlends = !overview && assets_.hasBlendMasks();
@@ -2025,21 +2053,36 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         r.fillRect(sx + pulse, sy - pulse, 2 / zoom_, pulse * 2, 255, 255, 0, 220);
     }
 
+    if (selectionRing)
+        for (const Object &object : objects_) {
+            if (!object.active || object.hidden || !object.draw || !object.selected) continue;
+            float screenX, screenY;
+            objectScreenPosition(object, screenW, screenH, screenX, screenY);
+            const float sx = screenX / zoom_, sy = screenY / zoom_;
+            const float radiusX = std::max(14.0f, object.unit->outlineSize[0] * 96.0f);
+            const float radiusY = std::max(6.0f, object.unit->outlineSize[1] * 48.0f);
+            const float halfW = radiusX * 64.0f / 59.0f;
+            const float halfH = radiusY * 32.0f / 26.0f;
+            r.draw(selectionRing,
+                   {sx - halfW, sy - halfH, halfW * 2.0f, halfH * 2.0f,
+                    0, 0, 128, 64});
+        }
+
     for (const Object &object : objects_) {
         if (!object.active || object.hidden || !object.draw || !object.selected) continue;
         float screenX, screenY;
         objectScreenPosition(object, screenW, screenH, screenX, screenY);
         const float sx = screenX / zoom_, sy = screenY / zoom_;
-        const float radius = std::max(15.0f, collisionRadius(object) * 48.0f) / zoom_;
-        const float line = 2.0f / zoom_, corner = 8.0f / zoom_;
-        r.fillRect(sx - radius, sy - radius, corner, line, 70, 255, 90, 255);
-        r.fillRect(sx - radius, sy - radius, line, corner, 70, 255, 90, 255);
-        r.fillRect(sx + radius - corner, sy - radius, corner, line, 70, 255, 90, 255);
-        r.fillRect(sx + radius - line, sy - radius, line, corner, 70, 255, 90, 255);
-        r.fillRect(sx - radius, sy + radius - line, corner, line, 70, 255, 90, 255);
-        r.fillRect(sx - radius, sy + radius - corner, line, corner, 70, 255, 90, 255);
-        r.fillRect(sx + radius - corner, sy + radius - line, corner, line, 70, 255, 90, 255);
-        r.fillRect(sx + radius - line, sy + radius - corner, line, corner, 70, 255, 90, 255);
+        const float radiusX = std::max(14.0f, object.unit->outlineSize[0] * 96.0f);
+        const float barWidth = std::min(42.0f, std::max(26.0f, radiusX)) / zoom_;
+        const float barHeight = 3.0f / zoom_;
+        const float barY = sy -
+            (std::max(1.0f, object.unit->outlineSize[2]) * 24.0f + 8.0f);
+        r.fillRect(sx - barWidth * 0.5f - 1.0f / zoom_, barY - 1.0f / zoom_,
+                   barWidth + 2.0f / zoom_, barHeight + 2.0f / zoom_,
+                   0, 0, 0, 230);
+        r.fillRect(sx - barWidth * 0.5f, barY, barWidth, barHeight,
+                   20, 220, 55, 255);
     }
 
     if (commandMarkerTime_ > 0) {
@@ -2074,16 +2117,19 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     }
 
     if (!currentInstruction_.empty()) {
-        const std::vector<std::string> lines = wrapText(currentInstruction_, 72);
+        const float boxWidthPixels = std::min(720.0f, screenW - 32.0f);
+        const int textColumns = std::max(20, (int)((boxWidthPixels - 24.0f) / 12.0f));
+        const std::vector<std::string> lines = wrapText(currentInstruction_, textColumns);
         const float invZoom = 1.0f / zoom_;
         const float boxHeightPixels = 24.0f + lines.size() * 18.0f;
-        const float boxX = 20.0f * invZoom;
-        const float boxY = (screenH - boxHeightPixels - 16.0f) * invZoom;
-        r.fillRect(boxX, boxY, (screenW - 40.0f) * invZoom, boxHeightPixels * invZoom,
+        const float boxX = 16.0f * invZoom;
+        const float boxY = 16.0f * invZoom;
+        r.fillRect(boxX, boxY, boxWidthPixels * invZoom, boxHeightPixels * invZoom,
                    5, 8, 16, 220);
-        r.fillRect(boxX, boxY, (screenW - 40.0f) * invZoom, 2.0f * invZoom,
+        r.fillRect(boxX, boxY, boxWidthPixels * invZoom, 2.0f * invZoom,
                    210, 210, 190, 255);
-        drawBitmapText(r, lines, 32.0f * invZoom, boxY + 12.0f * invZoom, 2.0f * invZoom);
+        drawBitmapText(r, lines, 28.0f * invZoom, boxY + 12.0f * invZoom,
+                       2.0f * invZoom);
     }
 
     if (boxSelectActive_) {

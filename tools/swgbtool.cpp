@@ -129,7 +129,8 @@ static int cmdUnit(const char *dataDir, int id) {
             printf("civ %zu %-24s unit '%s', type %u, class %d, hidden %u, hero %u, graphic %d, slp %d, frames %d, angles %d, "
                    "duration %.3f, sequence 0x%02x, mirror %u, deltas %zu, special graphic %d, "
                    "special ability %u, adjacent mode %u, graphics angle %d, speed %.2f, "
-                   "restriction %d, fly %u, obstruction %u/%u, collision %.2f,%.2f\n", civ,
+                   "restriction %d, fly %u, obstruction %u/%u, collision %.2f,%.2f, "
+                   "outline %.2f,%.2f,%.2f\n", civ,
                    assets.dat().civs[civ].name.c_str(), unit.name.c_str(), unit.type, unit.cls,
                    unit.hideInEditor, unit.heroMode, graphicId,
                    graphic ? graphic->slp : -1, graphic ? graphic->frameCount : 0,
@@ -138,7 +139,8 @@ static int cmdUnit(const char *dataDir, int id) {
                    graphic ? graphic->deltas.size() : 0, unit.specialGraphic, unit.specialAbility,
                    unit.adjacentMode, unit.graphicsAngle, unit.speed, unit.terrainRestriction,
                    unit.flyMode, unit.obstructionType, unit.obstructionClass,
-                   unit.collisionSize[0], unit.collisionSize[1]);
+                   unit.collisionSize[0], unit.collisionSize[1],
+                   unit.outlineSize[0], unit.outlineSize[1], unit.outlineSize[2]);
             if (graphic)
                 for (const auto &delta : graphic->deltas)
                     if (const auto *child = assets.dat().graphic(delta.graphicId))
@@ -612,6 +614,18 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     const size_t singleSelected = game.selectedObjectCount();
 
     input = {};
+    input.pointerX = 340;
+    input.pointerY = 195;
+    input.selectPressed = true;
+    game.update(0.1f, input);
+    input = {};
+    input.pointerX = 340;
+    input.pointerY = 195;
+    input.selectPressed = true;
+    game.update(0.1f, input);
+    const size_t doubleSelected = game.selectedObjectCount();
+
+    input = {};
     input.boxSelectCommit = true;
     input.boxStartX = 0;
     input.boxStartY = 0;
@@ -637,11 +651,13 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
         }
     }
     const MovementStats movement = game.movementStats();
-    printf("controls: single %zu, box %zu, commanded %zu, overlaps %zu, terrain violations %zu\n",
-           singleSelected, boxSelected, commanded, movement.overlappingPairs,
-           movement.terrainViolations);
-    if (singleSelected != 1 || boxSelected < singleSelected || commanded == 0 ||
-        movement.overlappingPairs != 0 || movement.terrainViolations != 0) {
+    printf("controls: single %zu, double %zu, box %zu, commanded %zu, overlaps %zu, "
+           "terrain violations %zu\n",
+           singleSelected, doubleSelected, boxSelected, commanded,
+           movement.overlappingPairs, movement.terrainViolations);
+    if (singleSelected != 1 || doubleSelected <= 1 || boxSelected < doubleSelected ||
+        commanded == 0 || movement.overlappingPairs != 0 ||
+        movement.terrainViolations != 0) {
         fprintf(stderr, "error: control validation failed\n");
         return 1;
     }

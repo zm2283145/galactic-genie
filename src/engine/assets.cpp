@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -39,6 +40,28 @@ Assets::~Assets() {
         if (kv.second)
             for (Texture *t : kv.second->pages) renderer_->destroyTexture(t);
     renderer_->destroyTexture(blendMaskTexture_);
+    renderer_->destroyTexture(selectionRingTexture_);
+}
+
+Texture *Assets::selectionRing() {
+    if (selectionRingAttempted_) return selectionRingTexture_;
+    selectionRingAttempted_ = true;
+    constexpr int width = 128, height = 64;
+    std::vector<uint8_t> pixels((size_t)width * height * 4, 0);
+    for (int y = 0; y < height; y++)
+        for (int x = 0; x < width; x++) {
+            const float nx = (x - 63.5f) / 59.0f;
+            const float ny = (y - 31.5f) / 26.0f;
+            const float edge = std::abs(std::sqrt(nx * nx + ny * ny) - 1.0f);
+            uint8_t *pixel = &pixels[((size_t)y * width + x) * 4];
+            if (edge <= 0.075f) {
+                pixel[3] = 255;
+                if (edge <= 0.035f) pixel[0] = pixel[1] = pixel[2] = 235;
+            }
+        }
+    selectionRingTexture_ = renderer_->createTexture(width, height, pixels.data());
+    if (selectionRingTexture_) textureBytes_ += pixels.size();
+    return selectionRingTexture_;
 }
 
 void Assets::destroySheet(std::unique_ptr<SpriteSheet> &sheet) {
