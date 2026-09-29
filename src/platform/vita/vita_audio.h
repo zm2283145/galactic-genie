@@ -19,7 +19,7 @@ public:
     ~VitaAudio();
 
     bool start(std::string *err = nullptr);
-    bool play(const std::string &name);
+    float play(const std::string &name);
     void setLogger(std::function<void(const std::string &)> logger) { log_ = std::move(logger); }
 
 private:

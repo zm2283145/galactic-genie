@@ -79,28 +79,29 @@ bool VitaAudio::start(std::string *err) {
     return true;
 }
 
-bool VitaAudio::play(const std::string &name) {
+float VitaAudio::play(const std::string &name) {
     const std::string key = normalizedName(name);
-    if (key.empty() || !running_) return false;
+    if (key.empty() || !running_) return 0;
 
     auto clip = std::make_shared<AudioClip>();
     std::string err;
     const std::string path = scenarioSoundDir_ + "/" + key + ".mp3";
     if (!loadMp3(path, *clip, &err)) {
         log(err);
-        return false;
+        return 0;
     }
+    const float duration = clip->frameCount() / (float)AudioClip::kSampleRate;
 
     sceKernelLockMutex(mutex_, 1, nullptr);
     if (queue_.size() >= kMaxQueuedClips) {
         sceKernelUnlockMutex(mutex_, 1);
         log("audio queue full; dropped " + name);
-        return false;
+        return 0;
     }
     queue_.push_back(std::move(clip));
     sceKernelUnlockMutex(mutex_, 1);
     log("playing sound " + name);
-    return true;
+    return duration;
 }
 
 int VitaAudio::threadEntry(SceSize args, void *argp) {
@@ -112,7 +113,7 @@ int VitaAudio::threadEntry(SceSize args, void *argp) {
 int VitaAudio::run() {
     std::shared_ptr<AudioClip> current;
     size_t frame = 0;
-    int16_t buffer[kBufferFrames * AudioClip::kChannels];
+    alignas(64) int16_t buffer[kBufferFrames * AudioClip::kChannels];
 
     while (running_) {
         if (!current || frame >= current->frameCount()) {

@@ -129,7 +129,7 @@ int main() {
         audio.setLogger([](const std::string &s) { logf("audio: %s", s.c_str()); });
         std::string audioError;
         if (!audio.start(&audioError)) logf("audio disabled: %s", audioError.c_str());
-        game.setSoundPlayer([&audio](const std::string &name) { audio.play(name); });
+        game.setSoundPlayer([&audio](const std::string &name) { return audio.play(name); });
         if (!game.initScenario(scenario, &err)) {
             errorScreen(err);
             sceKernelExitProcess(0);

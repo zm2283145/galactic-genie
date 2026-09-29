@@ -43,7 +43,7 @@ public:
     void lookAt(float tx, float ty);
     const FrameStats &stats() const { return stats_; }
     void setLogger(std::function<void(const std::string &)> fn) { log_ = std::move(fn); }
-    void setSoundPlayer(std::function<void(const std::string &)> fn) {
+    void setSoundPlayer(std::function<float(const std::string &)> fn) {
         playSound_ = std::move(fn);
     }
 
@@ -161,7 +161,7 @@ private:
     bool debug_ = false;
     FrameStats stats_;
     std::function<void(const std::string &)> log_;
-    std::function<void(const std::string &)> playSound_;
+    std::function<float(const std::string &)> playSound_;
 };
 
 } // namespace swgb

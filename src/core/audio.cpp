@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "audio.h"
 
+#define DR_MP3_NO_SIMD
 #define DR_MP3_IMPLEMENTATION
 #include "../../third_party/dr_libs/dr_mp3.h"
 

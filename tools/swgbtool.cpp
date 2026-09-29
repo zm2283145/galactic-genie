@@ -513,7 +513,10 @@ static int cmdSimulateScenario(const char *dataDir, const char *campaignPath, in
     }
     Game game(assets);
     game.setLogger([](const std::string &message) { printf("runtime: %s\n", message.c_str()); });
-    game.setSoundPlayer([](const std::string &name) { printf("sound: %s\n", name.c_str()); });
+    game.setSoundPlayer([](const std::string &name) {
+        printf("sound: %s\n", name.c_str());
+        return 2.0f;
+    });
     if (!game.initScenario(scenario, &err)) {
         fprintf(stderr, "error: %s\n", err.c_str());
         return 1;

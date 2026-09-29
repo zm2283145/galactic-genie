@@ -767,7 +767,10 @@ void Game::setTriggerEnabled(int id, bool enabled) {
 void Game::startInstruction(Instruction instruction) {
     currentInstruction_ = std::move(instruction.text);
     instructionTime_ = instruction.duration;
-    if (!instruction.sound.empty() && playSound_) playSound_(instruction.sound);
+    if (!instruction.sound.empty() && playSound_) {
+        const float soundDuration = playSound_(instruction.sound);
+        if (soundDuration > 0) instructionTime_ = std::max(1.0f, soundDuration + 0.35f);
+    }
 }
 
 void Game::queueInstruction(const std::string &text, float duration, const std::string &sound) {
