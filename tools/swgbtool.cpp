@@ -387,7 +387,7 @@ static int cmdRender(const char *dataDir, const char *out, uint32_t seed, float 
 }
 
 static int cmdRenderScenario(const char *dataDir, const char *campaignPath, int entryNumber, const char *out,
-                             float x, float y, float zoom) {
+                             float x, float y, float zoom, bool moving) {
     Scenario scenario;
     std::string err;
     if (!loadScenario(campaignPath, entryNumber, scenario, err)) {
@@ -408,6 +408,11 @@ static int cmdRenderScenario(const char *dataDir, const char *campaignPath, int 
     }
     if (x >= 0 && y >= 0) game.lookAt(x, y);
     game.setZoom(zoom);
+    if (moving) {
+        InputState input;
+        input.scrollX = 1;
+        game.update(0, input);
+    }
     game.render(renderer, 960, 544);
     renderer.savePng(out);
     auto end = std::chrono::steady_clock::now();
@@ -448,6 +453,9 @@ static int cmdStressScenario(const char *dataDir, const char *campaignPath, int 
             const float x = 12.0f + orderedColumn * (scenario.map.width - 24.0f) / (steps - 1);
             const float y = 12.0f + row * (scenario.map.height - 24.0f) / (steps - 1);
             game.lookAt(x, y);
+            InputState moving;
+            moving.scrollX = 1;
+            game.update(0, moving);
             game.render(renderer, 960, 544);
             peakBytes = std::max(peakBytes, assets.textureBytes());
             peakSheets = std::max(peakSheets, assets.sheetCount());
@@ -511,7 +519,8 @@ int main(int argc, char **argv) {
         return cmdRenderScenario(argv[2], argv[3], atoi(argv[4]), argv[5],
                                  argc > 6 ? (float)atof(argv[6]) : -1.0f,
                                  argc > 7 ? (float)atof(argv[7]) : -1.0f,
-                                 argc > 8 ? (float)atof(argv[8]) : 0.4f);
+                                 argc > 8 ? (float)atof(argv[8]) : 0.4f,
+                                 argc > 9 && !strcmp(argv[9], "moving"));
     if (!strcmp(cmd, "stress-scenario") && argc >= 5)
         return cmdStressScenario(argv[2], argv[3], atoi(argv[4]));
     return usage();

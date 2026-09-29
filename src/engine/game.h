@@ -91,6 +91,7 @@ private:
     int localPlayer_ = 0;
     float camX_ = 0, camY_ = 0; // world-pixel position of the screen centre
     float zoom_ = 1.0f;
+    float cameraMotionTime_ = 0;
     bool debug_ = false;
     FrameStats stats_;
 };

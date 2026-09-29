@@ -134,6 +134,7 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     rng_.seed(seed);
     players_ = {};
     localPlayer_ = 0;
+    cameraMotionTime_ = 0;
     for (size_t i = 0; i < players_.size(); i++) players_[i].color = (uint32_t)i;
     mapSize_ = mapSize;
     generateTerrain(mapSize);
@@ -178,6 +179,7 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     rng_.seed(1);
     players_ = scenario.players;
     localPlayer_ = 0;
+    cameraMotionTime_ = 0;
     for (size_t i = 0; i < players_.size(); i++) {
         if (players_[i].active && players_[i].human) {
             localPlayer_ = (int)i + 1;
@@ -444,6 +446,11 @@ void Game::update(float dt, const InputState &in) {
     const float scrollSpeed = 900.0f / zoom_;
     camX_ += in.scrollX * scrollSpeed * dt - in.dragX / zoom_;
     camY_ += in.scrollY * scrollSpeed * dt - in.dragY / zoom_;
+    if (std::fabs(in.scrollX) > 0.01f || std::fabs(in.scrollY) > 0.01f ||
+        std::fabs(in.dragX) > 0.01f || std::fabs(in.dragY) > 0.01f)
+        cameraMotionTime_ = 0.35f;
+    else
+        cameraMotionTime_ = std::max(0.0f, cameraMotionTime_ - dt);
     // Clamp the camera to the map diamond's bounding box.
     float minX = -mapSize_ * kTileHalfW, maxX = mapSize_ * kTileHalfW;
     float maxY = 2.0f * mapSize_ * kTileHalfH;
@@ -592,9 +599,11 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     assets_.beginTerrainFrame(64u * 1024u * 1024u);
     const float viewW = screenW / zoom_, viewH = screenH / zoom_;
     const float ox = camX_ - viewW / 2, oy = camY_ - viewH / 2; // world-pixel of screen top-left
+    const bool flattenTerrain = cameraMotionTime_ > 0;
+    const bool lowDetail = flattenTerrain || zoom_ < 0.6f;
     // At overview zoom the blend overlays are sub-pixel detail but account for
     // hundreds of extra masked draws and slope-mask cache entries on Vita.
-    const bool drawTerrainBlends = zoom_ >= 0.6f && assets_.hasBlendMasks();
+    const bool drawTerrainBlends = !lowDetail && assets_.hasBlendMasks();
 
     // --- terrain -------------------------------------------------------
     const auto &terrains = assets_.dat().terrainBlock.terrains;
@@ -634,7 +643,8 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             toScreen((float)tx, (float)ty, sx, sy);
             const size_t tileIndex = (size_t)ty * mapSize_ + tx;
             const int slope = tileSlope_[tileIndex];
-            sy -= tileElevation_[tileIndex] * assets_.dat().terrainBlock.elevHeight;
+            if (!flattenTerrain)
+                sy -= tileElevation_[tileIndex] * assets_.dat().terrainBlock.elevHeight;
             sx -= ox;
             sy -= oy;
             if (sx + kTileHalfW < 0 || sx - kTileHalfW > viewW || sy > viewH + 48 ||
@@ -652,7 +662,8 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             const dat::Terrain &terrain = terrains[terrainId];
             const dat::Terrain &draw = drawTerrain(terrains, terrainId);
             const SpriteSheet *flat = assets_.terrainSheet(draw.slp);
-            assets_.terrainSlopeFrame(draw.slp, slope, frameIndexFor(flat, tx, ty), neighborSlopes);
+            if (!flattenTerrain)
+                assets_.terrainSlopeFrame(draw.slp, slope, frameIndexFor(flat, tx, ty), neighborSlopes);
 
             if (!drawTerrainBlends) continue;
             std::array<int, 8> neighbors;
@@ -691,7 +702,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
 
     g_draws.clear();
     for (const Object &o : objects_) {
-        if (zoom_ < 0.6f &&
+        if (lowDetail &&
             (o.unit->type == dat::UT_Trees || o.unit->type == dat::UT_AoeTrees)) {
             const uint32_t x = (uint32_t)std::lround(o.x * 2.0f);
             const uint32_t y = (uint32_t)std::lround(o.y * 2.0f);
@@ -701,14 +712,15 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         }
         float sx, sy;
         toScreen(o.x, o.y, sx, sy);
-        sy -= elevationAt(o.x, o.y) * assets_.dat().terrainBlock.elevHeight;
+        if (!flattenTerrain)
+            sy -= elevationAt(o.x, o.y) * assets_.dat().terrainBlock.elevHeight;
         sx -= ox;
         sy -= oy;
         if (sx < -400 || sx > viewW + 400 || sy < -100 || sy > viewH + 500) continue;
         int gid = o.unit->standingGraphic[0];
         if (o.state == State::Walk && o.unit->walkingGraphic >= 0) gid = o.unit->walkingGraphic;
         drawGraphic(r, gid, sx, sy, o.facing, o.animTime, o.player, o.initialFrame, 0,
-                    o.drawShadows && zoom_ >= 0.6f, viewW, viewH);
+                    o.drawShadows && !lowDetail, viewW, viewH);
     }
     r.beginFrame(screenW, screenH, zoom_, 0, 0, 0);
 
@@ -719,7 +731,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             const size_t tileIndex = (size_t)ty * mapSize_ + tx;
             const int slope = tileSlope_[tileIndex];
             const int elevation = tileElevation_[tileIndex];
-            sy -= elevation * assets_.dat().terrainBlock.elevHeight;
+            if (!flattenTerrain) sy -= elevation * assets_.dat().terrainBlock.elevHeight;
             sx -= ox;
             sy -= oy;
             if (sx + kTileHalfW < 0 || sx - kTileHalfW > viewW || sy > viewH + 48 || sy + 3 * kTileHalfH < 0)
@@ -736,14 +748,18 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             }
             const SpriteSheet *flatBase = assets_.terrainSheet(draw.slp);
             const size_t terrainFrame = frameIndexFor(flatBase, tx, ty);
-            const SpriteFrame *baseFrame =
-                assets_.terrainSlopeFrame(draw.slp, slope, terrainFrame, neighborSlopes);
+            const SpriteFrame *baseFrame = flattenTerrain
+                                               ? flatBase && terrainFrame < flatBase->frames.size()
+                                                     ? &flatBase->frames[terrainFrame]
+                                                     : nullptr
+                                               : assets_.terrainSlopeFrame(draw.slp, slope, terrainFrame,
+                                                                           neighborSlopes);
             if (!baseFrame) continue;
             const SpriteFrame &f = *baseFrame;
-            const int deltaY = slope < (int)assets_.dat().terrainBlock.tileSizes.size()
+            const int deltaY = !flattenTerrain && slope < (int)assets_.dat().terrainBlock.tileSizes.size()
                                    ? assets_.dat().terrainBlock.tileSizes[(size_t)slope].deltaY
                                    : 0;
-            const float tileY = sy - deltaY - (slope ? 12.0f : 0.0f);
+            const float tileY = sy - deltaY - (!flattenTerrain && slope ? 12.0f : 0.0f);
             Quad q{sx - kTileHalfW, tileY, (float)f.w, (float)f.h, f.u, f.v, f.u + f.w, f.v + f.h};
             r.draw(f.tex, q);
             stats_.tiles++;
@@ -807,14 +823,18 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     stats_.sprites = (int)g_draws.size();
 
     if (debug_) {
-        // Simple minimap in the corner: one pixel per tile, terrain colours.
+        // Coarse debug minimap; one quad per full tile is prohibitively
+        // expensive on Vita for large maps.
+        constexpr int step = 8;
         const float s = 2.0f / zoom_;
         const float mx = viewW - mapSize_ * s - 8 / zoom_, my = 8 / zoom_;
         r.fillRect(mx - 2 / zoom_, my - 2 / zoom_, mapSize_ * s + 4 / zoom_, mapSize_ * s + 4 / zoom_, 0, 0, 0, 180);
-        for (int ty = 0; ty < mapSize_; ty++)
-            for (int tx = 0; tx < mapSize_; tx++) {
+        for (int ty = 0; ty < mapSize_; ty += step)
+            for (int tx = 0; tx < mapSize_; tx += step) {
                 const dat::Terrain &t = terrains[terrainAt(tx, ty)];
-                r.fillRect(mx + tx * s, my + ty * s, s, s, t.colors[0] ? assets_.palette()[t.colors[0]].r : 60,
+                r.fillRect(mx + tx * s, my + ty * s, std::min(step, mapSize_ - tx) * s,
+                           std::min(step, mapSize_ - ty) * s,
+                           t.colors[0] ? assets_.palette()[t.colors[0]].r : 60,
                            t.colors[0] ? assets_.palette()[t.colors[0]].g : 120,
                            t.colors[0] ? assets_.palette()[t.colors[0]].b : 60, 255);
             }
