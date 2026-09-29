@@ -24,8 +24,9 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   collision-aware scripted movement, and visible queued dialogue. Movement uses DAT terrain
   restrictions, flying-unit behavior, static obstacle footprints, destination formations, dynamic
   occupancy, and bounded A* routes. Scenario MP3 dialogue is decoded and queued with its matching
-  subtitle on Vita. AI goals, full technology effects, combat-driven state changes, general sound
-  effects, music, and campaign progression remain.
+  subtitle on Vita. DAT-driven selection and movement acknowledgements are loaded from the original
+  sound archives and mixed over dialogue. AI goals, full technology effects, combat-driven state
+  changes, general world effects, music, and campaign progression remain.
 - Fog of war and explored/visible tile state.
 - Shadow and player-outline passes (PX_OUTLINE pixels drawn only when occluded).
 
@@ -44,7 +45,7 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 - Expand the initial single, box, and visible-type selection controls with unit panels, control
   groups, contextual command cursors, and selection sounds.
 - Command panel, minimap, resource bar and the pause menu.
-- Audio: sounds.drs/sounds_x1.drs unit and world effects, volume controls, and music.
+- Audio: attack acknowledgements when combat commands land, world effects, volume controls, and music.
 
 ## Milestone 5: AI and skirmish
 - A subset of the AI script interpreter (`.per` rules), checked against the original using Ghidra where needed.

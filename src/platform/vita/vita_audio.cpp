@@ -13,6 +13,7 @@ namespace {
 
 constexpr int kBufferFrames = 1024;
 constexpr size_t kMaxQueuedClips = 8;
+constexpr size_t kMaxCachedEffects = 64;
 
 std::string normalizedName(const std::string &name) {
     const size_t slash = name.find_last_of("/\\");
@@ -104,6 +105,26 @@ float VitaAudio::play(const std::string &name) {
     return duration;
 }
 
+bool VitaAudio::playEffect(int resourceId, const std::vector<uint8_t> &data) {
+    if (resourceId < 0 || data.empty() || !running_) return false;
+    auto found = effectCache_.find(resourceId);
+    if (found == effectCache_.end()) {
+        auto clip = std::make_shared<AudioClip>();
+        std::string err;
+        if (!decodeWav(data, *clip, &err)) {
+            log("could not decode effect " + std::to_string(resourceId) + ": " + err);
+            return false;
+        }
+        if (effectCache_.size() >= kMaxCachedEffects) effectCache_.clear();
+        found = effectCache_.emplace(resourceId, std::move(clip)).first;
+    }
+    sceKernelLockMutex(mutex_, 1, nullptr);
+    pendingEffect_ = found->second;
+    sceKernelUnlockMutex(mutex_, 1);
+    log("playing effect " + std::to_string(resourceId));
+    return true;
+}
+
 int VitaAudio::threadEntry(SceSize args, void *argp) {
     if (args != sizeof(VitaAudio *) || !argp) return -1;
     VitaAudio *self = *static_cast<VitaAudio **>(argp);
@@ -112,20 +133,31 @@ int VitaAudio::threadEntry(SceSize args, void *argp) {
 
 int VitaAudio::run() {
     std::shared_ptr<AudioClip> current;
+    std::shared_ptr<AudioClip> effect;
     size_t frame = 0;
+    size_t effectFrame = 0;
     size_t bufferIndex = 0;
     alignas(64) int16_t buffers[2][kBufferFrames * AudioClip::kChannels];
 
     while (running_) {
-        if (!current || frame >= current->frameCount()) {
+        sceKernelLockMutex(mutex_, 1, nullptr);
+        if (pendingEffect_) {
+            effect = std::move(pendingEffect_);
+            effectFrame = 0;
+        }
+        if ((!current || frame >= current->frameCount()) && !queue_.empty()) {
+            current = std::move(queue_.front());
+            queue_.pop_front();
+            frame = 0;
+        }
+        sceKernelUnlockMutex(mutex_, 1);
+        if (current && frame >= current->frameCount()) {
             current.reset();
             frame = 0;
-            sceKernelLockMutex(mutex_, 1, nullptr);
-            if (!queue_.empty()) {
-                current = std::move(queue_.front());
-                queue_.pop_front();
-            }
-            sceKernelUnlockMutex(mutex_, 1);
+        }
+        if (effect && effectFrame >= effect->frameCount()) {
+            effect.reset();
+            effectFrame = 0;
         }
 
         int16_t *buffer = buffers[bufferIndex];
@@ -136,6 +168,16 @@ int VitaAudio::run() {
             std::memcpy(buffer, &current->samples[frame * AudioClip::kChannels],
                         frames * AudioClip::kChannels * sizeof(int16_t));
             frame += frames;
+        }
+        if (effect) {
+            const size_t frames =
+                std::min<size_t>(kBufferFrames, effect->frameCount() - effectFrame);
+            for (size_t sample = 0; sample < frames * AudioClip::kChannels; sample++) {
+                const int mixed = (int)buffer[sample] +
+                                  (int)effect->samples[effectFrame * AudioClip::kChannels + sample];
+                buffer[sample] = (int16_t)std::max(-32768, std::min(32767, mixed));
+            }
+            effectFrame += frames;
         }
         const int result = sceAudioOutOutput(port_, buffer);
         if (result < 0) {

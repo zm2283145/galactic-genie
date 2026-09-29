@@ -8,6 +8,7 @@
 #include <atomic>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 
@@ -20,6 +21,7 @@ public:
 
     bool start(std::string *err = nullptr);
     float play(const std::string &name);
+    bool playEffect(int resourceId, const std::vector<uint8_t> &data);
     void setLogger(std::function<void(const std::string &)> logger) { log_ = std::move(logger); }
 
 private:
@@ -34,6 +36,8 @@ private:
     SceUID mutex_ = -1;
     int port_ = -1;
     std::deque<std::shared_ptr<AudioClip>> queue_;
+    std::map<int, std::shared_ptr<AudioClip>> effectCache_;
+    std::shared_ptr<AudioClip> pendingEffect_;
 };
 
 } // namespace swgb

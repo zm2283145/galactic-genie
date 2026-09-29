@@ -157,6 +157,7 @@ bool Assets::init(const std::string &dataDir, std::string *err) {
         {&graphics_, "graphics_x1.drs", true}, {&graphics_, "graphics.drs", true},
         {&terrain_, "terrain_x1.drs", false},  {&terrain_, "terrain.drs", true},
         {&interfac_, "interfac_x1.drs", false}, {&interfac_, "interfac.drs", true},
+        {&sounds_, "sounds_x1.drs", false}, {&sounds_, "sounds.drs", false},
     };
     for (const Want &w : wants) {
         std::string p = findFileNoCase(dataDir, w.name);
@@ -213,6 +214,48 @@ bool Assets::init(const std::string &dataDir, std::string *err) {
         log("loaded terrain elevation maps: " + std::to_string(kSlopeCount) + " slope types");
     }
     return true;
+}
+
+bool Assets::readSound(int soundId, int civilization, uint32_t choice,
+                       std::vector<uint8_t> &data, int *resourceId,
+                       std::string *fileName) {
+    const dat::Sound *sound = nullptr;
+    if (soundId >= 0 && (size_t)soundId < dat_.sounds.size() &&
+        dat_.sounds[(size_t)soundId].id == soundId)
+        sound = &dat_.sounds[(size_t)soundId];
+    if (!sound)
+        for (const dat::Sound &candidate : dat_.sounds)
+            if (candidate.id == soundId) {
+                sound = &candidate;
+                break;
+            }
+    if (!sound || sound->items.empty()) return false;
+
+    std::vector<const dat::SoundItem *> eligible;
+    int totalWeight = 0;
+    for (const dat::SoundItem &item : sound->items)
+        if (item.civilization < 0 || item.civilization == civilization) {
+            eligible.push_back(&item);
+            totalWeight += std::max<int>(1, item.probability);
+        }
+    if (totalWeight <= 0) return false;
+    int selectedWeight = (int)(choice % (uint32_t)totalWeight);
+    size_t selectedIndex = 0;
+    for (; selectedIndex < eligible.size(); selectedIndex++) {
+        selectedWeight -= std::max<int>(1, eligible[selectedIndex]->probability);
+        if (selectedWeight < 0) {
+            break;
+        }
+    }
+    for (size_t offset = 0; offset < eligible.size(); offset++) {
+        const dat::SoundItem &selected =
+            *eligible[(selectedIndex + offset) % eligible.size()];
+        if (!sounds_.read(selected.resourceId, data)) continue;
+        if (resourceId) *resourceId = selected.resourceId;
+        if (fileName) *fileName = selected.fileName;
+        return true;
+    }
+    return false;
 }
 
 bool Assets::buildBlendMasks(const Blendomatic &blendomatic, std::string *err) {

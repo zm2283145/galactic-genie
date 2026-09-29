@@ -16,6 +16,7 @@ struct AudioClip {
 };
 
 bool decodeMp3(const std::vector<uint8_t> &data, AudioClip &clip, std::string *err = nullptr);
+bool decodeWav(const std::vector<uint8_t> &data, AudioClip &clip, std::string *err = nullptr);
 bool loadMp3(const std::string &path, AudioClip &clip, std::string *err = nullptr);
 
 } // namespace swgb

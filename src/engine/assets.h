@@ -54,6 +54,9 @@ public:
     const SpriteFrame *terrainSlopeFrame(int32_t slpId, int slope, size_t frame,
                                          const std::array<int8_t, 8> &neighbors);
     const SpriteFrame *blendMask(int mode, int mask, int slope = 0);
+    bool readSound(int soundId, int civilization, uint32_t choice,
+                   std::vector<uint8_t> &data, int *resourceId = nullptr,
+                   std::string *fileName = nullptr);
     Texture *selectionRing();
     bool hasBlendMasks() const { return blendMaskTexture_ != nullptr; }
     bool hasElevationMaps() const { return elevationMaps_ != nullptr; }
@@ -85,7 +88,7 @@ private:
 
     Renderer *renderer_;
     LogFn log_;
-    ResourceSet graphics_, terrain_, interfac_;
+    ResourceSet graphics_, terrain_, interfac_, sounds_;
     Palette palette_;
     dat::DatFile dat_;
     std::unique_ptr<Blendomatic> blendomatic_;

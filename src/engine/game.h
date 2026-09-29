@@ -72,6 +72,9 @@ public:
     void setSoundPlayer(std::function<float(const std::string &)> fn) {
         playSound_ = std::move(fn);
     }
+    void setUnitSoundPlayer(std::function<void(int, int)> fn) {
+        playUnitSound_ = std::move(fn);
+    }
 
     // Debug helper: draws one graphic immediately at a screen position.
     void drawGraphicNow(Renderer &r, int graphicId, float sx, float sy, float facing, float t, int player);
@@ -175,6 +178,7 @@ private:
                               float &screenX, float &screenY) const;
     void screenToWorld(float screenX, float screenY, int screenW, int screenH,
                        float &worldX, float &worldY) const;
+    void playUnitAcknowledgement(const Object &object, bool attack);
     void startInstruction(Instruction instruction);
     void queueInstruction(const std::string &text, float duration,
                           const std::string &sound = std::string());
@@ -227,6 +231,7 @@ private:
     FrameStats stats_;
     std::function<void(const std::string &)> log_;
     std::function<float(const std::string &)> playSound_;
+    std::function<void(int, int)> playUnitSound_;
 };
 
 } // namespace swgb

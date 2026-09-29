@@ -31,6 +31,7 @@ static int usage() {
             "  swgbtool terrain <DataDir> <terrainId>\n"
             "  swgbtool restriction <DataDir> <restrictionId>\n"
             "  swgbtool unit <DataDir> <unitId>\n"
+            "  swgbtool sound <DataDir> <soundId>\n"
             "  swgbtool drs    <file.drs>\n"
             "  swgbtool slp    <DataDir> <slpId> <out.png> [playerBase]\n"
             "  swgbtool slopes <DataDir> <slpId> <out.png> [frame]\n"
@@ -130,7 +131,7 @@ static int cmdUnit(const char *dataDir, int id) {
                    "duration %.3f, sequence 0x%02x, mirror %u, deltas %zu, special graphic %d, "
                    "special ability %u, adjacent mode %u, graphics angle %d, speed %.2f, "
                    "restriction %d, fly %u, obstruction %u/%u, collision %.2f,%.2f, "
-                   "outline %.2f,%.2f,%.2f\n", civ,
+                   "outline %.2f,%.2f,%.2f, sounds select/move/attack %d/%d/%d\n", civ,
                    assets.dat().civs[civ].name.c_str(), unit.name.c_str(), unit.type, unit.cls,
                    unit.hideInEditor, unit.heroMode, graphicId,
                    graphic ? graphic->slp : -1, graphic ? graphic->frameCount : 0,
@@ -140,7 +141,8 @@ static int cmdUnit(const char *dataDir, int id) {
                    unit.adjacentMode, unit.graphicsAngle, unit.speed, unit.terrainRestriction,
                    unit.flyMode, unit.obstructionType, unit.obstructionClass,
                    unit.collisionSize[0], unit.collisionSize[1],
-                   unit.outlineSize[0], unit.outlineSize[1], unit.outlineSize[2]);
+                   unit.outlineSize[0], unit.outlineSize[1], unit.outlineSize[2],
+                   unit.selectionSound, unit.moveSound, unit.attackSound);
             if (graphic)
                 for (const auto &delta : graphic->deltas)
                     if (const auto *child = assets.dat().graphic(delta.graphicId))
@@ -174,6 +176,38 @@ static int cmdRestriction(const char *dataDir, int id) {
     const auto &terrains = assets.dat().terrainBlock.terrains;
     for (size_t terrain = 0; terrain < values.size() && terrain < terrains.size(); terrain++)
         printf("%3zu %8.3f %s\n", terrain, values[terrain], terrains[terrain].name.c_str());
+    return 0;
+}
+
+static int cmdSound(const char *dataDir, int id) {
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    std::string err;
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    const auto &sounds = assets.dat().sounds;
+    if (id < 0 || (size_t)id >= sounds.size()) {
+        fprintf(stderr, "error: sound ID out of range\n");
+        return 1;
+    }
+    const auto &sound = sounds[(size_t)id];
+    printf("sound %d stored id %d delay %d cache %d, %zu items\n",
+           id, sound.id, sound.playDelay, sound.cacheTime, sound.items.size());
+    for (const auto &item : sound.items)
+        printf("  resource %d probability %d civ %d icon %d '%s'\n",
+               item.resourceId, item.probability, item.civilization, item.iconSet,
+               item.fileName.c_str());
+    std::vector<uint8_t> data;
+    int resourceId = -1;
+    std::string fileName;
+    AudioClip clip;
+    if (assets.readSound(id, -1, 0, data, &resourceId, &fileName) &&
+        decodeWav(data, clip, &err))
+        printf("  decoded resource %d '%s': %zu frames, %.2f seconds\n",
+               resourceId, fileName.c_str(), clip.frameCount(),
+               clip.frameCount() / (double)AudioClip::kSampleRate);
     return 0;
 }
 
@@ -601,6 +635,10 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
         return 1;
     }
     Game game(assets);
+    std::vector<int> acknowledgementSounds;
+    game.setUnitSoundPlayer([&](int soundId, int) {
+        acknowledgementSounds.push_back(soundId);
+    });
     if (!game.initScenario(scenario, &err)) {
         fprintf(stderr, "error: %s\n", err.c_str());
         return 1;
@@ -651,12 +689,14 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
         }
     }
     const MovementStats movement = game.movementStats();
-    printf("controls: single %zu, double %zu, box %zu, commanded %zu, overlaps %zu, "
-           "terrain violations %zu\n",
+    printf("controls: single %zu, double %zu, box %zu, commanded %zu, sounds %zu, "
+           "overlaps %zu, terrain violations %zu\n",
            singleSelected, doubleSelected, boxSelected, commanded,
-           movement.overlappingPairs, movement.terrainViolations);
+           acknowledgementSounds.size(), movement.overlappingPairs,
+           movement.terrainViolations);
     if (singleSelected != 1 || doubleSelected <= 1 || boxSelected < doubleSelected ||
-        commanded == 0 || movement.overlappingPairs != 0 ||
+        commanded == 0 || acknowledgementSounds.size() < 5 ||
+        movement.overlappingPairs != 0 ||
         movement.terrainViolations != 0) {
         fprintf(stderr, "error: control validation failed\n");
         return 1;
@@ -696,6 +736,7 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "terrain") && argc >= 4) return cmdTerrain(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "restriction") && argc >= 4) return cmdRestriction(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "unit") && argc >= 4) return cmdUnit(argv[2], atoi(argv[3]));
+    if (!strcmp(cmd, "sound") && argc >= 4) return cmdSound(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "drs")) return cmdDrs(argv[2]);
     if (!strcmp(cmd, "campaign")) return cmdCampaign(argv[2]);
     if (!strcmp(cmd, "scenario") && argc >= 4) return cmdScenario(argv[2], atoi(argv[3]));

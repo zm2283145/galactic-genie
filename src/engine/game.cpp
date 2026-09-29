@@ -931,6 +931,8 @@ void Game::selectAtScreen(float screenX, float screenY, int screenW, int screenH
     } else if (object) {
         object->selected = true;
     }
+    if (object && playUnitSound_ && object->unit->selectionSound >= 0)
+        playUnitSound_(object->unit->selectionSound, civilizationForPlayer(object->player));
     lastSelectionUnitId_ = object ? object->unit->id : -1;
     lastSelectionX_ = screenX;
     lastSelectionY_ = screenY;
@@ -944,13 +946,19 @@ void Game::selectBox(float startX, float startY, float endX, float endY,
     selectionClickAge_ = 1000.0f;
     lastSelectionUnitId_ = -1;
     clearSelection();
+    Object *acknowledgement = nullptr;
     for (Object &object : objects_) {
         if (!isSelectable(object)) continue;
         float objectX, objectY;
         objectScreenPosition(object, screenW, screenH, objectX, objectY);
-        if (objectX >= minX && objectX <= maxX && objectY >= minY && objectY <= maxY)
+        if (objectX >= minX && objectX <= maxX && objectY >= minY && objectY <= maxY) {
             object.selected = true;
+            if (!acknowledgement) acknowledgement = &object;
+        }
     }
+    if (acknowledgement && playUnitSound_ && acknowledgement->unit->selectionSound >= 0)
+        playUnitSound_(acknowledgement->unit->selectionSound,
+                       civilizationForPlayer(acknowledgement->player));
 }
 
 void Game::commandAtScreen(float screenX, float screenY, int screenW, int screenH) {
@@ -960,10 +968,18 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
     if (selected.empty()) return;
     float targetX, targetY;
     screenToWorld(screenX, screenY, screenW, screenH, targetX, targetY);
+    playUnitAcknowledgement(*selected.front(), false);
     issueGroupMove(std::move(selected), targetX, targetY);
     commandMarkerX_ = targetX;
     commandMarkerY_ = targetY;
     commandMarkerTime_ = 0.8f;
+}
+
+void Game::playUnitAcknowledgement(const Object &object, bool attack) {
+    if (!playUnitSound_) return;
+    int soundId = attack ? object.unit->attackSound : object.unit->moveSound;
+    if (soundId < 0) soundId = object.unit->selectionSound;
+    if (soundId >= 0) playUnitSound_(soundId, civilizationForPlayer(object.player));
 }
 
 bool Game::terrainPassable(const Object &object, float x, float y) const {

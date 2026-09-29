@@ -131,6 +131,19 @@ int main() {
         std::string audioError;
         if (!audio.start(&audioError)) logf("audio disabled: %s", audioError.c_str());
         game.setSoundPlayer([&audio](const std::string &name) { return audio.play(name); });
+        uint32_t unitSoundChoice = 0;
+        game.setUnitSoundPlayer([&](int soundId, int civilization) {
+            std::vector<uint8_t> data;
+            int resourceId = -1;
+            std::string fileName;
+            if (!assets.readSound(soundId, civilization, unitSoundChoice++, data,
+                                  &resourceId, &fileName)) {
+                logf("unit sound %d not found", soundId);
+                return;
+            }
+            if (!audio.playEffect(resourceId, data))
+                logf("unit sound %s (%d) could not play", fileName.c_str(), resourceId);
+        });
         if (!game.initScenario(scenario, &err)) {
             errorScreen(err);
             sceKernelExitProcess(0);
