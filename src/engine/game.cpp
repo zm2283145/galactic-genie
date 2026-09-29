@@ -227,32 +227,46 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     }
     buildTileElevation();
     objects_.clear();
-    objects_.reserve(scenario.units.size());
+    objects_.reserve(scenario.units.size() * 2);
     for (const ScenarioUnit &source : scenario.units) {
         if (source.garrisonedInId >= 0) continue;
         const int civilization = civilizationFor(source.player);
         const dat::Unit *unit = findUnit(civilization, source.unitId);
         if (!unit) continue;
-        Object object;
-        object.unit = unit;
-        object.player = source.player;
-        object.x = object.homeX = object.targetX = source.y;
-        object.y = object.homeY = object.targetY = mapSize_ - source.x;
-        const dat::Graphic *graphic = assets_.dat().graphic(unit->standingGraphic[0]);
-        object.facing = unit->adjacentMode && graphic && graphic->angleCount == 5
-                            ? source.rotation
-                            : source.rotation - kPi * 0.5f;
-        object.wander = false;
-        object.initialFrame = source.initialFrame;
-        objects_.push_back(object);
+        const float x = source.y;
+        const float y = mapSize_ - source.x;
+        auto addObject = [&](const dat::Unit *part, float partX, float partY, uint16_t initialFrame) {
+            Object object;
+            object.unit = part;
+            object.player = source.player;
+            object.x = object.homeX = object.targetX = partX;
+            object.y = object.homeY = object.targetY = partY;
+            const dat::Graphic *graphic = assets_.dat().graphic(part->standingGraphic[0]);
+            object.facing = part->adjacentMode && graphic && graphic->angleCount == 5
+                                ? source.rotation
+                                : source.rotation - kPi * 0.5f;
+            object.wander = false;
+            object.initialFrame = initialFrame;
+            objects_.push_back(object);
+        };
+        addObject(unit, x, y, source.initialFrame);
+        if (unit->type == dat::UT_Building) {
+            for (const dat::BuildingAnnex &annex : unit->annexes) {
+                if (annex.unitId < 0) continue;
+                const dat::Unit *part = findUnit(civilization, annex.unitId);
+                if (!part) continue;
+                addObject(part, x + annex.misplacementY, y - annex.misplacementX, 0);
+            }
+        }
     }
-    std::vector<Object *> adjacentObjects;
+    std::vector<Object *> adjacentObjects, adjacentWalls;
     for (Object &object : objects_) {
+        if (!object.unit->adjacentMode) continue;
+        adjacentObjects.push_back(&object);
         const dat::Graphic *graphic = assets_.dat().graphic(object.unit->standingGraphic[0]);
-        if (object.unit->adjacentMode && graphic && graphic->angleCount == 5)
-            adjacentObjects.push_back(&object);
+        if (graphic && graphic->angleCount == 5) adjacentWalls.push_back(&object);
     }
-    for (Object *object : adjacentObjects) {
+    for (Object *object : adjacentWalls) {
         bool north = false, east = false, south = false, west = false;
         for (const Object *neighbor : adjacentObjects) {
             if (neighbor == object || neighbor->player != object->player) continue;

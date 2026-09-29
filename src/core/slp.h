@@ -50,7 +50,7 @@ private:
 
 struct ColorizeOptions {
     int playerColorBase = 16; // first palette index of this player's 8 shades
-    uint8_t shadowAlpha = 110;
+    uint8_t shadowAlpha = 64;
     bool flipX = false;
 };
 

@@ -133,9 +133,14 @@ static int cmdUnit(const char *dataDir, int id) {
             if (graphic)
                 for (const auto &delta : graphic->deltas)
                     if (const auto *child = assets.dat().graphic(delta.graphicId))
-                        printf("  delta graphic %d slp %d frames %d angles %d offset %d,%d display angle %d\n",
+                        printf("  delta graphic %d slp %d frames %d angles %d layer %u offset %d,%d display angle %d\n",
                                delta.graphicId, child->slp, child->frameCount, child->angleCount,
-                               delta.offsetX, delta.offsetY, delta.displayAngle);
+                               child->layer, delta.offsetX, delta.offsetY, delta.displayAngle);
+            if (unit.type == dat::UT_Building)
+                for (const auto &annex : unit.annexes)
+                    if (annex.unitId >= 0)
+                        printf("  annex unit %d offset %.2f,%.2f\n", annex.unitId,
+                               annex.misplacementX, annex.misplacementY);
         }
         return 0;
 }
@@ -287,8 +292,10 @@ static int cmdScenarioUnits(const char *dataDir, const char *path, int entryNumb
         if (civ < assets.dat().civs.size() && id < assets.dat().civs[civ].units.size() &&
             assets.dat().civs[civ].units[id].exists)
             unit = &assets.dat().civs[civ].units[id];
-        printf("player %u civ %zu unit %u count %zu '%s'\n", player, civ, id, count,
-               unit ? unit->name.c_str() : "?");
+        const dat::Graphic *graphic = unit ? assets.dat().graphic(unit->standingGraphic[0]) : nullptr;
+        printf("player %u civ %zu unit %u count %zu '%s' adjacent %u angles %u\n",
+               player, civ, id, count, unit ? unit->name.c_str() : "?",
+               unit ? unit->adjacentMode : 0, graphic ? graphic->angleCount : 0);
     }
     return 0;
 }
