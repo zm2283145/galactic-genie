@@ -37,7 +37,7 @@ static int usage() {
             "  swgbtool scenario <file.cpx> <entry>\n"
             "  swgbtool scenario-units <DataDir> <file.cpx> <entry> [unitId]\n"
             "  swgbtool render-scenario <DataDir> <file.cpx> <entry> <out.png> [x] [y] [zoom]\n"
-            "  swgbtool stress-scenario <DataDir> <file.cpx> <entry>\n"
+            "  swgbtool stress-scenario <DataDir> <file.cpx> <entry> [zoom]\n"
             "  swgbtool simulate-scenario <DataDir> <file.cpx> <entry> [seconds] [out.png]\n");
     return 2;
 }
@@ -437,7 +437,7 @@ static int cmdRenderScenario(const char *dataDir, const char *campaignPath, int 
     return 0;
 }
 
-static int cmdStressScenario(const char *dataDir, const char *campaignPath, int entryNumber) {
+static int cmdStressScenario(const char *dataDir, const char *campaignPath, int entryNumber, float zoom) {
     Scenario scenario;
     std::string err;
     if (!loadScenario(campaignPath, entryNumber, scenario, err)) {
@@ -455,7 +455,7 @@ static int cmdStressScenario(const char *dataDir, const char *campaignPath, int 
         fprintf(stderr, "error: %s\n", err.c_str());
         return 1;
     }
-    game.setZoom(0.4f);
+    game.setZoom(zoom);
     constexpr int steps = 5;
     size_t peakBytes = 0, peakSheets = 0;
     for (int row = 0; row < steps; row++) {
@@ -579,7 +579,8 @@ int main(int argc, char **argv) {
                                  argc > 8 ? (float)atof(argv[8]) : 0.4f,
                                  argc > 9 && !strcmp(argv[9], "moving"));
     if (!strcmp(cmd, "stress-scenario") && argc >= 5)
-        return cmdStressScenario(argv[2], argv[3], atoi(argv[4]));
+        return cmdStressScenario(argv[2], argv[3], atoi(argv[4]),
+                                 argc > 5 ? (float)atof(argv[5]) : 0.4f);
     if (!strcmp(cmd, "simulate-scenario") && argc >= 5)
         return cmdSimulateScenario(argv[2], argv[3], atoi(argv[4]),
                                    argc > 5 ? (float)atof(argv[5]) : 1.1f,
