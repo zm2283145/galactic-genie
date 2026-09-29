@@ -23,6 +23,14 @@ constexpr size_t kCursorNormal = 0;
 constexpr size_t kCursorCommand = 3;
 constexpr size_t kCursorAttack = 4;
 constexpr size_t kCursorMove = 11;
+constexpr size_t kCursorGarrison = 13;
+constexpr int kCommandIconSlp = 50733;
+constexpr size_t kCommandGarrisonIcon = 1;
+constexpr size_t kCommandEjectIcon = 2;
+constexpr size_t kCommandLockGateIcon = 47;
+constexpr size_t kCommandUnlockGateIcon = 48;
+constexpr size_t kCommandPowerStatusIcon = 49;
+constexpr size_t kCommandShieldStatusIcon = 10;
 constexpr int kBuildingIconSlpBase = 53241;
 constexpr int kUnitIconSlpBase = 53251;
 constexpr float kSelectionPanelHeight = 112.0f;
@@ -41,6 +49,8 @@ constexpr float kActionMenuY = 64.0f;
 constexpr float kActionMenuWidth = 440.0f;
 constexpr float kActionMenuRowHeight = 42.0f;
 constexpr size_t kActionMenuMaxRows = 10;
+constexpr int kPowerRadiusGraphic = 5025;
+constexpr int kShieldRadiusGraphic = 5034;
 constexpr float kCheatMenuX = 170.0f;
 constexpr float kCheatMenuY = 58.0f;
 constexpr float kCheatMenuWidth = 620.0f;
@@ -53,6 +63,7 @@ enum class CheatAction {
     Nova,
     Ore,
     ForceBuild,
+    ForceTech,
     ForceSight,
     ForceExplore,
     Spawn,
@@ -76,6 +87,7 @@ constexpr CheatEntry kCheats[] = {
     {"FORCENOVA", "+1000 NOVA", CheatAction::Nova, 0, false},
     {"FORCEORE", "+1000 ORE", CheatAction::Ore, 0, false},
     {"FORCEBUILD", "INSTANT PRODUCTION", CheatAction::ForceBuild, 0, false},
+    {"FORCETECH", "REMOVE CAMPAIGN TECH LIMITS", CheatAction::ForceTech, 0, false},
     {"FORCESIGHT", "REMOVE FOG OF WAR", CheatAction::ForceSight, 0, false},
     {"FORCEEXPLORE", "EXPLORE THE MAP", CheatAction::ForceExplore, 0, false},
     {"SIMONSAYS", "SPAWN KILLER EWOK", CheatAction::Spawn, 1204, false},
@@ -242,6 +254,7 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     resources_ = {};
     researchedTechs_ = {};
     disabledTechs_ = {};
+    disabledUnits_ = {};
     triggers_.clear();
     triggerOrder_.clear();
     triggerRuntime_.clear();
@@ -265,8 +278,12 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     cheatMenuOpen_ = false;
     cheatMenuSelection_ = 0;
     forceBuildCheat_ = false;
+    fullTechTreeCheat_ = false;
+    ambienceTime_ = 2.0f;
+    ambienceSequence_ = 0;
     forceExploreCheat_ = false;
     forceSightCheat_ = false;
+    garrisonCursorActive_ = false;
     statusMessage_.clear();
     statusTime_ = 0;
     objectIndices_.clear();
@@ -284,6 +301,7 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     players_[0].active = true;
     players_[0].human = true;
     players_[0].civilization = 3;
+    players_[0].populationLimit = 200;
     players_[0].diplomacy[2] = 3;
     players_[1].active = true;
     players_[1].civilization = 1;
@@ -340,6 +358,7 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     resources_ = {};
     researchedTechs_ = {};
     disabledTechs_ = {};
+    disabledUnits_ = {};
     for (size_t i = 0; i < players_.size(); i++) {
         const int player = (int)i + 1;
         resources_[(size_t)player][0] = players_[i].resources[0]; // food
@@ -449,8 +468,12 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     cheatMenuOpen_ = false;
     cheatMenuSelection_ = 0;
     forceBuildCheat_ = false;
+    fullTechTreeCheat_ = false;
+    ambienceTime_ = 2.0f;
+    ambienceSequence_ = 0;
     forceExploreCheat_ = false;
     forceSightCheat_ = false;
+    garrisonCursorActive_ = false;
     statusMessage_.clear();
     statusTime_ = 0;
     objects_.reserve(scenario.units.size() * 2);
@@ -998,6 +1021,11 @@ size_t Game::gateCount() const {
         });
 }
 
+size_t Game::garrisonedCount(uint32_t spawnId) const {
+    const Object *building = findObject(spawnId);
+    return building ? garrisonedCount(*building, false) : 0;
+}
+
 bool Game::objectActive(uint32_t spawnId) const {
     const Object *object = findObject(spawnId);
     return object && object->active;
@@ -1063,10 +1091,52 @@ std::vector<int> Game::buildingOptionIds(
     std::vector<int> ids;
     const Object *object = findObject(spawnId);
     if (!object) return ids;
+    for (ActionMenuTab category :
+         {ActionMenuTab::Economy,
+          ActionMenuTab::Military,
+          ActionMenuTab::Defense})
+        for (const dat::Unit *unit :
+             buildingOptions(*object, category))
+            ids.push_back(unit->id);
+    return ids;
+}
+
+std::vector<int> Game::buildingOptionIds(
+    uint32_t spawnId, int interfaceKind) const {
+    std::vector<int> ids;
+    const Object *object = findObject(spawnId);
+    if (!object) return ids;
+    const ActionMenuTab category =
+        interfaceKind == 10
+            ? ActionMenuTab::Military
+            : interfaceKind == 11
+                  ? ActionMenuTab::Defense
+                  : ActionMenuTab::Economy;
     for (const dat::Unit *unit :
-         buildingOptions(*object))
+         buildingOptions(*object, category))
         ids.push_back(unit->id);
     return ids;
+}
+
+std::vector<uint32_t>
+Game::underConstructionObjectIds() const {
+    std::vector<uint32_t> ids;
+    for (const Object &object : objects_)
+        if (object.active && object.underConstruction)
+            ids.push_back(object.spawnId);
+    return ids;
+}
+
+uint32_t Game::constructionBuilderId(
+    uint32_t spawnId) const {
+    const Object *object = findObject(spawnId);
+    return object ? object->constructionBuilderId : 0;
+}
+
+bool Game::objectIsBuilder(uint32_t spawnId) const {
+    const Object *object = findObject(spawnId);
+    return object && object->active &&
+           object->state == State::Build;
 }
 
 size_t Game::selectedMovingObjectCount() const {
@@ -1143,6 +1213,13 @@ float Game::objectHitPoints(uint32_t spawnId) const {
 float Game::objectMaxHitPoints(uint32_t spawnId) const {
     const Object *object = findObject(spawnId);
     return object ? object->maxHitPoints : 0.0f;
+}
+
+int Game::objectUnitId(uint32_t spawnId) const {
+    const Object *object = findObject(spawnId);
+    return object && object->active && object->unit
+               ? object->unit->id
+               : -1;
 }
 
 int Game::objectAttackDamage(uint32_t sourceId,
@@ -1462,6 +1539,50 @@ float Game::collisionRadius(const Object &object) const {
                                     object.unit->collisionSize[1]));
 }
 
+void Game::interactionPoint(const Object &source, const Object &target,
+                            float clearance, float &x, float &y) const {
+    float dx = source.x - target.x;
+    float dy = source.y - target.y;
+    const float length = std::sqrt(dx * dx + dy * dy);
+    if (length > 0.001f) {
+        dx /= length;
+        dy /= length;
+    } else {
+        dx = 1.0f;
+        dy = 0.0f;
+    }
+    const float halfWidth =
+        std::max(0.1f, target.unit->collisionSize[0]) +
+        collisionRadius(source) + clearance;
+    const float halfHeight =
+        std::max(0.1f, target.unit->collisionSize[1]) +
+        collisionRadius(source) + clearance;
+    const float xScale =
+        std::abs(dx) > 0.001f
+            ? halfWidth / std::abs(dx)
+            : std::numeric_limits<float>::max();
+    const float yScale =
+        std::abs(dy) > 0.001f
+            ? halfHeight / std::abs(dy)
+            : std::numeric_limits<float>::max();
+    const float scale = std::min(xScale, yScale);
+    x = target.x + dx * scale;
+    y = target.y + dy * scale;
+}
+
+bool Game::withinInteractionRange(const Object &source,
+                                  const Object &target,
+                                  float clearance) const {
+    const float dx = std::max(
+        0.0f, std::abs(source.x - target.x) -
+                  std::max(0.1f, target.unit->collisionSize[0]));
+    const float dy = std::max(
+        0.0f, std::abs(source.y - target.y) -
+                  std::max(0.1f, target.unit->collisionSize[1]));
+    const float range = collisionRadius(source) + clearance;
+    return dx * dx + dy * dy <= range * range;
+}
+
 bool Game::isInspectable(const Object &object) const {
     return object.active && !object.hidden && object.draw && object.spawnId &&
            object.player > 0 && object.unit->type >= dat::UT_Combatant;
@@ -1673,6 +1794,35 @@ bool Game::handleSelectionPanelClick(float screenX, float screenY,
 
     std::vector<Object *> selected = selectedObjectsInOrder(false);
     if (selected.empty()) return false;
+    const bool canEnterGarrisonMode =
+        std::any_of(
+            selected.begin(), selected.end(),
+            [](const Object *object) {
+                return object && object->active &&
+                       !object->hidden && object->unit &&
+                       object->unit->speed > 0 &&
+                       object->unit->type !=
+                           dat::UT_Building &&
+                       object->unit->flyMode == 0;
+            });
+    const float commandsX =
+        std::max(500.0f, screenW - 300.0f);
+    if (canEnterGarrisonMode &&
+        screenX >= commandsX + 12.0f &&
+        screenX < commandsX + 58.0f &&
+        screenY >= panelY + 18.0f &&
+        screenY < panelY + 64.0f) {
+        garrisonCursorActive_ =
+            !garrisonCursorActive_;
+        actionMenuOpen_ = false;
+        actionMenuObjectId_ = 0;
+        statusMessage_ =
+            garrisonCursorActive_
+                ? "SELECT A BUILDING TO GARRISON"
+                : "GARRISON CANCELLED";
+        statusTime_ = 3.0f;
+        return true;
+    }
     if (selected.size() == 1) return true;
 
     const float localY = screenY - panelY;
@@ -1692,7 +1842,6 @@ bool Game::handleSelectionPanelClick(float screenX, float screenY,
         return true;
     }
 
-    const float commandsX = std::max(500.0f, screenW - 300.0f);
     const int columns = std::max(
         1, (int)((commandsX - kGroupPortraitX - 8.0f) /
                  kGroupPortraitStepX));
@@ -1721,6 +1870,7 @@ bool Game::handleSelectionPanelClick(float screenX, float screenY,
 std::vector<const dat::Unit *> Game::productionOptions(
     const Object &building) const {
     std::vector<const dat::Unit *> options;
+    if (building.gate) return options;
     const int civilization =
         civilizationForPlayer(building.player);
     const auto &civs = assets_.dat().civs;
@@ -1822,6 +1972,7 @@ void Game::refreshAutomaticTechnologies(int player) {
             changed = true;
         }
     }
+    applyUnitUpgrades(player);
 }
 
 void Game::refreshAllAutomaticTechnologies() {
@@ -1832,6 +1983,10 @@ void Game::refreshAllAutomaticTechnologies() {
 bool Game::unitAvailable(int player, int unitId) const {
     if (player < 0 ||
         (size_t)player >= researchedTechs_.size())
+        return false;
+    if (!(fullTechTreeCheat_ &&
+          player == localPlayer_) &&
+        disabledUnits_[(size_t)player].count(unitId))
         return false;
     bool available = false;
     for (int technologyId :
@@ -1862,30 +2017,81 @@ const dat::Unit *Game::effectiveUnitForPlayer(
         return unit;
     int unitId = unit->id;
     const int civilization = civilizationForPlayer(player);
-    for (int technologyId :
-         researchedTechs_[(size_t)player]) {
-        if (technologyId < 0 ||
-            (size_t)technologyId >= assets_.dat().techs.size())
-            continue;
-        const dat::Tech &technology =
-            assets_.dat().techs[(size_t)technologyId];
-        if (technology.effectId < 0 ||
-            (size_t)technology.effectId >=
-                assets_.dat().effects.size())
-            continue;
-        for (const dat::EffectCommand &command :
-             assets_.dat().effects[
-                 (size_t)technology.effectId].commands)
-            if (command.type == 3 &&
-                command.a == unitId)
-                unitId = command.b;
+    std::set<int> visited;
+    while (visited.insert(unitId).second) {
+        int upgradedId = unitId;
+        for (int technologyId :
+             researchedTechs_[(size_t)player]) {
+            if (technologyId < 0 ||
+                (size_t)technologyId >=
+                    assets_.dat().techs.size())
+                continue;
+            const dat::Tech &technology =
+                assets_.dat().techs[(size_t)technologyId];
+            if (technology.effectId < 0 ||
+                (size_t)technology.effectId >=
+                    assets_.dat().effects.size())
+                continue;
+            for (const dat::EffectCommand &command :
+                 assets_.dat().effects[
+                     (size_t)technology.effectId].commands)
+                if (command.type == 3 &&
+                    command.a == unitId) {
+                    upgradedId = command.b;
+                    break;
+                }
+            if (upgradedId != unitId) break;
+        }
+        if (upgradedId == unitId) break;
+        unitId = upgradedId;
     }
     return findUnit(civilization, unitId);
+}
+
+void Game::applyUnitUpgrades(int player) {
+    bool pathingChanged = false;
+    for (Object &object : objects_) {
+        if (!object.active || object.player != player ||
+            !object.unit)
+            continue;
+        const dat::Unit *upgraded =
+            effectiveUnitForPlayer(player, object.unit);
+        if (!upgraded || upgraded == object.unit)
+            continue;
+        const bool building =
+            object.unit->type == dat::UT_Building ||
+            upgraded->type == dat::UT_Building;
+        const float health =
+            object.maxHitPoints > 0.0f
+                ? object.hitPoints / object.maxHitPoints
+                : 1.0f;
+        object.unit = upgraded;
+        object.maxHitPoints =
+            std::max(
+                1, (int)std::lround(
+                       modifiedUnitAttribute(
+                           object, 0,
+                           upgraded->hitPoints)));
+        object.hitPoints = std::max(
+            1.0f, object.maxHitPoints *
+                      std::max(0.0f, std::min(1.0f, health)));
+        if (building) {
+            object.gate = false;
+            object.gateClosedUnit = nullptr;
+            object.gateOpenUnit = nullptr;
+            object.gateEndUnit = nullptr;
+            configureGate(object);
+            pathingChanged = true;
+        }
+    }
+    if (pathingChanged)
+        rebuildAdjacency();
 }
 
 std::vector<int> Game::researchOptions(
     const Object &building) const {
     std::vector<int> options;
+    if (building.gate) return options;
     const int player = building.player;
     const int civilization = civilizationForPlayer(player);
     for (size_t id = 0; id < assets_.dat().techs.size();
@@ -1930,7 +2136,8 @@ std::vector<int> Game::researchOptions(
 }
 
 std::vector<const dat::Unit *> Game::buildingOptions(
-    const Object &worker) const {
+    const Object &worker,
+    ActionMenuTab category) const {
     std::vector<const dat::Unit *> options;
     const int civilization =
         civilizationForPlayer(worker.player);
@@ -1943,6 +2150,14 @@ std::vector<const dat::Unit *> Game::buildingOptions(
             unit.hideInEditor || unit.disabled ||
             unit.heroMode || unit.buttonId == 0 ||
             !unitAvailable(worker.player, unit.id))
+            continue;
+        const ActionMenuTab unitCategory =
+            unit.interfaceKind == 10
+                ? ActionMenuTab::Military
+                : unit.interfaceKind == 11
+                      ? ActionMenuTab::Defense
+                      : ActionMenuTab::Economy;
+        if (unitCategory != category)
             continue;
         options.push_back(&unit);
     }
@@ -1965,11 +2180,324 @@ std::string Game::unitDisplayName(
         assets_.localizedString(unit.languageDllName));
 }
 
+std::string Game::ownershipLabel(int player) const {
+    std::string relationship;
+    if (player == localPlayer_) {
+        relationship = "PLAYER";
+    } else {
+        uint32_t stance = UINT32_MAX;
+        if (localPlayer_ > 0 &&
+            (size_t)localPlayer_ <= players_.size() &&
+            player >= 0 && player < 16)
+            stance =
+                players_[(size_t)localPlayer_ - 1]
+                    .diplomacy[(size_t)player];
+        relationship =
+            stance == 0
+                ? "ALLY"
+                : stance == 3 ? "ENEMY" : "NEUTRAL";
+    }
+    if (player > 0 &&
+        (size_t)player <= players_.size() &&
+        !players_[(size_t)player - 1].name.empty())
+        relationship += ": " +
+                        players_[(size_t)player - 1]
+                            .name;
+    return relationship;
+}
+
 bool Game::isWorker(const Object &object) const {
     return object.active && object.unit &&
            object.unit->type >= dat::UT_Bird &&
            object.unit->cls == 58 &&
            object.player == localPlayer_;
+}
+
+bool Game::isPowerCore(const Object &object) const {
+    return object.unit &&
+           (object.unit->name2 == "BLDG-POWERCORE" ||
+            object.unit->name.rfind(
+                "BLDG-TRAINFOOT", 0) == 0);
+}
+
+bool Game::isShieldGenerator(
+    const Object &object) const {
+    return object.unit &&
+           (object.unit->name2 == "BLDG-SHLDGEN" ||
+            object.unit->name.rfind(
+                "BLDG-SHLD", 0) == 0);
+}
+
+bool Game::graphicHasPowerIndicator(
+    int graphicId, int depth) const {
+    if (depth >= 4) return false;
+    const dat::Graphic *graphic =
+        assets_.dat().graphic(graphicId);
+    if (!graphic) return false;
+    if ((graphic->sequenceType & 0x04) != 0 &&
+        graphic->frameCount > 1)
+        return true;
+    for (const dat::GraphicDelta &delta :
+         graphic->deltas)
+        if (delta.graphicId >= 0 &&
+            graphicHasPowerIndicator(
+                delta.graphicId, depth + 1))
+            return true;
+    return false;
+}
+
+bool Game::requiresPower(
+    const Object &building) const {
+    return isShieldGenerator(building) ||
+           (building.unit &&
+            graphicHasPowerIndicator(
+                building.unit->standingGraphic[0]));
+}
+
+bool Game::isPowered(const Object &building) const {
+    if (!building.active || !building.unit ||
+        building.unit->type != dat::UT_Building)
+        return false;
+    if (isPowerCore(building))
+        return !building.underConstruction;
+    if (!requiresPower(building))
+        return !building.underConstruction;
+    for (const Object &source : objects_) {
+        if (!source.active || source.hidden ||
+            source.underConstruction ||
+            source.player != building.player ||
+            !isPowerCore(source))
+            continue;
+        const float dx = source.x - building.x;
+        const float dy = source.y - building.y;
+        const float range =
+            9.0f + collisionRadius(source) +
+            collisionRadius(building);
+        if (dx * dx + dy * dy <= range * range)
+            return true;
+    }
+    return false;
+}
+
+bool Game::isShielded(const Object &building) const {
+    if (!building.active || !building.unit ||
+        building.unit->type != dat::UT_Building)
+        return false;
+    for (const Object &source : objects_) {
+        if (!source.active || source.hidden ||
+            source.underConstruction ||
+            source.player != building.player ||
+            !isShieldGenerator(source) ||
+            !isPowered(source))
+            continue;
+        const float dx = source.x - building.x;
+        const float dy = source.y - building.y;
+        const float range =
+            9.0f + collisionRadius(building);
+        if (dx * dx + dy * dy <= range * range)
+            return true;
+    }
+    return false;
+}
+
+const dat::Unit *Game::builderUnit(
+    const Object &worker) const {
+    if (!worker.unit) return nullptr;
+    std::string name = worker.unit->name;
+    if (name.size() >= 2 &&
+        name.back() == '1' &&
+        (name[name.size() - 2] == 'A' ||
+         name[name.size() - 2] == 'B')) {
+        name.back() = '2';
+        if (const dat::Unit *builder =
+                findUnit(
+                    civilizationForPlayer(worker.player),
+                    name))
+            return builder;
+    }
+    return findUnit(
+        civilizationForPlayer(worker.player), 118);
+}
+
+bool Game::canGarrison(const Object &unit,
+                       const Object &building) const {
+    return unit.active && !unit.hidden && unit.unit &&
+           building.active && building.unit &&
+           !building.underConstruction &&
+           unit.player == building.player &&
+           unit.spawnId != building.spawnId &&
+           unit.unit->speed > 0 &&
+           unit.unit->type != dat::UT_Building &&
+           unit.unit->flyMode == 0 &&
+           building.unit->type == dat::UT_Building &&
+           building.unit->garrisonCapacity > 0;
+}
+
+size_t Game::garrisonedCount(
+    const Object &building, bool includeIncoming) const {
+    size_t count = 0;
+    for (const Object &object : objects_)
+        if (object.active &&
+            (object.garrisonedInId ==
+                 (int32_t)building.spawnId ||
+             (includeIncoming &&
+              object.garrisonTargetId ==
+                  building.spawnId)))
+            count++;
+    return count;
+}
+
+bool Game::issueGarrisonCommand(Object &building) {
+    size_t reserved =
+        garrisonedCount(building, true);
+    const size_t capacity =
+        building.unit->garrisonCapacity;
+    size_t assigned = 0;
+    for (Object *unit : selectedObjectsInOrder(false)) {
+        if (!unit || !canGarrison(*unit, building) ||
+            reserved >= capacity)
+            continue;
+        if (isWorker(*unit))
+            clearConstructionAssignment(*unit);
+        unit->attackTargetId = 0;
+        unit->attackAutomatic = false;
+        unit->garrisonTargetId = building.spawnId;
+        float targetX = 0.0f;
+        float targetY = 0.0f;
+        interactionPoint(*unit, building, 0.35f,
+                         targetX, targetY);
+        if (!issueMove(*unit, targetX, targetY)) {
+            unit->garrisonTargetId = 0;
+            continue;
+        }
+        unit->wander = false;
+        reserved++;
+        assigned++;
+    }
+    if (assigned > 0) {
+        playUnitAcknowledgement(
+            *selectedObjectsInOrder(false).front(), false);
+        statusMessage_ = "GARRISONING " +
+                         std::to_string(assigned) +
+                         (assigned == 1 ? " UNIT" : " UNITS");
+        statusTime_ = 3.0f;
+        return true;
+    }
+    statusMessage_ =
+        reserved >= capacity
+            ? "GARRISON IS FULL"
+            : "NO ELIGIBLE UNITS SELECTED";
+    statusTime_ = 3.0f;
+    return false;
+}
+
+void Game::updateGarrisoning() {
+    bool changed = false;
+    for (Object &unit : objects_) {
+        if (!unit.active || unit.hidden ||
+            unit.garrisonTargetId == 0)
+            continue;
+        Object *building =
+            findObject(unit.garrisonTargetId);
+        if (!building ||
+            !canGarrison(unit, *building)) {
+            unit.garrisonTargetId = 0;
+            continue;
+        }
+        if (garrisonedCount(*building, false) >=
+            building->unit->garrisonCapacity) {
+            unit.garrisonTargetId = 0;
+            unit.moveGoalActive = false;
+            unit.state = State::Idle;
+            continue;
+        }
+        if (!withinInteractionRange(
+                unit, *building, 0.75f))
+            continue;
+        unit.hidden = true;
+        unit.selected = false;
+        unit.garrisonedInId =
+            (int32_t)building->spawnId;
+        unit.garrisonTargetId = 0;
+        unit.moveGoalActive = false;
+        unit.moveGroupId = 0;
+        unit.path.clear();
+        unit.pathIndex = 0;
+        unit.attackTargetId = 0;
+        unit.state = State::Idle;
+        unit.x = unit.homeX = building->x;
+        unit.y = unit.homeY = building->y;
+        changed = true;
+        playWorldUnitSound(
+            *building, assets_.dat().garrisonSound);
+    }
+    if (changed) {
+        syncSelectionOrder();
+        rebuildMobileOccupancy();
+    }
+}
+
+size_t Game::ejectGarrisoned(Object &building) {
+    size_t ejected = 0;
+    for (Object &unit : objects_) {
+        if (!unit.active ||
+            unit.garrisonedInId !=
+                (int32_t)building.spawnId)
+            continue;
+        const float distance =
+            collisionRadius(building) +
+            collisionRadius(unit) + 0.55f;
+        bool placed = false;
+        for (int ring = 0; ring < 3 && !placed; ++ring)
+            for (int slot = 0; slot < 16; ++slot) {
+                const float angle =
+                    (slot + ejected * 5) *
+                    (2.0f * kPi / 16.0f);
+                const float radius =
+                    distance + ring * 0.75f;
+                unit.x =
+                    building.x + std::cos(angle) * radius;
+                unit.y =
+                    building.y + std::sin(angle) * radius;
+                unit.hidden = false;
+                if (positionPassable(
+                        unit, unit.x, unit.y, true))
+                    placed = true;
+                else
+                    unit.hidden = true;
+            }
+        if (!placed) continue;
+        unit.garrisonedInId = -1;
+        unit.homeX = unit.targetX = unit.moveAnchorX =
+            unit.x;
+        unit.homeY = unit.targetY = unit.moveAnchorY =
+            unit.y;
+        unit.state = State::Idle;
+        unit.animTime = 0;
+        unit.wander = false;
+        ejected++;
+    }
+    if (ejected > 0) {
+        rebuildMobileOccupancy();
+        playWorldUnitSound(
+            building, assets_.dat().ungarrisonSound);
+    }
+    return ejected;
+}
+
+void Game::setGateLocked(Object &gate, bool locked) {
+    if (!gate.gate) return;
+    gate.locked = locked;
+    if (locked && gate.gateClosedUnit &&
+        gate.gateOpenAmount <= 0.01f)
+        gate.unit = gate.gateClosedUnit;
+    rebuildAdjacency();
+    statusMessage_ =
+        locked ? "GATE LOCKED" : "GATE UNLOCKED";
+    statusTime_ = 3.0f;
+    if (gate.unit->transformSound >= 0)
+        playWorldUnitSound(
+            gate, gate.unit->transformSound);
 }
 
 bool Game::openSelectedActionMenu() {
@@ -1987,29 +2515,74 @@ bool Game::openSelectedActionMenu() {
         return true;
     }
     if (isWorker(*subject)) {
-        actionMenuTab_ = ActionMenuTab::Buildings;
-        if (buildingOptions(*subject).empty()) {
+        actionMenuTab_ = ActionMenuTab::Economy;
+        if (buildingOptionIds(subject->spawnId).empty()) {
             statusMessage_ = "NO BUILDINGS AVAILABLE";
             statusTime_ = 3.0f;
             return true;
         }
+    } else if (subject->gate) {
+        actionMenuTab_ = ActionMenuTab::Commands;
     } else if (subject->unit->type == dat::UT_Building) {
         actionMenuTab_ =
             productionOptions(*subject).empty()
-                ? ActionMenuTab::Research
+                ? (researchOptions(*subject).empty()
+                       ? ActionMenuTab::Commands
+                       : ActionMenuTab::Research)
                 : ActionMenuTab::Units;
     } else {
         return false;
     }
     if (productionOptions(*subject).empty() &&
         researchOptions(*subject).empty() &&
-        buildingOptions(*subject).empty()) {
+        !subject->gate &&
+        garrisonedCount(*subject, false) == 0 &&
+        (!isWorker(*subject) ||
+         buildingOptionIds(subject->spawnId).empty())) {
         statusMessage_ = "NO PRODUCTION AVAILABLE";
         statusTime_ = 3.0f;
         return true;
     }
     actionMenuOpen_ = true;
     actionMenuObjectId_ = subject->spawnId;
+    return true;
+}
+
+bool Game::cancelProductionItem(Object &building,
+                                size_t index) {
+    if (index >= building.productionQueue.size())
+        return false;
+    const ProductionItem item =
+        building.productionQueue[index];
+    if (item.unit) {
+        for (const dat::ResourceCost &cost :
+             item.unit->costs)
+            if (cost.flag && cost.type >= 0 &&
+                cost.amount > 0)
+                resources_[(size_t)building.player]
+                          [cost.type] += cost.amount;
+    } else if (item.technologyId >= 0 &&
+               (size_t)item.technologyId <
+                   assets_.dat().techs.size()) {
+        for (const dat::Tech::Cost &cost :
+             assets_.dat()
+                 .techs[(size_t)item.technologyId]
+                 .costs)
+            if (cost.flag && cost.type >= 0 &&
+                cost.amount > 0)
+                resources_[(size_t)building.player]
+                          [cost.type] += cost.amount;
+    }
+    building.productionQueue.erase(
+        building.productionQueue.begin() +
+        (ptrdiff_t)index);
+    if (index == 0)
+        building.productionRemaining =
+            building.productionQueue.empty()
+                ? 0.0f
+                : building.productionQueue.front().duration;
+    statusMessage_ = "QUEUE ITEM CANCELLED";
+    statusTime_ = 2.0f;
     return true;
 }
 
@@ -2028,12 +2601,67 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
                             kActionMenuX + kActionMenuWidth) ||
         screenY < 28.0f)
         return true;
-    if (!isWorker(*subject) && screenY < kActionMenuY) {
-        actionMenuTab_ =
-            screenX < kActionMenuX +
-                          kActionMenuWidth * 0.5f
-                ? ActionMenuTab::Units
-                : ActionMenuTab::Research;
+    if (screenY < kActionMenuY) {
+        if (isWorker(*subject)) {
+            const int tab = std::max(
+                0, std::min(
+                       2, (int)((screenX - kActionMenuX) /
+                                (kActionMenuWidth / 3.0f))));
+            actionMenuTab_ =
+                tab == 0
+                    ? ActionMenuTab::Economy
+                    : tab == 1
+                          ? ActionMenuTab::Military
+                          : ActionMenuTab::Defense;
+        } else {
+            std::vector<ActionMenuTab> tabs;
+            if (!productionOptions(*subject).empty())
+                tabs.push_back(ActionMenuTab::Units);
+            if (!researchOptions(*subject).empty())
+                tabs.push_back(ActionMenuTab::Research);
+            if (subject->gate ||
+                subject->unit->garrisonCapacity > 0)
+                tabs.push_back(ActionMenuTab::Commands);
+            if (tabs.empty()) return true;
+            const int tab = std::max(
+                0, std::min(
+                       (int)tabs.size() - 1,
+                       (int)((screenX - kActionMenuX) /
+                             (kActionMenuWidth /
+                              tabs.size()))));
+            actionMenuTab_ = tabs[(size_t)tab];
+        }
+        return true;
+    }
+    size_t optionCount = 0;
+    if (isWorker(*subject)) {
+        optionCount =
+            buildingOptions(*subject, actionMenuTab_).size();
+    } else if (actionMenuTab_ ==
+               ActionMenuTab::Commands) {
+        optionCount = 1;
+    } else if (actionMenuTab_ ==
+               ActionMenuTab::Units) {
+        optionCount = productionOptions(*subject).size();
+    } else {
+        optionCount = researchOptions(*subject).size();
+    }
+    const size_t visibleRows =
+        std::min(optionCount, kActionMenuMaxRows);
+    const float queueY =
+        kActionMenuY +
+        visibleRows * kActionMenuRowHeight;
+    if (!subject->productionQueue.empty() &&
+        screenY >= queueY &&
+        screenY < queueY + 50.0f) {
+        const float slotWidth =
+            (kActionMenuWidth - 12.0f) / 5.0f;
+        const int index =
+            (int)((screenX - kActionMenuX - 6.0f) /
+                  slotWidth);
+        if (index >= 0)
+            cancelProductionItem(
+                *subject, (size_t)index);
         return true;
     }
     const int row =
@@ -2045,10 +2673,31 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
 
     if (isWorker(*subject)) {
         const std::vector<const dat::Unit *> options =
-            buildingOptions(*subject);
+            buildingOptions(*subject, actionMenuTab_);
         if ((size_t)row >= options.size()) return true;
         return beginBuildingPlacement(
             *subject, *options[(size_t)row]);
+    }
+
+    if (actionMenuTab_ == ActionMenuTab::Commands) {
+        if (row != 0) return true;
+        if (subject->gate) {
+            setGateLocked(*subject, !subject->locked);
+        } else {
+            const size_t ejected =
+                ejectGarrisoned(*subject);
+            statusMessage_ =
+                ejected > 0
+                    ? "EJECTED " +
+                          std::to_string(ejected) +
+                          (ejected == 1 ? " UNIT"
+                                        : " UNITS")
+                    : "NO UNITS GARRISONED";
+            statusTime_ = 3.0f;
+        }
+        actionMenuOpen_ = false;
+        actionMenuObjectId_ = 0;
+        return true;
     }
 
     if (subject->productionQueue.size() >= 5) {
@@ -2131,6 +2780,54 @@ bool Game::beginBuildingPlacement(
     return true;
 }
 
+void Game::clearConstructionAssignment(Object &worker) {
+    if (worker.constructionTargetId != 0) {
+        Object *building =
+            findObject(worker.constructionTargetId);
+        if (building &&
+            building->constructionBuilderId ==
+                worker.spawnId)
+            building->constructionBuilderId = 0;
+    }
+    worker.constructionTargetId = 0;
+    if (worker.state == State::Build) {
+        worker.state = State::Idle;
+        worker.animTime = 0.0f;
+    }
+}
+
+bool Game::assignBuilder(Object &worker,
+                         Object &building) {
+    if (!isWorker(worker) ||
+        !building.active ||
+        !building.underConstruction ||
+        building.player != worker.player)
+        return false;
+    clearConstructionAssignment(worker);
+    if (building.constructionBuilderId != 0) {
+        Object *previous =
+            findObject(building.constructionBuilderId);
+        if (previous &&
+            previous->constructionTargetId ==
+                building.spawnId) {
+            previous->constructionTargetId = 0;
+            if (previous->state == State::Build) {
+                previous->state = State::Idle;
+                previous->animTime = 0.0f;
+            }
+        }
+    }
+    float targetX = 0.0f;
+    float targetY = 0.0f;
+    interactionPoint(worker, building, 0.35f,
+                     targetX, targetY);
+    if (!issueMove(worker, targetX, targetY))
+        return false;
+    building.constructionBuilderId = worker.spawnId;
+    worker.constructionTargetId = building.spawnId;
+    return true;
+}
+
 bool Game::placeBuilding(float screenX, float screenY,
                          int screenW, int screenH) {
     if (!placementUnit_) return false;
@@ -2185,21 +2882,11 @@ bool Game::placeBuilding(float screenX, float screenY,
     building->constructionRemaining =
         forceBuildCheat_ ? 0.0f
                          : building->constructionTotal;
-    building->constructionBuilderId = builderId;
     building->hitPoints = 1.0f;
 
     worker = findObject(builderId);
-    if (worker) {
-        const float angle =
-            std::atan2(worker->y - worldY,
-                       worker->x - worldX);
-        const float distance =
-            collisionRadius(*building) +
-            collisionRadius(*worker) + 0.35f;
-        issueMove(*worker,
-                  worldX + std::cos(angle) * distance,
-                  worldY + std::sin(angle) * distance);
-    }
+    if (worker)
+        assignBuilder(*worker, *building);
     placementUnit_ = nullptr;
     placementBuilderId_ = 0;
     rebuildAdjacency();
@@ -2228,13 +2915,29 @@ void Game::updateConstruction(float dt) {
             building.player == localPlayer_;
         bool working = false;
         if (builder && builder->active) {
-            const float dx = builder->x - building.x;
-            const float dy = builder->y - building.y;
-            const float range =
-                collisionRadius(*builder) +
-                collisionRadius(building) + 0.75f;
             working = working ||
-                      dx * dx + dy * dy <= range * range;
+                      withinInteractionRange(
+                          *builder, building, 0.75f);
+            if (working &&
+                builder->constructionTargetId ==
+                    building.spawnId) {
+                if (builder->state != State::Build)
+                    builder->animTime = 0.0f;
+                if (builder->state != State::Build &&
+                    building.unit->constructionSound >= 0)
+                    playWorldUnitSound(
+                        building,
+                        building.unit->constructionSound);
+                builder->state = State::Build;
+                builder->facing =
+                    std::atan2(building.y - builder->y,
+                               building.x - builder->x);
+                builder->moveGoalActive = false;
+                builder->path.clear();
+            } else if (builder->state == State::Build) {
+                builder->state = State::Idle;
+                builder->animTime = 0.0f;
+            }
         }
         if (forceComplete)
             building.constructionRemaining = 0.0f;
@@ -2255,6 +2958,13 @@ void Game::updateConstruction(float dt) {
             continue;
         building.underConstruction = false;
         building.hitPoints = building.maxHitPoints;
+        if (builder &&
+            builder->constructionTargetId ==
+                building.spawnId) {
+            builder->constructionTargetId = 0;
+            builder->state = State::Idle;
+            builder->animTime = 0.0f;
+        }
         building.constructionBuilderId = 0;
         completed.push_back(
             {building.unit, building.player, building.x,
@@ -2287,6 +2997,27 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
     std::vector<Object *> selected = selectedObjectsInOrder(true);
     if (selected.empty()) return;
 
+    Object *friendly =
+        objectAtScreen(screenX, screenY, screenW, screenH);
+    if (friendly && friendly->underConstruction) {
+        Object *builder = nullptr;
+        for (Object *object : selected)
+            if (isWorker(*object) &&
+                object->player == friendly->player) {
+                builder = object;
+                break;
+            }
+        if (builder && assignBuilder(*builder, *friendly)) {
+            playUnitAcknowledgement(*builder, false);
+            commandMarkerX_ = friendly->x;
+            commandMarkerY_ = friendly->y;
+            commandMarkerTime_ = 0.65f;
+            statusMessage_ = "CONSTRUCTION RESUMED";
+            statusTime_ = 2.0f;
+            return;
+        }
+    }
+
     Object *enemy = enemyAtScreen(screenX, screenY, screenW, screenH);
     if (enemy) {
         struct ReservedAttackSlot {
@@ -2317,6 +3048,8 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
         std::vector<ReservedAttackSlot> reserved;
         reserved.reserve(attackers.size());
         for (Object *source : attackers) {
+            if (isWorker(*source))
+                clearConstructionAssignment(*source);
             const float sourceRadius = collisionRadius(*source);
             const float contact =
                 sourceRadius + collisionRadius(*enemy) + 0.08f;
@@ -2436,6 +3169,8 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
     float targetX, targetY;
     screenToWorld(screenX, screenY, screenW, screenH, targetX, targetY);
     for (Object *object : selected) {
+        if (isWorker(*object))
+            clearConstructionAssignment(*object);
         object->attackTargetId = 0;
         object->attackAutomatic = false;
     }
@@ -2468,6 +3203,92 @@ void Game::playWorldUnitSound(const Object &object, int soundId) {
         !worldSoundAudible(object.x, object.y))
         return;
     playUnitSound_(soundId, civilizationForPlayer(object.player));
+}
+
+void Game::updateAmbience(float dt, int screenW, int screenH) {
+    if (!playAmbientSound_ || terrain_.empty() ||
+        mapSize_ <= 0)
+        return;
+    ambienceTime_ -= dt;
+    if (ambienceTime_ > 0) return;
+
+    float worldX = 0, worldY = 0;
+    screenToWorld(screenW * 0.5f, screenH * 0.5f,
+                  screenW, screenH, worldX, worldY);
+    const int x = std::max(
+        0, std::min(mapSize_ - 1, (int)std::floor(worldX)));
+    const int y = std::max(
+        0, std::min(mapSize_ - 1, (int)std::floor(worldY)));
+    const int terrainId = terrainAt(x, y);
+    const auto &terrains = assets_.dat().terrainBlock.terrains;
+    if (terrainId < 0 ||
+        (size_t)terrainId >= terrains.size()) {
+        ambienceTime_ = 12.0f;
+        return;
+    }
+
+    const dat::Terrain &terrain = terrains[(size_t)terrainId];
+    std::string name = terrain.name + " " + terrain.name2;
+    std::transform(
+        name.begin(), name.end(), name.begin(),
+        [](unsigned char c) { return (char)std::tolower(c); });
+    const auto contains = [&](const char *text) {
+        return name.find(text) != std::string::npos;
+    };
+    const char *family = nullptr;
+    int variations = 0;
+    if (contains("volcan") || contains("lava")) {
+        family = "EF-TERR-VOLCANIC";
+        variations = 7;
+    } else if (contains("sludge")) {
+        family = "EF-TERR-SLUDGE";
+        variations = 3;
+    } else if (contains("swamp")) {
+        family = "EF-TERR-SWAMP";
+        variations = 4;
+    } else if (contains("snow")) {
+        family = "EF-TERR-SNOW";
+        variations = 7;
+    } else if (contains("ice")) {
+        family = "EF-TERR-ICE";
+        variations = 3;
+    } else if (contains("jungle")) {
+        family = "EF-TERR-JUNGLE";
+        variations = 5;
+    } else if (contains("forest") ||
+               contains("tree")) {
+        family = "EF-TERR-FOREST";
+        variations = 3;
+    } else if (contains("desert") ||
+               contains("sand")) {
+        family = "EF-TERR-DESERT";
+        variations = 5;
+    } else if (contains("shore") ||
+               contains("water") ||
+               contains("ocean")) {
+        family = "EF-TERR-SHORE";
+        variations = 3;
+    } else if (contains("metal") ||
+               contains("industrial")) {
+        family = "EF-TERR-METAL";
+        variations = 10;
+    }
+    if (!family) {
+        ambienceTime_ = 10.0f;
+        return;
+    }
+
+    const int variation =
+        1 + (int)((ambienceSequence_++ +
+                   (uint32_t)terrainId * 3u) %
+                  (uint32_t)variations);
+    std::ostringstream file;
+    file << family << "-" << std::setw(2)
+         << std::setfill('0') << variation;
+    const float duration = playAmbientSound_(file.str());
+    ambienceTime_ =
+        std::max(8.0f, duration + 4.0f +
+                           (ambienceSequence_ % 5));
 }
 
 void Game::defeatCheatPlayer(int player) {
@@ -2559,6 +3380,14 @@ void Game::activateCheat(size_t index, int screenW, int screenH) {
         }
         statusMessage_ = forceBuildCheat_
             ? "FORCEBUILD ENABLED" : "FORCEBUILD DISABLED";
+        customStatus = true;
+        break;
+    case CheatAction::ForceTech:
+        fullTechTreeCheat_ = true;
+        disabledTechs_[(size_t)localPlayer_].clear();
+        disabledUnits_[(size_t)localPlayer_].clear();
+        refreshAutomaticTechnologies(localPlayer_);
+        statusMessage_ = "FULL CIVILIZATION TECH TREE ENABLED";
         customStatus = true;
         break;
     case CheatAction::ForceSight:
@@ -4063,12 +4892,36 @@ void Game::executeEffect(const ScenarioEffect &effect) {
         instructionTime_ = 0;
         break;
     case 32:
-        if (sourcePlayer >= 0 && (size_t)sourcePlayer < disabledTechs_.size())
+        if (sourcePlayer >= 0 &&
+            (size_t)sourcePlayer <
+                disabledTechs_.size()) {
             disabledTechs_[(size_t)sourcePlayer].erase(technology);
+            refreshAutomaticTechnologies(sourcePlayer);
+        }
         break;
     case 33:
-        if (sourcePlayer >= 0 && (size_t)sourcePlayer < disabledTechs_.size())
+        if (sourcePlayer >= 0 &&
+            (size_t)sourcePlayer <
+                disabledTechs_.size() &&
+            !(fullTechTreeCheat_ &&
+              sourcePlayer == localPlayer_))
             disabledTechs_[(size_t)sourcePlayer].insert(technology);
+        break;
+    case 34:
+        if (sourcePlayer >= 0 &&
+            (size_t)sourcePlayer <
+                disabledUnits_.size())
+            disabledUnits_[(size_t)sourcePlayer].erase(
+                technology);
+        break;
+    case 35:
+        if (sourcePlayer >= 0 &&
+            (size_t)sourcePlayer <
+                disabledUnits_.size() &&
+            !(fullTechTreeCheat_ &&
+              sourcePlayer == localPlayer_))
+            disabledUnits_[(size_t)sourcePlayer].insert(
+                technology);
         break;
     case 36:
         for (Object *object : effectTargets(effect)) object->flashTime = 7.0f;
@@ -4161,6 +5014,25 @@ int Game::playerColorBase(int player) const {
 
 void Game::lookAt(float tx, float ty) { toScreen(tx, ty, camX_, camY_); }
 
+bool Game::lookAtObject(uint32_t spawnId) {
+    const Object *object = findObject(spawnId);
+    if (!object || !object->active) return false;
+    lookAt(object->x, object->y);
+    return true;
+}
+
+bool Game::selectObjectForTesting(uint32_t spawnId) {
+    Object *target = findObject(spawnId);
+    if (!target || !isInspectable(*target))
+        return false;
+    for (Object &object : objects_)
+        object.selected = false;
+    target->selected = true;
+    selectionOrder_.clear();
+    selectionOrder_.push_back(spawnId);
+    return true;
+}
+
 void Game::update(float dt, const InputState &in) {
     statusTime_ = std::max(0.0f, statusTime_ - dt);
     if (statusTime_ <= 0) statusMessage_.clear();
@@ -4200,11 +5072,48 @@ void Game::update(float dt, const InputState &in) {
     if (actionMenuOpen_ &&
         (in.actionTabLeft || in.actionTabRight)) {
         Object *subject = findObject(actionMenuObjectId_);
-        if (subject && !isWorker(*subject))
+        if (subject && isWorker(*subject)) {
+            const int direction =
+                in.actionTabRight ? 1 : -1;
+            int category =
+                actionMenuTab_ == ActionMenuTab::Economy
+                    ? 0
+                    : actionMenuTab_ ==
+                              ActionMenuTab::Military
+                          ? 1
+                          : 2;
+            category = (category + direction + 3) % 3;
             actionMenuTab_ =
-                actionMenuTab_ == ActionMenuTab::Units
-                    ? ActionMenuTab::Research
-                    : ActionMenuTab::Units;
+                category == 0
+                    ? ActionMenuTab::Economy
+                    : category == 1
+                          ? ActionMenuTab::Military
+                          : ActionMenuTab::Defense;
+        } else if (subject) {
+            std::vector<ActionMenuTab> tabs;
+            if (!productionOptions(*subject).empty())
+                tabs.push_back(ActionMenuTab::Units);
+            if (!researchOptions(*subject).empty())
+                tabs.push_back(ActionMenuTab::Research);
+            if (subject->gate ||
+                subject->unit->garrisonCapacity > 0)
+                tabs.push_back(ActionMenuTab::Commands);
+            if (!tabs.empty()) {
+                auto current = std::find(
+                    tabs.begin(), tabs.end(),
+                    actionMenuTab_);
+                int index =
+                    current == tabs.end()
+                        ? 0
+                        : (int)(current - tabs.begin());
+                index =
+                    (index +
+                     (in.actionTabRight ? 1 : -1) +
+                     (int)tabs.size()) %
+                    (int)tabs.size();
+                actionMenuTab_ = tabs[(size_t)index];
+            }
+        }
     }
 
     float scrollX =
@@ -4232,6 +5141,7 @@ void Game::update(float dt, const InputState &in) {
     float maxY = 2.0f * mapSize_ * kTileHalfH;
     camX_ = std::max(minX, std::min(maxX, camX_));
     camY_ = std::max(0.0f, std::min(maxY, camY_));
+    updateAmbience(dt, in.screenW, in.screenH);
 
     if (!consumeWorldInput && !actionMenuOpen_) {
         if (in.zoomStep > 0)
@@ -4257,8 +5167,11 @@ void Game::update(float dt, const InputState &in) {
             continue;
         if (forceBuildCheat_ && building.player == localPlayer_)
             building.productionRemaining = 0.0f;
-        else
-            building.productionRemaining -= dt;
+        else {
+            const float rate =
+                isPowered(building) ? 1.0f : 0.25f;
+            building.productionRemaining -= dt * rate;
+        }
         if (building.productionRemaining > 0) continue;
         const ProductionItem item =
             building.productionQueue.front();
@@ -4312,6 +5225,9 @@ void Game::update(float dt, const InputState &in) {
                     continue;
                 productionSpawns.push_back(
                     {unit, building.player, x, y});
+                if (unit->trainSound >= 0)
+                    playWorldUnitSound(
+                        building, unit->trainSound);
                 foundExit = true;
                 break;
             }
@@ -4419,7 +5335,39 @@ void Game::update(float dt, const InputState &in) {
                       in.screenW, in.screenH);
         placementHandled = true;
     }
+    bool garrisonHandled = false;
     if (!consumeWorldInput && !placementHandled &&
+        garrisonCursorActive_ && in.commandPressed) {
+        garrisonCursorActive_ = false;
+        statusMessage_ = "GARRISON CANCELLED";
+        statusTime_ = 2.0f;
+        garrisonHandled = true;
+    } else if (!consumeWorldInput && !placementHandled &&
+               garrisonCursorActive_ &&
+               (in.selectPressed || in.pointerTap) &&
+               in.pointerY <
+                   in.screenH - kSelectionPanelHeight) {
+        Object *building =
+            objectAtScreen(in.pointerX, in.pointerY,
+                           in.screenW, in.screenH);
+        if (!building ||
+            building->player != localPlayer_ ||
+            building->unit->type != dat::UT_Building ||
+            building->unit->garrisonCapacity == 0 ||
+            building->underConstruction) {
+            statusMessage_ =
+                "CANNOT GARRISON IN THAT BUILDING";
+            statusTime_ = 3.0f;
+        } else if (issueGarrisonCommand(*building)) {
+            garrisonCursorActive_ = false;
+            commandMarkerX_ = building->x;
+            commandMarkerY_ = building->y;
+            commandMarkerTime_ = 0.65f;
+        }
+        garrisonHandled = true;
+    }
+    if (!consumeWorldInput && !placementHandled &&
+        !garrisonHandled &&
         in.selectPressed) {
         if (actionMenuOpen_)
             handleActionMenuClick(
@@ -4431,6 +5379,7 @@ void Game::update(float dt, const InputState &in) {
                            in.screenH);
     }
     if (!consumeWorldInput && !placementHandled &&
+        !garrisonHandled &&
         in.cycleAttackMode) {
         if (actionMenuOpen_) {
             actionMenuOpen_ = false;
@@ -4440,6 +5389,7 @@ void Game::update(float dt, const InputState &in) {
         }
     }
     if (!consumeWorldInput && !placementHandled &&
+        !garrisonHandled &&
         in.commandPressed) {
         if (actionMenuOpen_) {
             actionMenuOpen_ = false;
@@ -4450,6 +5400,7 @@ void Game::update(float dt, const InputState &in) {
         }
     }
     if (!consumeWorldInput && !placementHandled &&
+        !garrisonHandled &&
         in.pointerTap) {
         if (actionMenuOpen_) {
             handleActionMenuClick(
@@ -4459,8 +5410,27 @@ void Game::update(float dt, const InputState &in) {
         } else if (hasSelectedAttacker() &&
             enemyAtScreen(in.pointerX, in.pointerY, in.screenW, in.screenH))
             commandAtScreen(in.pointerX, in.pointerY, in.screenW, in.screenH);
-        else if (objectAtScreen(in.pointerX, in.pointerY, in.screenW, in.screenH))
-            selectAtScreen(in.pointerX, in.pointerY, in.screenW, in.screenH);
+        else if (Object *target =
+                     objectAtScreen(
+                         in.pointerX, in.pointerY,
+                         in.screenW, in.screenH)) {
+            bool selectedWorker = false;
+            for (const Object &object : objects_)
+                if (object.selected &&
+                    isWorker(object)) {
+                    selectedWorker = true;
+                    break;
+                }
+            if (target->underConstruction &&
+                selectedWorker)
+                commandAtScreen(
+                    in.pointerX, in.pointerY,
+                    in.screenW, in.screenH);
+            else
+                selectAtScreen(
+                    in.pointerX, in.pointerY,
+                    in.screenW, in.screenH);
+        }
         else if (hasSelectedUnit())
             commandAtScreen(in.pointerX, in.pointerY, in.screenW, in.screenH);
         else
@@ -4468,6 +5438,9 @@ void Game::update(float dt, const InputState &in) {
     }
     cursorMode_ = CursorMode::Normal;
     if (!consumeWorldInput && cursorVisible_ &&
+        garrisonCursorActive_)
+        cursorMode_ = CursorMode::Garrison;
+    else if (!consumeWorldInput && cursorVisible_ &&
         !boxSelectActive_ && hasSelectedUnit())
         cursorMode_ = enemyAtScreen(cursorX_, cursorY_, in.screenW, in.screenH)
                           ? CursorMode::Attack
@@ -4616,7 +5589,9 @@ void Game::update(float dt, const InputState &in) {
             o.unit->type == dat::UT_Building)
             continue;
         o.stateTime -= dt;
-        if (o.state == State::Attack) continue;
+        if (o.state == State::Attack ||
+            o.state == State::Build)
+            continue;
         if (o.state == State::Idle) {
             if (o.moveGoalActive) {
                 o.moveRetryTime -= dt;
@@ -4836,6 +5811,7 @@ void Game::update(float dt, const InputState &in) {
             }
         }
     }
+    updateGarrisoning();
     updateProjectiles(dt);
     updateRemains(dt);
 }
@@ -4904,10 +5880,23 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
                        int initialFrame, int depth, bool drawShadows, float viewW, float viewH,
                        int sortLayerOverride, int sortBias,
                        float sortYOverride, uint32_t ownerId,
-                       bool outlineCandidate) {
+                       bool outlineCandidate, int powerState) {
     const dat::Graphic *g = assets_.dat().graphic(graphicId);
     if (!g) return;
     if (!drawShadows && depth > 0 && g->layer == 5) return;
+    int resolvedFrame = initialFrame;
+    float resolvedTime = animTime;
+    if (powerState >= 0 &&
+        (g->sequenceType & 0x04) != 0 &&
+        g->frameCount > 1) {
+        if (powerState == 0 &&
+            std::fmod(std::max(0.0f, animTime), 0.8f) >=
+                0.4f)
+            return;
+        resolvedFrame =
+            powerState > 0 ? g->frameCount - 1 : 0;
+        resolvedTime = 0.0f;
+    }
     if (!g->deltas.empty() && depth < 3) {
         for (const auto &d : g->deltas) {
             if (d.graphicId == -1) {
@@ -4917,7 +5906,10 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
                 const SpriteSheet *sh = assets_.sheet(self.slp, playerColorBase(player));
                 if (!sh) continue;
                 size_t fr; bool flip;
-                if (!pickFrame(self, sh->frames.size(), facing, animTime, initialFrame, fr, flip)) continue;
+                if (!pickFrame(self, sh->frames.size(), facing,
+                               resolvedTime, resolvedFrame,
+                               fr, flip))
+                    continue;
                 const SpriteFrame &f = sh->frames[fr];
                 float x = sx + d.offsetX - (flip ? f.w - f.hotX : f.hotX), y = sy + d.offsetY - f.hotY;
                 if (viewW > 0 && (x + f.w <= 0 || x >= viewW || y + f.h <= 0 || y >= viewH)) continue;
@@ -4942,7 +5934,7 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
                             initialFrame, depth + 1, drawShadows, viewW, viewH,
                             sortLayerOverride, sortBias,
                             sortYOverride, ownerId,
-                            outlineCandidate);
+                            outlineCandidate, powerState);
             }
         }
         return;
@@ -4951,7 +5943,10 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
     if (!sh) return;
     size_t fr;
     bool flip;
-    if (!pickFrame(*g, sh->frames.size(), facing, animTime, initialFrame, fr, flip)) return;
+    if (!pickFrame(*g, sh->frames.size(), facing,
+                   resolvedTime, resolvedFrame,
+                   fr, flip))
+        return;
     const SpriteFrame &f = sh->frames[fr];
     if (f.w == 0 || f.h == 0) return;
     float x = sx - (flip ? f.w - f.hotX : f.hotX), y = sy - f.hotY;
@@ -4992,6 +5987,8 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     const bool reducedTerrainLighting = overview;
     Texture *selectionRing = assets_.selectionRing();
     const SpriteSheet *cursors = assets_.interfaceSheet(kCursorSlp);
+    const SpriteSheet *commandIcons =
+        assets_.interfaceSheet(kCommandIconSlp);
     const Object *panelObject = nullptr;
     const Object *selectedAttacker = nullptr;
     size_t panelSelectionCount = 0;
@@ -5179,12 +6176,19 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         sx -= ox;
         sy -= oy;
         if (sx < -400 || sx > viewW + 400 || sy < -100 || sy > viewH + 500) continue;
-        int gid = o.unit->standingGraphic[0];
+        const dat::Unit *visualUnit =
+            o.state == State::Build
+                ? builderUnit(o)
+                : o.unit;
+        if (!visualUnit) visualUnit = o.unit;
+        int gid = visualUnit->standingGraphic[0];
         if (o.underConstruction &&
             o.unit->constructionGraphic >= 0)
             gid = o.unit->constructionGraphic;
         if (o.state == State::Walk && o.unit->walkingGraphic >= 0) gid = o.unit->walkingGraphic;
-        if (o.state == State::Attack && o.unit->attackGraphic >= 0) gid = o.unit->attackGraphic;
+        if (o.state == State::Attack &&
+            o.unit->attackGraphic >= 0)
+            gid = o.unit->attackGraphic;
         float graphicTime = o.animTime;
         if (o.underConstruction) {
             const dat::Graphic *construction =
@@ -5205,14 +6209,40 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                     construction->frameDuration;
             }
         }
-        drawGraphic(r, gid, sx, sy, o.facing, graphicTime, o.player, o.initialFrame, 0,
-                    o.drawShadows && !overview, viewW, viewH,
-                    -1, 0, -1000000000.0f, o.spawnId,
-                    o.player > 0 &&
-                        o.unit->type != dat::UT_Building);
+        const int powerState =
+            !o.underConstruction &&
+                    o.unit->type == dat::UT_Building &&
+                    requiresPower(o)
+                ? (isPowered(o) ? 1 : 0)
+                : -1;
+        drawGraphic(
+            r, gid, sx, sy, o.facing, graphicTime,
+            o.player, o.initialFrame, 0,
+            o.drawShadows && !overview, viewW, viewH,
+            -1, 0, -1000000000.0f, o.spawnId,
+            o.player > 0 &&
+                o.unit->type != dat::UT_Building,
+            powerState);
+        if ((o.underConstruction &&
+             isPowerCore(o)) ||
+            isShieldGenerator(o)) {
+            const int radiusGraphic =
+                isPowerCore(o)
+                    ? kPowerRadiusGraphic
+                    : kShieldRadiusGraphic;
+            drawGraphic(
+                r, radiusGraphic, sx, sy, o.facing,
+                o.animTime, o.player, 0, 0, false,
+                viewW, viewH);
+        }
 
         const float damagePercent =
-            100.0f * (1.0f - o.hitPoints / std::max(1.0f, o.maxHitPoints));
+            o.underConstruction
+                ? 0.0f
+                : 100.0f *
+                      (1.0f -
+                       o.hitPoints /
+                           std::max(1.0f, o.maxHitPoints));
         const int damageSortLayer =
             damagePercent > 0 && !o.unit->damageGraphics.empty()
                 ? graphicSortLayer(gid)
@@ -5399,18 +6429,6 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             continue;
         }
 
-        const float halfX = std::max(0.5f, object.unit->collisionSize[0]);
-        const float halfY = std::max(0.5f, object.unit->collisionSize[1]);
-        const std::array<std::array<float, 2>, 4> points = {{
-            {sx + (-halfX + halfY) * kTileHalfW,
-             sy + (-halfX - halfY) * kTileHalfH},
-            {sx + (halfX + halfY) * kTileHalfW,
-             sy + (halfX - halfY) * kTileHalfH},
-            {sx + (halfX - halfY) * kTileHalfW,
-             sy + (halfX + halfY) * kTileHalfH},
-            {sx + (-halfX - halfY) * kTileHalfW,
-             sy + (-halfX + halfY) * kTileHalfH},
-        }};
         auto drawEdge = [&](const std::array<float, 2> &from,
                             const std::array<float, 2> &to,
                             float thickness, uint8_t color) {
@@ -5424,12 +6442,54 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                            thickness, thickness, color, color, color, 255);
             }
         };
-        for (size_t point = 0; point < points.size(); point++)
-            drawEdge(points[point], points[(point + 1) % points.size()],
-                     3.0f / zoom_, 0);
-        for (size_t point = 0; point < points.size(); point++)
-            drawEdge(points[point], points[(point + 1) % points.size()],
-                     1.5f / zoom_, 255);
+        auto drawFootprint = [&](float centerX, float centerY,
+                                 const dat::Unit &unit) {
+            const float halfX =
+                std::max(0.5f, unit.collisionSize[0]);
+            const float halfY =
+                std::max(0.5f, unit.collisionSize[1]);
+            const std::array<std::array<float, 2>, 4> points = {{
+                {centerX + (-halfX + halfY) * kTileHalfW,
+                 centerY + (-halfX - halfY) * kTileHalfH},
+                {centerX + (halfX + halfY) * kTileHalfW,
+                 centerY + (halfX - halfY) * kTileHalfH},
+                {centerX + (halfX - halfY) * kTileHalfW,
+                 centerY + (halfX + halfY) * kTileHalfH},
+                {centerX + (-halfX - halfY) * kTileHalfW,
+                 centerY + (-halfX + halfY) * kTileHalfH},
+            }};
+            for (size_t point = 0; point < points.size(); point++)
+                drawEdge(
+                    points[point],
+                    points[(point + 1) % points.size()],
+                    3.0f / zoom_, 0);
+            for (size_t point = 0; point < points.size(); point++)
+                drawEdge(
+                    points[point],
+                    points[(point + 1) % points.size()],
+                    1.5f / zoom_, 255);
+        };
+        const dat::Unit *footprintUnit =
+            object.gate && object.gateClosedUnit
+                ? object.gateClosedUnit
+                : object.unit;
+        drawFootprint(sx, sy, *footprintUnit);
+        if (object.gate) {
+            const int civilization =
+                civilizationForPlayer(object.player);
+            for (const dat::BuildingAnnex &annex :
+                 footprintUnit->annexes) {
+                const dat::Unit *part =
+                    findUnit(civilization, annex.unitId);
+                if (!part) continue;
+                const float dx = annex.misplacementY;
+                const float dy = -annex.misplacementX;
+                drawFootprint(
+                    sx + (dx - dy) * kTileHalfW,
+                    sy + (dx + dy) * kTileHalfH,
+                    *part);
+            }
+        }
     }
 
     if (placementUnit_) {
@@ -5439,9 +6499,19 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         Object candidate;
         candidate.unit = placementUnit_;
         candidate.player = localPlayer_;
-        const bool valid =
+        bool valid =
             positionPassable(
                 candidate, worldX, worldY, true);
+        for (const dat::ResourceCost &cost :
+             placementUnit_->costs)
+            if (cost.flag && cost.type >= 0 &&
+                cost.amount > 0 &&
+                resource(localPlayer_, cost.type) +
+                        0.001f <
+                    cost.amount) {
+                valid = false;
+                break;
+            }
         float sx = 0, sy = 0;
         toScreen(worldX, worldY, sx, sy);
         sy -= elevationAt(worldX, worldY) *
@@ -5455,12 +6525,82 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         drawGraphic(
             r, graphic, sx, sy, 0, 0, localPlayer_, 0,
             0, false, viewW, viewH);
-        const uint8_t red = valid ? 30 : 220;
-        const uint8_t green = valid ? 220 : 40;
+        if (isPowerCore(candidate) ||
+            isShieldGenerator(candidate))
+            drawGraphic(
+                r,
+                isPowerCore(candidate)
+                    ? kPowerRadiusGraphic
+                    : kShieldRadiusGraphic,
+                sx, sy, 0, 0, localPlayer_, 0, 0,
+                false, viewW, viewH);
+        const float halfX =
+            std::max(0.5f,
+                     placementUnit_->collisionSize[0]);
+        const float halfY =
+            std::max(0.5f,
+                     placementUnit_->collisionSize[1]);
+        const std::array<std::array<float, 2>, 4>
+            footprint = {{
+                {sx + (-halfX + halfY) * kTileHalfW,
+                 sy + (-halfX - halfY) * kTileHalfH},
+                {sx + (halfX + halfY) * kTileHalfW,
+                 sy + (halfX - halfY) * kTileHalfH},
+                {sx + (halfX - halfY) * kTileHalfW,
+                 sy + (halfX + halfY) * kTileHalfH},
+                {sx + (-halfX - halfY) * kTileHalfW,
+                 sy + (-halfX + halfY) * kTileHalfH},
+            }};
+        const float flash =
+            0.5f +
+            0.5f * std::sin(selectionClickAge_ * 9.0f);
+        const uint8_t red = valid ? 40 : 255;
+        const uint8_t green = valid ? 255 : 35;
+        const uint8_t alpha =
+            (uint8_t)std::lround(100.0f +
+                                 flash * 155.0f);
+        auto drawPlacementEdge =
+            [&](const std::array<float, 2> &from,
+                const std::array<float, 2> &to,
+                float thickness) {
+                const float dx = to[0] - from[0];
+                const float dy = to[1] - from[1];
+                const int steps = std::max(
+                    1, (int)std::ceil(
+                           std::max(std::abs(dx),
+                                    std::abs(dy))));
+                for (int step = 0; step <= steps;
+                     step++) {
+                    const float amount =
+                        (float)step / steps;
+                    r.fillRect(
+                        from[0] + dx * amount -
+                            thickness * 0.5f,
+                        from[1] + dy * amount -
+                            thickness * 0.5f,
+                        thickness, thickness,
+                        red, green, 30, alpha);
+                }
+            };
+        for (size_t point = 0;
+             point < footprint.size(); point++)
+            drawPlacementEdge(
+                footprint[point],
+                footprint[(point + 1) %
+                          footprint.size()],
+                (2.0f + flash * 3.0f) / zoom_);
+        if (!valid) {
+            drawPlacementEdge(
+                footprint[0], footprint[2],
+                (2.0f + flash * 2.0f) / zoom_);
+            drawPlacementEdge(
+                footprint[1], footprint[3],
+                (2.0f + flash * 2.0f) / zoom_);
+        }
         r.fillRect(
             sx - 28.0f / zoom_, sy - 4.0f / zoom_,
             56.0f / zoom_, 4.0f / zoom_,
-            red, green, 40, 220);
+            red, green, 30, alpha);
     }
 
     // --- objects -------------------------------------------------------
@@ -5770,7 +6910,14 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         if (panelMixedUnits)
             title = std::to_string(panelSelectionCount) + " UNITS SELECTED";
         else {
-            title = unitDisplayName(*panelObject->unit);
+            title =
+                panelObject->state == State::Build &&
+                        isWorker(*panelObject)
+                    ? "Builder"
+                    : unitDisplayName(*panelObject->unit);
+            if (panelObject->gate &&
+                panelObject->locked)
+                title += " (Locked)";
             if (panelSelectionCount > 1)
                 title += " X" + std::to_string(panelSelectionCount);
         }
@@ -5814,14 +6961,94 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         drawBitmapText(r, {combatLine}, infoX, panelY + 67.0f * invZoom,
                        1.4f * invZoom, 190, 210, 220);
 
-        std::string status = panelObject->player == localPlayer_
-                                 ? (selectedAttacker
-                                        ? std::string("STANCE: ") +
-                                              selectedStanceLabel()
-                                        : "FRIENDLY")
-                                 : "ENEMY";
+        std::string status =
+            ownershipLabel(panelObject->player);
+        if (panelObject->player == localPlayer_ &&
+            panelObject->unit->garrisonCapacity > 0)
+            status +=
+                "  GARRISON " +
+                std::to_string(garrisonedCount(
+                    *panelObject, false)) +
+                "/" +
+                std::to_string(
+                    panelObject->unit
+                        ->garrisonCapacity);
+        else if (panelObject->player == localPlayer_ &&
+                 selectedAttacker)
+            status +=
+                std::string("  STANCE: ") +
+                selectedStanceLabel();
         drawBitmapText(r, {status}, infoX, panelY + 89.0f * invZoom,
                        1.25f * invZoom, 120, 220, 255);
+        if (!panelMixedUnits &&
+            panelObject->unit->type ==
+                dat::UT_Building) {
+            auto drawBuildingStatus =
+                [&](float x, size_t iconId,
+                    bool active) {
+                    const float y =
+                        panelY + 69.0f * invZoom;
+                    r.fillRect(
+                        x, y, 22.0f * invZoom,
+                        22.0f * invZoom,
+                        active ? 18 : 54,
+                        active ? 65 : 24,
+                        active ? 46 : 28, 255);
+                    if (commandIcons &&
+                        (size_t)iconId <
+                            commandIcons->frames.size()) {
+                        const SpriteFrame &icon =
+                            commandIcons
+                                ->frames[(size_t)iconId];
+                        const float scale =
+                            std::min(18.0f / icon.w,
+                                     18.0f / icon.h) *
+                            invZoom;
+                        r.draw(
+                            icon.tex,
+                            {x + 2.0f * invZoom,
+                             y + 2.0f * invZoom,
+                             icon.w * scale,
+                             icon.h * scale,
+                             icon.u, icon.v,
+                             icon.u + icon.w,
+                             icon.v + icon.h});
+                    }
+                    if (!active && commandIcons &&
+                        !commandIcons->frames.empty()) {
+                        const SpriteFrame &disabled =
+                            commandIcons->frames[0];
+                        const float scale =
+                            std::min(
+                                10.0f / disabled.w,
+                                10.0f / disabled.h) *
+                            invZoom;
+                        r.draw(
+                            disabled.tex,
+                            {x + 11.0f * invZoom,
+                             y + 11.0f * invZoom,
+                             disabled.w * scale,
+                             disabled.h * scale,
+                             disabled.u, disabled.v,
+                             disabled.u + disabled.w,
+                             disabled.v + disabled.h});
+                    }
+                };
+            const bool powered =
+                isPowered(*panelObject);
+            if (requiresPower(*panelObject) ||
+                isPowerCore(*panelObject))
+                drawBuildingStatus(
+                    404.0f * invZoom,
+                    kCommandPowerStatusIcon,
+                    powered);
+            const bool shielded =
+                isShielded(*panelObject);
+            drawBuildingStatus(
+                432.0f * invZoom,
+                kCommandShieldStatusIcon,
+                shielded);
+        }
         }
 
         const float commandsX = std::max(500.0f, screenW - 300.0f) * invZoom;
@@ -5829,6 +7056,63 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                    (screenW * invZoom - commandsX - 14.0f * invZoom),
                    86.0f * invZoom, 14, 20, 31, 245);
         if (panelObject->player == localPlayer_) {
+            const bool showGarrisonCommand =
+                std::any_of(
+                    panelSelection.begin(),
+                    panelSelection.end(),
+                    [](const Object *object) {
+                        return object && object->active &&
+                               !object->hidden &&
+                               object->unit->speed > 0 &&
+                               object->unit->type !=
+                                   dat::UT_Building &&
+                               object->unit->flyMode == 0;
+                    });
+            float commandsTextX =
+                commandsX + 12.0f * invZoom;
+            if (showGarrisonCommand) {
+                const float buttonX =
+                    commandsX + 12.0f * invZoom;
+                const float buttonY =
+                    panelY + 18.0f * invZoom;
+                const float buttonSize =
+                    46.0f * invZoom;
+                r.fillRect(
+                    buttonX, buttonY, buttonSize,
+                    buttonSize,
+                    garrisonCursorActive_ ? 58 : 22,
+                    garrisonCursorActive_ ? 105 : 38,
+                    garrisonCursorActive_ ? 72 : 55,
+                    255);
+                if (commandIcons &&
+                    kCommandGarrisonIcon <
+                        commandIcons->frames.size()) {
+                    const SpriteFrame &icon =
+                        commandIcons->frames[
+                            kCommandGarrisonIcon];
+                    const float scale =
+                        std::min(40.0f / icon.w,
+                                 40.0f / icon.h) *
+                        invZoom;
+                    r.draw(
+                        icon.tex,
+                        {buttonX + 3.0f * invZoom,
+                         buttonY + 3.0f * invZoom,
+                         icon.w * scale,
+                         icon.h * scale,
+                         icon.u, icon.v,
+                         icon.u + icon.w,
+                         icon.v + icon.h});
+                }
+                drawBitmapText(
+                    r, {"GARRISON"},
+                    buttonX,
+                    panelY + 71.0f * invZoom,
+                    0.72f * invZoom,
+                    165, 225, 185);
+                commandsTextX =
+                    commandsX + 68.0f * invZoom;
+            }
             if (panelSelectionCount > 1) {
                 const std::string stance =
                     selectedAttacker
@@ -5836,45 +7120,52 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                               selectedStanceLabel()
                         : "STANCE: N/A";
                 drawBitmapText(r, {stance},
-                               commandsX + 12.0f * invZoom,
+                               commandsTextX,
                                panelY + 20.0f * invZoom,
                                1.25f * invZoom,
                                mixedAttackModes ? 255 : 120,
                                mixedAttackModes ? 190 : 220,
                                mixedAttackModes ? 100 : 255);
                 drawBitmapText(r, {"O: MOVE / ATTACK"},
-                               commandsX + 12.0f * invZoom,
+                               commandsTextX,
                                panelY + 40.0f * invZoom,
                                1.18f * invZoom);
                 drawBitmapText(r, {"TRIANGLE: CHANGE STANCE"},
-                               commandsX + 12.0f * invZoom,
+                               commandsTextX,
                                panelY + 60.0f * invZoom,
                                1.05f * invZoom);
                 drawBitmapText(r, {"X: SELECT   SQUARE: BOX"},
-                               commandsX + 12.0f * invZoom,
+                               commandsTextX,
                                panelY + 80.0f * invZoom,
                                0.95f * invZoom,
                                175, 190, 205);
             } else if (panelObject->unit->type == dat::UT_Building) {
-                drawBitmapText(r, {"TRIANGLE: PRODUCTION"},
-                               commandsX + 12.0f * invZoom,
+                drawBitmapText(
+                    r,
+                    {panelObject->gate
+                         ? "TRIANGLE: GATE COMMANDS"
+                         : panelObject->unit
+                                       ->garrisonCapacity > 0
+                               ? "TRIANGLE: PRODUCTION / EJECT"
+                               : "TRIANGLE: PRODUCTION"},
+                               commandsTextX,
                                panelY + 24.0f * invZoom,
                                1.25f * invZoom);
                 drawBitmapText(r, {"X: SELECT"},
-                               commandsX + 12.0f * invZoom,
+                               commandsTextX,
                                panelY + 50.0f * invZoom,
                                1.2f * invZoom);
             } else {
                 drawBitmapText(r, {"O: MOVE / ATTACK"},
-                               commandsX + 12.0f * invZoom,
+                               commandsTextX,
                                panelY + 24.0f * invZoom,
                                1.35f * invZoom);
                 drawBitmapText(r, {"TRIANGLE: CHANGE STANCE"},
-                               commandsX + 12.0f * invZoom,
+                               commandsTextX,
                                panelY + 48.0f * invZoom,
                                1.2f * invZoom);
                 drawBitmapText(r, {"X: SELECT   SQUARE: BOX"},
-                               commandsX + 12.0f * invZoom,
+                               commandsTextX,
                                panelY + 71.0f * invZoom,
                                1.15f * invZoom,
                                175, 190, 205);
@@ -5900,11 +7191,43 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         const float fieldW = 94.0f * invZoom;
         const float fieldH = 32.0f * invZoom;
         const float startX =
-            (screenW - 8.0f - std::size(resourceIds) * 94.0f) *
+            (screenW - 8.0f -
+             (std::size(resourceIds) + 1) * 94.0f) *
             invZoom;
         const float y = 6.0f * invZoom;
+        size_t population = 0;
+        for (const Object &object : objects_)
+            if (object.active &&
+                object.player == localPlayer_ &&
+                object.unit->type >= dat::UT_Combatant &&
+                object.unit->type != dat::UT_Building)
+                population++;
+        const int populationLimit =
+            localPlayer_ > 0 &&
+                    (size_t)localPlayer_ <= players_.size()
+                ? std::max(
+                      0, (int)std::lround(
+                             players_[(size_t)localPlayer_ -
+                                      1]
+                                 .populationLimit))
+                : 0;
+        r.fillRect(startX, y,
+                   fieldW - 3.0f * invZoom, fieldH,
+                   5, 8, 16, 225);
+        r.fillRect(startX, y,
+                   fieldW - 3.0f * invZoom,
+                   2.0f * invZoom,
+                   110, 122, 130, 255);
+        drawBitmapText(
+            r,
+            {"POP " + std::to_string(population) +
+             "/" + std::to_string(populationLimit)},
+            startX + 8.0f * invZoom,
+            y + 8.0f * invZoom,
+            1.05f * invZoom, 238, 231, 190);
         for (size_t index = 0; index < std::size(resourceIds); index++) {
-            const float x = startX + index * fieldW;
+            const float x =
+                startX + (index + 1) * fieldW;
             r.fillRect(x, y, fieldW - 3.0f * invZoom, fieldH,
                        5, 8, 16, 225);
             r.fillRect(x, y, fieldW - 3.0f * invZoom,
@@ -6009,7 +7332,8 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             const bool worker = isWorker(*subject);
             const std::vector<const dat::Unit *> units =
                 worker
-                    ? buildingOptions(*subject)
+                    ? buildingOptions(*subject,
+                                      actionMenuTab_)
                     : actionMenuTab_ ==
                               ActionMenuTab::Units
                           ? productionOptions(*subject)
@@ -6021,9 +7345,15 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                             ActionMenuTab::Research
                     ? researchOptions(*subject)
                     : std::vector<int>{};
+            const bool commandOption =
+                !worker &&
+                actionMenuTab_ ==
+                    ActionMenuTab::Commands;
             const size_t optionCount =
-                worker || actionMenuTab_ ==
-                              ActionMenuTab::Units
+                commandOption
+                    ? 1
+                    : worker || actionMenuTab_ ==
+                                    ActionMenuTab::Units
                     ? units.size()
                     : technologies.size();
             const size_t rows = std::min(
@@ -6032,7 +7362,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 !subject->productionQueue.empty();
             const float height =
                 42.0f + rows * kActionMenuRowHeight +
-                (hasQueue ? 50.0f : 0.0f);
+                (hasQueue ? 52.0f : 0.0f);
             r.fillRect(kActionMenuX * invZoom,
                        28.0f * invZoom,
                        kActionMenuWidth * invZoom,
@@ -6043,63 +7373,89 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                        3.0f * invZoom,
                        196, 188, 145, 255);
             if (worker) {
-                drawBitmapText(
-                    r,
-                    {"BUILDINGS   X: PLACE   O: CLOSE"},
-                    (kActionMenuX + 12.0f) * invZoom,
-                    39.0f * invZoom,
-                    1.05f * invZoom, 220, 226, 230);
-            } else {
                 const float tabWidth =
-                    kActionMenuWidth * 0.5f;
-                r.fillRect(
-                    kActionMenuX * invZoom,
-                    34.0f * invZoom,
-                    tabWidth * invZoom,
-                    28.0f * invZoom,
-                    actionMenuTab_ ==
-                            ActionMenuTab::Units
-                        ? 75
-                        : 17,
-                    actionMenuTab_ ==
-                            ActionMenuTab::Units
-                        ? 87
-                        : 27,
-                    actionMenuTab_ ==
-                            ActionMenuTab::Units
-                        ? 103
-                        : 41,
-                    255);
-                r.fillRect(
-                    (kActionMenuX + tabWidth) *
-                        invZoom,
-                    34.0f * invZoom,
-                    tabWidth * invZoom,
-                    28.0f * invZoom,
-                    actionMenuTab_ ==
-                            ActionMenuTab::Research
-                        ? 75
-                        : 17,
-                    actionMenuTab_ ==
-                            ActionMenuTab::Research
-                        ? 87
-                        : 27,
-                    actionMenuTab_ ==
-                            ActionMenuTab::Research
-                        ? 103
-                        : 41,
-                    255);
-                drawBitmapText(
-                    r, {"L  UNITS"},
-                    (kActionMenuX + 16.0f) * invZoom,
-                    42.0f * invZoom,
-                    0.95f * invZoom, 225, 230, 235);
-                drawBitmapText(
-                    r, {"RESEARCH  R"},
-                    (kActionMenuX + tabWidth + 50.0f) *
-                        invZoom,
-                    42.0f * invZoom,
-                    0.95f * invZoom, 225, 230, 235);
+                    kActionMenuWidth / 3.0f;
+                const ActionMenuTab tabs[] = {
+                    ActionMenuTab::Economy,
+                    ActionMenuTab::Military,
+                    ActionMenuTab::Defense,
+                };
+                const char *labels[] = {
+                    "L ECONOMY",
+                    "MILITARY",
+                    "DEFENSE R",
+                };
+                for (size_t tab = 0;
+                     tab < std::size(tabs); tab++) {
+                    const bool active =
+                        actionMenuTab_ == tabs[tab];
+                    r.fillRect(
+                        (kActionMenuX +
+                         tab * tabWidth) *
+                            invZoom,
+                        34.0f * invZoom,
+                        tabWidth * invZoom,
+                        28.0f * invZoom,
+                        active ? 75 : 17,
+                        active ? 87 : 27,
+                        active ? 103 : 41,
+                        255);
+                    drawBitmapText(
+                        r, {labels[tab]},
+                        (kActionMenuX +
+                         tab * tabWidth + 12.0f) *
+                            invZoom,
+                        42.0f * invZoom,
+                        0.82f * invZoom,
+                        225, 230, 235);
+                }
+            } else {
+                std::vector<ActionMenuTab> tabs;
+                std::vector<std::string> labels;
+                if (!productionOptions(*subject).empty()) {
+                    tabs.push_back(ActionMenuTab::Units);
+                    labels.push_back("UNITS");
+                }
+                if (!researchOptions(*subject).empty()) {
+                    tabs.push_back(ActionMenuTab::Research);
+                    labels.push_back("RESEARCH");
+                }
+                if (subject->gate ||
+                    subject->unit->garrisonCapacity > 0) {
+                    tabs.push_back(ActionMenuTab::Commands);
+                    labels.push_back("COMMANDS");
+                }
+                const float tabWidth =
+                    kActionMenuWidth /
+                    std::max<size_t>(1, tabs.size());
+                for (size_t tab = 0;
+                     tab < tabs.size(); ++tab) {
+                    const bool active =
+                        actionMenuTab_ == tabs[tab];
+                    r.fillRect(
+                        (kActionMenuX +
+                         tab * tabWidth) *
+                            invZoom,
+                        34.0f * invZoom,
+                        tabWidth * invZoom,
+                        28.0f * invZoom,
+                        active ? 75 : 17,
+                        active ? 87 : 27,
+                        active ? 103 : 41,
+                        255);
+                    std::string label = labels[tab];
+                    if (tab == 0) label = "L  " + label;
+                    if (tab + 1 == tabs.size())
+                        label += "  R";
+                    drawBitmapText(
+                        r, {label},
+                        (kActionMenuX +
+                         tab * tabWidth + 14.0f) *
+                            invZoom,
+                        42.0f * invZoom,
+                        0.88f * invZoom,
+                        225, 230, 235);
+                }
             }
             for (size_t index = 0; index < rows; index++) {
                 const dat::Unit *unit =
@@ -6136,12 +7492,18 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                                    ? kBuildingIconSlpBase
                                    : kUnitIconSlpBase) +
                               std::max(1, iconSet) - 1)
-                        : nullptr;
+                        : commandOption
+                              ? commandIcons
+                              : nullptr;
                 const int iconId =
                     unit ? unit->iconId
                          : technology
                                ? technology->iconId
-                               : -1;
+                               : subject->gate
+                                     ? (subject->locked
+                                            ? (int)kCommandUnlockGateIcon
+                                            : (int)kCommandLockGateIcon)
+                                     : (int)kCommandEjectIcon;
                 const SpriteFrame *icon =
                     icons && iconId >= 0 &&
                             (size_t)iconId <
@@ -6168,9 +7530,20 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 std::string name =
                     unit
                         ? unitDisplayName(*unit)
-                        : assets_.localizedString(
-                              technology
-                                  ->languageDllName);
+                        : technology
+                              ? assets_.localizedString(
+                                    technology
+                                        ->languageDllName)
+                              : subject->gate
+                                    ? (subject->locked
+                                           ? "Unlock Gate"
+                                           : "Lock Gate")
+                                    : "Eject All (" +
+                                          std::to_string(
+                                              garrisonedCount(
+                                                  *subject,
+                                                  false)) +
+                                          ")";
                 if (name.size() > 20) name.resize(20);
                 drawBitmapText(
                     r, {name},
@@ -6199,7 +7572,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                         appendCost(
                             cost.type, cost.amount,
                             cost.flag != 0);
-                else
+                else if (technology)
                     for (const dat::Tech::Cost &cost :
                          technology->costs)
                         appendCost(
@@ -6212,65 +7585,93 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                     1.05f * invZoom, 177, 208, 218);
                 drawBitmapText(
                     r,
-                    {std::to_string(
-                         unit
-                             ? std::max<int16_t>(
-                                   0, unit->trainTime)
-                             : std::max<int16_t>(
-                                   0, technology
-                                          ->researchTime)) +
-                     "S"},
+                    {commandOption
+                         ? ""
+                         : std::to_string(
+                               unit
+                                   ? std::max<int16_t>(
+                                         0,
+                                         unit->trainTime)
+                                   : std::max<int16_t>(
+                                         0,
+                                         technology
+                                             ->researchTime)) +
+                               "S"},
                     (kActionMenuX + 390.0f) * invZoom,
                     y + 8.0f * invZoom,
                     1.0f * invZoom, 160, 175, 188);
             }
             if (hasQueue) {
-                const ProductionItem &current =
-                    subject->productionQueue.front();
-                const float progress =
-                    current.duration > 0
-                        ? std::max(
-                              0.0f,
-                              std::min(
-                                  1.0f,
-                                  1.0f -
-                                      subject
-                                              ->productionRemaining /
-                                          current.duration))
-                        : 1.0f;
                 const float footerY =
                     kActionMenuY +
-                    rows * kActionMenuRowHeight + 5.0f;
-                drawBitmapText(
-                    r,
-                    {"QUEUE " +
-                     std::to_string(
-                         subject->productionQueue.size()) +
-                     "/5"},
-                    (kActionMenuX + 12.0f) * invZoom,
-                    footerY * invZoom,
-                    1.0f * invZoom, 120, 220, 255);
-                r.fillRect(
-                    (kActionMenuX + 100.0f) * invZoom,
-                    (footerY + 2.0f) * invZoom,
-                    255.0f * invZoom,
-                    12.0f * invZoom,
-                    28, 38, 48, 255);
-                r.fillRect(
-                    (kActionMenuX + 102.0f) * invZoom,
-                    (footerY + 4.0f) * invZoom,
-                    251.0f * progress * invZoom,
-                    8.0f * invZoom,
-                    66, 180, 220, 255);
-                drawBitmapText(
-                    r,
-                    {std::to_string(
-                         (int)std::lround(
-                             progress * 100.0f)) +
-                     "%"},
-                    (kActionMenuX + 365.0f) * invZoom,
-                    footerY * invZoom,
-                    0.95f * invZoom, 180, 220, 235);
+                    rows * kActionMenuRowHeight;
+                const float slotWidth =
+                    (kActionMenuWidth - 12.0f) / 5.0f;
+                for (size_t index = 0; index < 5; index++) {
+                    const float x =
+                        kActionMenuX + 6.0f +
+                        index * slotWidth;
+                    const bool occupied =
+                        index <
+                        subject->productionQueue.size();
+                    r.fillRect(
+                        x * invZoom,
+                        (footerY + 3.0f) * invZoom,
+                        (slotWidth - 3.0f) * invZoom,
+                        44.0f * invZoom,
+                        occupied ? 20 : 10,
+                        occupied ? 34 : 16,
+                        occupied ? 48 : 24, 255);
+                    if (!occupied) continue;
+                    const ProductionItem &queued =
+                        subject->productionQueue[index];
+                    std::string name;
+                    if (queued.unit)
+                        name =
+                            unitDisplayName(*queued.unit);
+                    else if (queued.technologyId >= 0)
+                        name = assets_.localizedString(
+                            assets_.dat()
+                                .techs[(size_t)
+                                           queued.technologyId]
+                                .languageDllName);
+                    if (name.size() > 10)
+                        name.resize(10);
+                    drawBitmapText(
+                        r,
+                        {std::to_string(index + 1) +
+                         " " + name},
+                        (x + 4.0f) * invZoom,
+                        (footerY + 10.0f) * invZoom,
+                        0.72f * invZoom,
+                        205, 220, 230);
+                    drawBitmapText(
+                        r, {"CANCEL"},
+                        (x + 4.0f) * invZoom,
+                        (footerY + 27.0f) * invZoom,
+                        0.62f * invZoom,
+                        235, 125, 105);
+                    if (index == 0) {
+                        const float progress =
+                            queued.duration > 0
+                                ? std::max(
+                                      0.0f,
+                                      std::min(
+                                          1.0f,
+                                          1.0f -
+                                              subject
+                                                      ->productionRemaining /
+                                                  queued.duration))
+                                : 1.0f;
+                        r.fillRect(
+                            (x + 3.0f) * invZoom,
+                            (footerY + 41.0f) * invZoom,
+                            (slotWidth - 9.0f) *
+                                progress * invZoom,
+                            3.0f * invZoom,
+                            66, 180, 220, 255);
+                    }
+                }
             }
         }
     }
@@ -6329,6 +7730,8 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             std::string effect = cheat.effect;
             if (cheat.action == CheatAction::ForceBuild)
                 effect += forceBuildCheat_ ? " [ON]" : " [OFF]";
+            else if (cheat.action == CheatAction::ForceTech)
+                effect += fullTechTreeCheat_ ? " [ON]" : " [OFF]";
             else if (cheat.action == CheatAction::ForceSight)
                 effect += forceSightCheat_ ? " [ON]" : " [OFF]";
             else if (cheat.action == CheatAction::ForceExplore)
@@ -6399,10 +7802,14 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         size_t frameIndex = kCursorNormal;
         if (cursorMode_ == CursorMode::Move) frameIndex = kCursorMove;
         if (cursorMode_ == CursorMode::Attack) frameIndex = kCursorAttack;
+        if (cursorMode_ == CursorMode::Garrison)
+            frameIndex = kCursorGarrison;
         if (cursors && frameIndex < cursors->frames.size()) {
             const SpriteFrame &frame = cursors->frames[frameIndex];
             const float width = frame.w * invZoom, height = frame.h * invZoom;
-            const bool centered = cursorMode_ == CursorMode::Attack;
+            const bool centered =
+                cursorMode_ == CursorMode::Attack ||
+                cursorMode_ == CursorMode::Garrison;
             r.draw(frame.tex, {x - (centered ? width * 0.5f : 0.0f),
                                y - (centered ? height * 0.5f : 0.0f),
                                width, height, frame.u, frame.v,

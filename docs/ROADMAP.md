@@ -50,14 +50,24 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   Accuracy, blast damage, and explicit guard/patrol commands remain.
 - Economy: the four SWGB resources drive shared building queues for units and research. Original
   `tech-level-1`, `MADE-*`, and `AVAIL-*` technologies determine civilization-correct production
-  choices, while researched replacement effects select the current unit upgrade. Workers expose
-  technology-driven building lists, validate placement and costs, walk to foundations, and construct
-  buildings with progressive graphics and hit points. Gathering/drop sites, multiple builders,
-  repair/cancel behavior, and population limits (power cores and prefab shelters) remain.
+  choices, while researched replacement effects upgrade both available choices and existing units
+  and buildings. Every queued unit/research item is displayed and can be cancelled for a refund.
+  Power Cores provide the original nine-tile power coverage; unpowered buildings train and research
+  at 25% speed. DAT power-indicator frames render solid green while powered and blink red while
+  unpowered. Selected buildings also show powered/unpowered and shield-coverage icons. Power Core
+  placement/construction uses the original blue coverage ring, while Shield Generators retain the
+  original yellow shield-boundary ring through placement, construction, and completion. Workers expose
+  technology-driven economy, military, and defense building pages, validate placement and costs with
+  flashing green/red footprints, walk to foundations, switch to their original Builder state, and
+  construct buildings with progressive graphics and hit points. Retasked workers can resume a
+  foundation through a contextual command. Gathering/drop sites, multiple builders,
+  repair/construction cancellation, shield damage, and population-limit enforcement remain.
 - Researched technology effects apply packed DAT attack/armor modifiers plus generic health, speed,
-  and reload-time modifiers. Remaining attributes, resource, upgrade, and age effects still need
+  and reload-time modifiers, along with chained unit/building upgrade and age effects. Remaining
+  attributes and resource effects still need
   to be applied.
-- SWGB-specific mechanics: shields, air units, power cores, Jedi/Sith conversion, holocrons.
+- SWGB-specific mechanics: power coverage and shield-coverage detection are implemented. Shield
+  absorption/regeneration, air units, Jedi/Sith conversion, and holocrons remain.
 
 ## Milestone 4: interface and input on Vita
 - Replace the temporary bitmap trigger-dialogue font with UI rendering from `interfac.drs` SLPs.
@@ -69,14 +79,21 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 - The command/info panel shows the selected unit or building portrait, live health, attack,
   armor, range, stance, multi-selection portraits with individual health, formation controls,
   Vita command hints, and contextual action menus. Buildings separate civilization-correct Units
-  and Research tabs, support touch or L/R switching, and show queue progress both in the menu and
-  on the selected-building panel. Workers open a Buildings page with a placement preview. A
-  persistent four-resource bar is shown at the top. A scrollable L + R + Select test menu exposes
+  and Research tabs, support touch or L/R switching, and show every cancellable queue item plus
+  current progress. Gates expose lock/unlock commands rather than production; selected gate
+  footprints follow their oriented annexes. Unit/group panels provide original-icon garrison
+  targeting, while eligible buildings provide ejection and capacity feedback. Workers open a
+  Buildings page with a placement preview. Selection status distinguishes the local player,
+  named allies, neutral sides, and enemies using scenario diplomacy. A persistent resource and population bar is shown at
+  the top. A scrollable L + R + Select test menu exposes
   the original base-game and Clone Campaigns cheats, including resource grants, unit spawns, instant
   production/construction, victory/player defeat, and hidden DAT cheat technologies. General worker
   task buttons, minimap, and pause menu remain.
 - Audio: selection, move, and attack acknowledgements plus camera-relative weapon-fire, impact, and
-  death effects are implemented. World ambience, volume controls, and music remain.
+  death effects are implemented. The original Ogg soundtrack streams from storage, ducks beneath
+  scenario dialogue, and mixes with terrain-specific world ambience. Garrison/ejection, gate
+  transformation, unit-training, and construction cues use their DAT sound groups. User-facing
+  volume controls remain.
 
 ## Milestone 5: AI and skirmish
 - A subset of the AI script interpreter (`.per` rules), checked against the original using Ghidra where needed.

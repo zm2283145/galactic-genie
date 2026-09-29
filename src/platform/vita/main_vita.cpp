@@ -31,6 +31,8 @@ const char *kRoot = "ux0:data/swgb";
 const char *kDataDir = "ux0:data/swgb/Data";
 const char *kCampaignPath = "ux0:data/swgb/Campaign/xcam3.cpx";
 const char *kScenarioSoundDir = "ux0:data/swgb/Sound/Scenario";
+const char *kMusicDir = "ux0:data/swgb/Music";
+const char *kTerrainSoundDir = "ux0:data/swgb/Sound/Terrain";
 const int kScreenW = 960, kScreenH = 544;
 
 FILE *g_log = nullptr;
@@ -126,11 +128,16 @@ int main() {
 
         swgb::Game game(assets);
         game.setLogger([](const std::string &s) { logf("%s", s.c_str()); });
-        swgb::VitaAudio audio(kScenarioSoundDir);
+        swgb::VitaAudio audio(
+            kScenarioSoundDir, kMusicDir, kTerrainSoundDir);
         audio.setLogger([](const std::string &s) { logf("audio: %s", s.c_str()); });
         std::string audioError;
         if (!audio.start(&audioError)) logf("audio disabled: %s", audioError.c_str());
         game.setSoundPlayer([&audio](const std::string &name) { return audio.play(name); });
+        game.setAmbientSoundPlayer(
+            [&audio](const std::string &name) {
+                return audio.playAmbient(name);
+            });
         uint32_t unitSoundChoice = 0;
         game.setUnitSoundPlayer([&](int soundId, int civilization) {
             std::vector<uint8_t> data;

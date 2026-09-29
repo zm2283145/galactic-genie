@@ -51,7 +51,7 @@ if(VITA)
         SceAudio_stub SceCommonDialog_stub SceSysmodule_stub SceMotion_stub
         SceAppUtil_stub SceAppMgr_stub SceShaccCg_stub ScePower_stub
         SceKernelDmacMgr_stub SceIme_stub
-        stdc++ m)
+        vorbisfile vorbis ogg stdc++ m)
 
     # 32MB phycont budget: without it vitaGL renders nothing on this setup.
     set(VITA_MAKE_FSELF_FLAGS "${VITA_MAKE_FSELF_FLAGS} -pm 0x2000000")

@@ -102,6 +102,8 @@ public:
 
     // Centre the camera on a tile (used by tools and at startup).
     void lookAt(float tx, float ty);
+    bool lookAtObject(uint32_t spawnId);
+    bool selectObjectForTesting(uint32_t spawnId);
     const FrameStats &stats() const { return stats_; }
     void setLogger(std::function<void(const std::string &)> fn) { log_ = std::move(fn); }
     void setSoundPlayer(std::function<float(const std::string &)> fn) {
@@ -109,6 +111,10 @@ public:
     }
     void setUnitSoundPlayer(std::function<void(int, int)> fn) {
         playUnitSound_ = std::move(fn);
+    }
+    void setAmbientSoundPlayer(
+        std::function<float(const std::string &)> fn) {
+        playAmbientSound_ = std::move(fn);
     }
 
     // Debug helper: draws one graphic immediately at a screen position.
@@ -120,6 +126,11 @@ public:
     bool triggerFired(size_t id) const;
     bool gateLocked(uint32_t spawnId) const;
     size_t gateCount() const;
+    void setLocalPlayerForTesting(int player) { localPlayer_ = player; }
+    size_t garrisonedCount(uint32_t spawnId) const;
+    bool garrisonCursorActive() const {
+        return garrisonCursorActive_;
+    }
     bool objectActive(uint32_t spawnId) const;
     float resource(int player, int resourceId) const;
     bool researchTechnology(int player, int technologyId);
@@ -132,6 +143,7 @@ public:
     CombatStats combatStats() const;
     float objectHitPoints(uint32_t spawnId) const;
     float objectMaxHitPoints(uint32_t spawnId) const;
+    int objectUnitId(uint32_t spawnId) const;
     int objectAttackDamage(uint32_t sourceId,
                            uint32_t targetId) const;
     bool objectSelected(uint32_t spawnId) const;
@@ -142,10 +154,19 @@ public:
         uint32_t spawnId) const;
     std::vector<int> buildingOptionIds(
         uint32_t spawnId) const;
+    std::vector<int> buildingOptionIds(
+        uint32_t spawnId, int interfaceKind) const;
+    std::vector<uint32_t> underConstructionObjectIds() const;
+    uint32_t constructionBuilderId(
+        uint32_t spawnId) const;
+    bool objectIsBuilder(uint32_t spawnId) const;
     bool technologyResearched(int player, int technologyId) const {
         return player >= 0 &&
                (size_t)player < researchedTechs_.size() &&
                researchedTechs_[(size_t)player].count(technologyId);
+    }
+    bool fullTechTreeUnlocked() const {
+        return fullTechTreeCheat_;
     }
     bool objectScreenPosition(uint32_t spawnId, int screenW, int screenH,
                               float &screenX, float &screenY) const;
@@ -155,12 +176,25 @@ public:
     static constexpr int kTileHalfH = 24;
 
 private:
-    enum class State : uint8_t { Idle, Walk, Attack };
-    enum class CursorMode : uint8_t { Normal, Move, Attack };
+    enum class State : uint8_t {
+        Idle,
+        Walk,
+        Attack,
+        Build,
+    };
+    enum class CursorMode : uint8_t {
+        Normal,
+        Move,
+        Attack,
+        Garrison,
+    };
     enum class ActionMenuTab : uint8_t {
         Units,
         Research,
-        Buildings,
+        Commands,
+        Economy,
+        Military,
+        Defense,
     };
     enum class FormationType : uint8_t { Line, Box, Staggered, Flank };
     enum class AttackMode : uint8_t {
@@ -229,6 +263,8 @@ private:
         float constructionRemaining = 0;
         float constructionTotal = 0;
         uint32_t constructionBuilderId = 0;
+        uint32_t constructionTargetId = 0;
+        uint32_t garrisonTargetId = 0;
         uint32_t spawnId = 0;
         int32_t garrisonedInId = -1;
         uint16_t initialFrame = 0;
@@ -324,6 +360,10 @@ private:
                                 float baseValue) const;
     int graphicSound(int graphicId) const;
     float collisionRadius(const Object &object) const;
+    void interactionPoint(const Object &source, const Object &target,
+                          float clearance, float &x, float &y) const;
+    bool withinInteractionRange(const Object &source, const Object &target,
+                                float clearance) const;
     bool isInspectable(const Object &object) const;
     bool isSelectable(const Object &object) const;
     bool hasSelectedUnit() const;
@@ -341,24 +381,47 @@ private:
                                    int screenW, int screenH);
     bool handleActionMenuClick(float screenX, float screenY,
                                int screenW, int screenH);
+    bool cancelProductionItem(Object &building, size_t index);
     bool openSelectedActionMenu();
     std::vector<const dat::Unit *> productionOptions(
         const Object &building) const;
     std::vector<int> researchOptions(
         const Object &building) const;
     std::vector<const dat::Unit *> buildingOptions(
-        const Object &worker) const;
+        const Object &worker,
+        ActionMenuTab category) const;
     bool unitAvailable(int player, int unitId) const;
     const dat::Unit *effectiveUnitForPlayer(
         int player, const dat::Unit *unit) const;
+    void applyUnitUpgrades(int player);
     bool technologyRequirementsMet(int player,
                                   const dat::Tech &technology) const;
     void refreshAutomaticTechnologies(int player);
     void refreshAllAutomaticTechnologies();
     std::string unitDisplayName(const dat::Unit &unit) const;
+    std::string ownershipLabel(int player) const;
     bool isWorker(const Object &object) const;
+    bool isPowerCore(const Object &object) const;
+    bool isShieldGenerator(const Object &object) const;
+    bool graphicHasPowerIndicator(
+        int graphicId, int depth = 0) const;
+    bool requiresPower(const Object &building) const;
+    bool isPowered(const Object &building) const;
+    bool isShielded(const Object &building) const;
+    const dat::Unit *builderUnit(
+        const Object &worker) const;
+    bool canGarrison(const Object &unit,
+                     const Object &building) const;
+    size_t garrisonedCount(const Object &building,
+                           bool includeIncoming) const;
+    bool issueGarrisonCommand(Object &building);
+    void updateGarrisoning();
+    size_t ejectGarrisoned(Object &building);
+    void setGateLocked(Object &gate, bool locked);
     bool beginBuildingPlacement(Object &worker,
                                const dat::Unit &building);
+    void clearConstructionAssignment(Object &worker);
+    bool assignBuilder(Object &worker, Object &building);
     bool placeBuilding(float screenX, float screenY,
                        int screenW, int screenH);
     void updateConstruction(float dt);
@@ -385,6 +448,7 @@ private:
     void playUnitAcknowledgement(const Object &object, bool attack);
     void playWorldUnitSound(const Object &object, int soundId);
     bool worldSoundAudible(float x, float y) const;
+    void updateAmbience(float dt, int screenW, int screenH);
     void activateCheat(size_t index, int screenW, int screenH);
     bool spawnCheatUnit(int unitId, bool requireWater,
                         int screenW, int screenH);
@@ -402,7 +466,8 @@ private:
                      int sortLayerOverride = -1, int sortBias = 0,
                      float sortYOverride = -1000000000.0f,
                      uint32_t ownerId = 0,
-                     bool outlineCandidate = false);
+                     bool outlineCandidate = false,
+                     int powerState = -1);
     int graphicSortLayer(int graphicId, int depth = 0) const;
 
     Assets &assets_;
@@ -433,6 +498,7 @@ private:
     std::array<std::map<int, float>, 17> resources_{};
     std::array<std::set<int>, 17> researchedTechs_{};
     std::array<std::set<int>, 17> disabledTechs_{};
+    std::array<std::set<int>, 17> disabledUnits_{};
     std::vector<ScenarioTrigger> triggers_;
     std::vector<uint32_t> triggerOrder_;
     std::vector<TriggerRuntime> triggerRuntime_;
@@ -466,8 +532,12 @@ private:
     bool cheatMenuOpen_ = false;
     size_t cheatMenuSelection_ = 0;
     bool forceBuildCheat_ = false;
+    bool fullTechTreeCheat_ = false;
     bool forceExploreCheat_ = false;
     bool forceSightCheat_ = false;
+    bool garrisonCursorActive_ = false;
+    float ambienceTime_ = 2.0f;
+    uint32_t ambienceSequence_ = 0;
     std::string statusMessage_;
     float statusTime_ = 0;
     bool boxSelectActive_ = false;
@@ -486,6 +556,7 @@ private:
     std::function<void(const std::string &)> log_;
     std::function<float(const std::string &)> playSound_;
     std::function<void(int, int)> playUnitSound_;
+    std::function<float(const std::string &)> playAmbientSound_;
 };
 
 } // namespace swgb

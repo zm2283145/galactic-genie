@@ -5,6 +5,8 @@
 #   tools\deploy_vita.ps1 -CampaignData # copies XCAM3.CPX for the Breaking Bread scenario
 #   tools\deploy_vita.ps1 -SoundData    # copies voices referenced by the selected campaign mission
 #   tools\deploy_vita.ps1 -UnitSoundData # copies the DAT-referenced unit sound archives
+#   tools\deploy_vita.ps1 -MusicData     # copies the original streamed soundtrack
+#   tools\deploy_vita.ps1 -TerrainSoundData # copies camera-relative terrain ambience
 #   tools\deploy_vita.ps1 -LanguageData  # copies localized interface strings
 #   tools\deploy_vita.ps1 -PullLog      # downloads ux0:data/swgb/swgb.log to build-vita\swgb.log
 param(
@@ -13,12 +15,16 @@ param(
     [string]$GameDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Data",
     [string]$CampaignDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Campaign",
     [string]$SoundDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Sound\Scenario",
+    [string]$MusicDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\MUSIC",
+    [string]$TerrainSoundDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Sound\Terrain",
     [int]$CampaignEntry = 2,
     [switch]$Vpk,
     [switch]$GameData,
     [switch]$CampaignData,
     [switch]$SoundData,
     [switch]$UnitSoundData,
+    [switch]$MusicData,
+    [switch]$TerrainSoundData,
     [switch]$LanguageData,
     [switch]$PullLog
 )
@@ -95,6 +101,19 @@ if ($UnitSoundData) {
     Ftp-MkDir "ux0:/data/swgb/Data"
     foreach ($f in "SOUNDS.DRS", "sounds_x1.drs") {
         Ftp-Put (Join-Path $GameDir $f) "ux0:/data/swgb/Data/$($f.ToLower())"
+    }
+}
+if ($MusicData) {
+    Ftp-MkDir "ux0:/data/swgb/Music"
+    foreach ($f in "Track02.ogg", "Track03.ogg") {
+        Ftp-Put (Join-Path $MusicDir $f) "ux0:/data/swgb/Music/$($f.ToLower())"
+    }
+}
+if ($TerrainSoundData) {
+    Ftp-MkDir "ux0:/data/swgb/Sound"
+    Ftp-MkDir "ux0:/data/swgb/Sound/Terrain"
+    foreach ($file in Get-ChildItem -LiteralPath $TerrainSoundDir -File -Filter *.wav) {
+        Ftp-Put $file.FullName "ux0:/data/swgb/Sound/Terrain/$($file.Name.ToLower())"
     }
 }
 if ($LanguageData) {
