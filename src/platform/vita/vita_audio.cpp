@@ -43,7 +43,7 @@ VitaAudio::~VitaAudio() {
 }
 
 bool VitaAudio::start(std::string *err) {
-    port_ = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN, kBufferFrames,
+    port_ = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_BGM, kBufferFrames,
                                 AudioClip::kSampleRate, SCE_AUDIO_OUT_MODE_STEREO);
     if (port_ < 0) {
         if (err) *err = "sceAudioOutOpenPort failed: " + std::to_string(port_);
@@ -56,7 +56,7 @@ bool VitaAudio::start(std::string *err) {
         port_ = -1;
         return false;
     }
-    thread_ = sceKernelCreateThread("swgb_audio", threadEntry, 0x10000100, 64 * 1024, 0, 0, nullptr);
+    thread_ = sceKernelCreateThread("swgb_audio", threadEntry, 0x40, 64 * 1024, 0, 0, nullptr);
     if (thread_ < 0) {
         if (err) *err = "sceKernelCreateThread failed: " + std::to_string(thread_);
         sceKernelDeleteMutex(mutex_);
@@ -113,7 +113,8 @@ int VitaAudio::threadEntry(SceSize args, void *argp) {
 int VitaAudio::run() {
     std::shared_ptr<AudioClip> current;
     size_t frame = 0;
-    alignas(64) int16_t buffer[kBufferFrames * AudioClip::kChannels];
+    size_t bufferIndex = 0;
+    alignas(64) int16_t buffers[2][kBufferFrames * AudioClip::kChannels];
 
     while (running_) {
         if (!current || frame >= current->frameCount()) {
@@ -127,7 +128,8 @@ int VitaAudio::run() {
             sceKernelUnlockMutex(mutex_, 1);
         }
 
-        std::memset(buffer, 0, sizeof(buffer));
+        int16_t *buffer = buffers[bufferIndex];
+        std::memset(buffer, 0, sizeof(buffers[bufferIndex]));
         if (current) {
             const size_t frames =
                 std::min<size_t>(kBufferFrames, current->frameCount() - frame);
@@ -141,6 +143,7 @@ int VitaAudio::run() {
             running_ = false;
             return result;
         }
+        bufferIndex ^= 1;
     }
     return 0;
 }
