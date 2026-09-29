@@ -1013,7 +1013,8 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            "kills %zu, projectiles %zu, paths %zu, sounds %zu, elapsed %.2f; "
            "building %.0f -> %.0f selected %d, remains %d -> %zu, overlaps %zu, "
            "building destroyed/remains/decayed %d/%d/%d, edge scroll %d, "
-           "attack audio %d, automatic/retaliation/armed %zu/%zu/%zu\n",
+           "attack audio %d, approach retries %zu, "
+           "automatic/retaliation/armed %zu/%zu/%zu\n",
            targetId, initialHitPoints, finalHitPoints,
            combat.ordersIssued, combat.attacksLanded, combat.unitsKilled,
            combat.projectilesLaunched, combat.attackPathsComputed,
@@ -1023,6 +1024,7 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            buildingDestroyed ? 1 : 0, sawBuildingRemains ? 1 : 0,
            remainsDecayed ? 1 : 0, edgeScrolled ? 1 : 0,
            attackPlayedOnce ? 1 : 0,
+           combat.attackApproachRetries,
            combat.automaticTargetsAcquired, combat.retaliationOrders,
            combat.armedBuildingsEngaged);
     const bool heardBlaster =
@@ -1039,6 +1041,7 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         movement.overlappingPairs != 0 || !buildingDestroyed ||
         !sawBuildingRemains || !remainsDecayed || !edgeScrolled ||
         !attackPlayedOnce ||
+        combat.attackApproachRetries == 0 ||
         combat.automaticTargetsAcquired == 0 ||
         combat.retaliationOrders == 0) {
         fprintf(stderr, "error: combat validation failed\n");

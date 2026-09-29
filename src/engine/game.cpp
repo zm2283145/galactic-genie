@@ -156,7 +156,7 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     boxSelectActive_ = false;
     commandMarkerTime_ = 0;
     attackOrdersIssued_ = attacksLanded_ = unitsKilled_ = 0;
-    projectilesLaunched_ = attackPathsComputed_ = 0;
+    projectilesLaunched_ = attackPathsComputed_ = attackApproachRetries_ = 0;
     automaticTargetsAcquired_ = retaliationOrders_ = armedBuildingsEngaged_ = 0;
     attackModeChanges_ = 0;
     objects_.clear();
@@ -246,7 +246,7 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     boxSelectActive_ = false;
     commandMarkerTime_ = 0;
     attackOrdersIssued_ = attacksLanded_ = unitsKilled_ = 0;
-    projectilesLaunched_ = attackPathsComputed_ = 0;
+    projectilesLaunched_ = attackPathsComputed_ = attackApproachRetries_ = 0;
     automaticTargetsAcquired_ = retaliationOrders_ = armedBuildingsEngaged_ = 0;
     attackModeChanges_ = 0;
     objectIndices_.clear();
@@ -867,6 +867,7 @@ CombatStats Game::combatStats() const {
     stats.activeProjectiles = projectiles_.size();
     stats.activeRemains = remains_.size();
     stats.attackPathsComputed = attackPathsComputed_;
+    stats.attackApproachRetries = attackApproachRetries_;
     stats.automaticTargetsAcquired = automaticTargetsAcquired_;
     stats.retaliationOrders = retaliationOrders_;
     stats.armedBuildingsEngaged = armedBuildingsEngaged_;
@@ -1291,6 +1292,8 @@ void Game::issueAttack(Object &source, Object &target, float approachAngle,
     source.attackRepathTime = 0;
     source.attackApproachAngle = approachAngle;
     source.attackSlotRetries = 0;
+    source.attackStallTime = 0;
+    source.attackBestDistance = std::numeric_limits<float>::max();
     source.moveGoalActive = false;
     source.moveGroupId = 0;
     source.attackAutomatic = automatic;
@@ -1345,6 +1348,23 @@ void Game::finishAttack(Object &source, bool returnToPost) {
         source.moveBestDistance = std::sqrt(dx * dx + dy * dy);
         issueMove(source, source.homeX, source.homeY);
     }
+}
+
+void Game::retryAttackApproach(Object &source) {
+    source.attackSlotRetries++;
+    const float handedness = (source.spawnId & 1u) ? 1.0f : -1.0f;
+    const float direction = (source.attackSlotRetries & 1u) ? 1.0f : -1.0f;
+    const float magnitude =
+        0.28f * (1.0f + std::min(3u, source.attackSlotRetries / 2u));
+    source.attackApproachAngle += handedness * direction * magnitude;
+    source.path.clear();
+    source.pathIndex = 0;
+    source.state = State::Idle;
+    source.blockedTime = 0;
+    source.attackRepathTime = 0;
+    source.attackStallTime = 0;
+    source.attackBestDistance = std::numeric_limits<float>::max();
+    attackApproachRetries_++;
 }
 
 void Game::acquireAutomaticTarget(Object &source) {
@@ -1603,6 +1623,8 @@ void Game::updateAttack(Object &source, float dt) {
         source.path.clear();
         source.pathIndex = 0;
         source.blockedTime = 0;
+        source.attackStallTime = 0;
+        source.attackBestDistance = distance;
         source.state = State::Attack;
         if (source.attackCooldown <= 0) {
             const int damage = attackDamage(source, *target);
@@ -1624,7 +1646,6 @@ void Game::updateAttack(Object &source, float dt) {
         return;
     }
 
-    if (source.attackRepathTime > 0) return;
     const float contact = collisionRadius(source) + collisionRadius(*target) + 0.08f;
     float desiredDistance = std::max(contact, range * 0.8f);
     if (source.unit->minRange > 0)
@@ -1633,6 +1654,28 @@ void Game::updateAttack(Object &source, float dt) {
     const float awayY = std::sin(source.attackApproachAngle);
     const float destinationX = target->x + awayX * desiredDistance;
     const float destinationY = target->y + awayY * desiredDistance;
+    const float destinationDx = destinationX - source.x;
+    const float destinationDy = destinationY - source.y;
+    const float destinationDistance =
+        std::sqrt(destinationDx * destinationDx + destinationDy * destinationDy);
+    const float destinationShiftX = destinationX - source.targetX;
+    const float destinationShiftY = destinationY - source.targetY;
+    if (destinationShiftX * destinationShiftX +
+            destinationShiftY * destinationShiftY >
+        0.25f) {
+        source.attackStallTime = 0;
+        source.attackBestDistance = destinationDistance;
+    } else if (destinationDistance + 0.05f < source.attackBestDistance) {
+        source.attackStallTime = 0;
+        source.attackBestDistance = destinationDistance;
+    } else {
+        source.attackStallTime += dt;
+    }
+    if (source.attackStallTime >= 1.25f) {
+        retryAttackApproach(source);
+        return;
+    }
+    if (source.attackRepathTime > 0) return;
     if (source.state == State::Walk && source.pathIndex < source.path.size()) {
         const float destinationDx = destinationX - source.targetX;
         const float destinationDy = destinationY - source.targetY;
@@ -2691,20 +2734,7 @@ void Game::update(float dt, const InputState &in) {
                 }
                 if (o.blockedTime >= 1.0f) {
                     if (o.attackTargetId) {
-                        o.attackSlotRetries++;
-                        const float handedness =
-                            (o.spawnId & 1u) ? 1.0f : -1.0f;
-                        const float direction =
-                            (o.attackSlotRetries & 1u) ? 1.0f : -1.0f;
-                        const float magnitude =
-                            0.28f * (1.0f + o.attackSlotRetries / 2u);
-                        o.attackApproachAngle +=
-                            handedness * direction * magnitude;
-                        o.path.clear();
-                        o.pathIndex = 0;
-                        o.state = State::Idle;
-                        o.blockedTime = 0;
-                        o.attackRepathTime = 0;
+                        retryAttackApproach(o);
                         continue;
                     }
                     if (o.moveGoalActive &&

@@ -59,6 +59,7 @@ struct CombatStats {
     size_t activeProjectiles = 0;
     size_t activeRemains = 0;
     size_t attackPathsComputed = 0;
+    size_t attackApproachRetries = 0;
     size_t automaticTargetsAcquired = 0;
     size_t retaliationOrders = 0;
     size_t armedBuildingsEngaged = 0;
@@ -152,6 +153,8 @@ private:
         float attackCooldown = 0;
         float attackRepathTime = 0;
         float attackApproachAngle = 0;
+        float attackStallTime = 0;
+        float attackBestDistance = 0;
         float autoAcquireTime = 0;
         uint32_t attackTargetId = 0;
         uint32_t moveGroupId = 0;
@@ -263,6 +266,7 @@ private:
                      bool automatic = false);
     void acquireAutomaticTarget(Object &source);
     void finishAttack(Object &source, bool returnToPost);
+    void retryAttackApproach(Object &source);
     float automaticAcquisitionRadius(const Object &source) const;
     float automaticPursuitLeash(const Object &source) const;
     void updateAttack(Object &source, float dt);
@@ -341,6 +345,7 @@ private:
     size_t unitsKilled_ = 0;
     size_t projectilesLaunched_ = 0;
     size_t attackPathsComputed_ = 0;
+    size_t attackApproachRetries_ = 0;
     size_t automaticTargetsAcquired_ = 0;
     size_t retaliationOrders_ = 0;
     size_t armedBuildingsEngaged_ = 0;
