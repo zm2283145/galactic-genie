@@ -122,6 +122,7 @@ int main() {
              scenario.playerDataVersion);
 
         swgb::Game game(assets);
+        game.setLogger([](const std::string &s) { logf("%s", s.c_str()); });
         if (!game.initScenario(scenario, &err)) {
             errorScreen(err);
             sceKernelExitProcess(0);

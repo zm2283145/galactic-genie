@@ -37,7 +37,8 @@ static int usage() {
             "  swgbtool scenario <file.cpx> <entry>\n"
             "  swgbtool scenario-units <DataDir> <file.cpx> <entry> [unitId]\n"
             "  swgbtool render-scenario <DataDir> <file.cpx> <entry> <out.png> [x] [y] [zoom]\n"
-            "  swgbtool stress-scenario <DataDir> <file.cpx> <entry>\n");
+            "  swgbtool stress-scenario <DataDir> <file.cpx> <entry>\n"
+            "  swgbtool simulate-scenario <DataDir> <file.cpx> <entry> [seconds] [out.png]\n");
     return 2;
 }
 
@@ -249,11 +250,18 @@ static int cmdScenario(const char *path, int entryNumber) {
         printf("  %zu: enabled %d, loop %d, objective %d/%d, %zu effects, %zu conditions, '%s'\n",
                i, trigger.enabled, trigger.looping, trigger.objective, trigger.objectiveOrder,
                trigger.effects.size(), trigger.conditions.size(), trigger.name.c_str());
-        for (const ScenarioEffect &effect : trigger.effects)
-            printf("    effect %d %-23s '%s'\n", effect.type, effectName(effect.type),
-                   effect.message.c_str());
-        for (const ScenarioCondition &condition : trigger.conditions)
-            printf("    condition %d %s\n", condition.type, conditionName(condition.type));
+        for (const ScenarioEffect &effect : trigger.effects) {
+            printf("    effect %d %-23s fields", effect.type, effectName(effect.type));
+            for (int32_t field : effect.fields) printf(" %d", field);
+            printf(" selected");
+            for (uint32_t id : effect.selectedUnitIds) printf(" %u", id);
+            printf(" message '%s' sound '%s'\n", effect.message.c_str(), effect.sound.c_str());
+        }
+        for (const ScenarioCondition &condition : trigger.conditions) {
+            printf("    condition %d %-23s fields", condition.type, conditionName(condition.type));
+            for (int32_t field : condition.fields) printf(" %d", field);
+            printf("\n");
+        }
     }
     return 0;
 }
@@ -471,6 +479,52 @@ static int cmdStressScenario(const char *dataDir, const char *campaignPath, int 
     return 0;
 }
 
+static int cmdSimulateScenario(const char *dataDir, const char *campaignPath, int entryNumber,
+                               float seconds, const char *out) {
+    Scenario scenario;
+    std::string err;
+    if (!loadScenario(campaignPath, entryNumber, scenario, err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    Game game(assets);
+    game.setLogger([](const std::string &message) { printf("runtime: %s\n", message.c_str()); });
+    if (!game.initScenario(scenario, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    InputState input;
+    const float step = 1.0f / 30.0f;
+    for (float elapsed = 0; elapsed < seconds; elapsed += step)
+        game.update(std::min(step, seconds - elapsed), input);
+    if (out) {
+        game.render(renderer, 960, 544);
+        if (!renderer.savePng(out)) {
+            fprintf(stderr, "error: could not write %s\n", out);
+            return 1;
+        }
+    }
+
+    printf("simulated %.2f seconds: %zu active objects, gate 13861 %s, instruction '%s'\n",
+           seconds, game.activeObjectCount(), game.gateLocked(13861) ? "locked" : "unlocked",
+           game.currentInstruction().c_str());
+    for (size_t i = 0; i < scenario.triggers.size(); i++)
+        if (game.triggerEnabled(i) || game.triggerFired(i))
+            printf("  trigger %zu: enabled %d fired %d '%s'\n", i, game.triggerEnabled(i),
+                   game.triggerFired(i), scenario.triggers[i].name.c_str());
+    printf("  player 1 resources: food %.0f wood %.0f stone %.0f gold %.0f "
+           "contact %.0f rescued %.0f\n",
+           game.resource(1, 0), game.resource(1, 1), game.resource(1, 2),
+           game.resource(1, 3), game.resource(1, 200), game.resource(1, 201));
+    return 0;
+}
+
 // Renders one graphic at 8 world facings (0 = +x, then +45 deg steps) in a row.
 static int cmdAngles(const char *dataDir, int gid, const char *out) {
     SoftRenderer r;
@@ -523,5 +577,9 @@ int main(int argc, char **argv) {
                                  argc > 9 && !strcmp(argv[9], "moving"));
     if (!strcmp(cmd, "stress-scenario") && argc >= 5)
         return cmdStressScenario(argv[2], argv[3], atoi(argv[4]));
+    if (!strcmp(cmd, "simulate-scenario") && argc >= 5)
+        return cmdSimulateScenario(argv[2], argv[3], atoi(argv[4]),
+                                   argc > 5 ? (float)atof(argv[5]) : 1.1f,
+                                   argc > 6 ? argv[6] : nullptr);
     return usage();
 }

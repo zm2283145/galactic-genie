@@ -19,7 +19,10 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 - Player names, civilizations, colors, resources, population limits, diplomacy, and allied-victory state
   are parsed. Trigger definitions, objective metadata, conditions, effects, display order, dialogue, and
   selected-object references are parsed and validated across all 43 original `XCAM` scenarios.
-- Trigger execution, scripted behavior, and campaign progression.
+- The first trigger runtime executes ordered trigger chains, timers, object/area/resource/difficulty
+  conditions, player/resource/diplomacy changes, object creation/removal/ownership, gate state, direct
+  scripted movement, and visible queued dialogue. Audio, AI goals, full technology effects, combat-driven
+  state changes, and campaign progression remain.
 - Fog of war and explored/visible tile state.
 - Shadow and player-outline passes (PX_OUTLINE pixels drawn only when occluded).
 
@@ -33,7 +36,8 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 - SWGB-specific mechanics: shields, air units, power cores, Jedi/Sith conversion, holocrons.
 
 ## Milestone 4: interface and input on Vita
-- Font and UI rendering from interfac.drs SLPs and language_x1.dll strings.
+- Replace the temporary bitmap trigger-dialogue font with UI rendering from `interfac.drs` SLPs and
+  `language_x1.dll` strings.
 - Selection: touch tap/drag-box, and a controller cursor with snap-to-unit.
 - Command panel, minimap, resource bar and the pause menu.
 - Audio: sounds.drs/sounds_x1.drs WAVs through SceAudio, and music.
