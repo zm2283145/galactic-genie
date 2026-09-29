@@ -13,6 +13,9 @@ namespace {
 
 constexpr uint32_t kSeparator = 0xFFFFFF9D;
 constexpr size_t kPlayers = 16;
+constexpr size_t kPlayablePlayers = 8;
+constexpr int32_t kMaxTriggerFields = 64;
+constexpr int32_t kMaxTriggerRecords = 100000;
 
 bool versionAbove(float version, float threshold) { return version > threshold + 0.0001f; }
 
@@ -32,6 +35,12 @@ std::string sizedString32(ByteReader &reader) {
     size_t length = size;
     if (length && data[length - 1] == '\0') length--;
     return std::string(data, length);
+}
+
+void skipSizedBlock32(ByteReader &reader, const char *what) {
+    const uint32_t size = reader.u32();
+    if (size > reader.remaining()) throw FormatError(std::string(what) + " exceeds remaining data");
+    reader.skip(size);
 }
 
 void expectSeparator(ByteReader &reader, const char *section) {
@@ -89,12 +98,15 @@ void skipPlayerData(ByteReader &reader, Scenario &scenario) {
         throw FormatError("unsupported scenario player-data version");
 
     if (versionAbove(version, 1.13f)) {
-        reader.skip(kPlayers * 256);
-        if (versionAbove(version, 1.15f)) reader.skip(kPlayers * 4);
+        for (ScenarioPlayer &player : scenario.players) player.name = reader.fixedStr(256);
+        if (versionAbove(version, 1.15f))
+            for (size_t i = 0; i < kPlayers; i++) reader.i32();
         for (size_t i = 0; i < kPlayers; i++) {
-            reader.u32();
-            reader.u32();
-            scenario.civilizations[i] = reader.u32();
+            ScenarioPlayer &player = scenario.players[i];
+            player.active = reader.u32() != 0;
+            player.human = reader.u32() != 0;
+            player.civilization = reader.u32();
+            scenario.civilizations[i] = player.civilization;
             reader.u32();
         }
     }
@@ -135,12 +147,18 @@ void skipPlayerData(ByteReader &reader, Scenario &scenario) {
     } else {
         size_t resourceFields = versionAbove(version, 1.16f) ? 6 : 4;
         if (versionAbove(version, 1.23f)) resourceFields++;
-        reader.skip(kPlayers * resourceFields * 4);
+        for (ScenarioPlayer &player : scenario.players) {
+            for (size_t field = 0; field < resourceFields; field++) {
+                const uint32_t value = reader.u32();
+                if (field < player.resources.size()) player.resources[field] = (float)value;
+            }
+        }
     }
     if (versionAbove(version, 1.01f)) expectSeparator(reader, "victory conditions");
 
     reader.skip((versionAbove(version, 1.12f) ? 10 : 7) * 4);
-    reader.skip(kPlayers * kPlayers * 4);
+    for (ScenarioPlayer &player : scenario.players)
+        for (uint32_t &stance : player.diplomacy) stance = reader.u32();
     reader.skip(kPlayers * 180 * 4);
     if (versionAbove(version, 1.01f)) expectSeparator(reader, "allied victories");
     reader.skip((version < 1.02f ? kPlayers * kPlayers : kPlayers) * 4);
@@ -169,13 +187,107 @@ void skipPlayerData(ByteReader &reader, Scenario &scenario) {
     if (versionAbove(version, 1.23f)) reader.skip(kPlayers);
 }
 
+ScenarioEffect readEffect(ByteReader &reader) {
+    ScenarioEffect effect;
+    effect.type = reader.i32();
+    const int32_t fieldCount = reader.i32();
+    if (fieldCount < 0 || fieldCount > kMaxTriggerFields)
+        throw FormatError("invalid scenario effect field count");
+    effect.fields = reader.vec<int32_t>((size_t)fieldCount);
+    effect.message = sizedString32(reader);
+    effect.sound = sizedString32(reader);
+    const int32_t selectedCount = effect.fields.size() > 4 ? effect.fields[4] : 0;
+    if (selectedCount > kMaxTriggerRecords ||
+        (selectedCount > 0 && (uint64_t)selectedCount * sizeof(uint32_t) > reader.remaining()))
+        throw FormatError("invalid scenario effect selection count");
+    if (selectedCount > 0) effect.selectedUnitIds = reader.vec<uint32_t>((size_t)selectedCount);
+    return effect;
+}
+
+ScenarioCondition readCondition(ByteReader &reader) {
+    ScenarioCondition condition;
+    condition.type = reader.i32();
+    const int32_t fieldCount = reader.i32();
+    if (fieldCount < 0 || fieldCount > kMaxTriggerFields)
+        throw FormatError("invalid scenario condition field count");
+    condition.fields = reader.vec<int32_t>((size_t)fieldCount);
+    return condition;
+}
+
+ScenarioTrigger readTrigger(ByteReader &reader) {
+    ScenarioTrigger trigger;
+    trigger.enabled = reader.i32() != 0;
+    trigger.looping = reader.u8() != 0;
+    reader.i32();
+    trigger.objective = reader.u8() != 0;
+    trigger.objectiveOrder = reader.i32();
+    trigger.objectiveStringId = reader.i32();
+    trigger.description = sizedString32(reader);
+    trigger.name = sizedString32(reader);
+
+    const int32_t effectCount = reader.i32();
+    if (effectCount < 0 || effectCount > kMaxTriggerRecords)
+        throw FormatError("invalid scenario trigger effect count");
+    trigger.effects.reserve((size_t)effectCount);
+    for (int32_t i = 0; i < effectCount; i++) trigger.effects.push_back(readEffect(reader));
+    trigger.effectOrder = reader.vec<int32_t>((size_t)effectCount);
+
+    const int32_t conditionCount = reader.i32();
+    if (conditionCount < 0 || conditionCount > kMaxTriggerRecords)
+        throw FormatError("invalid scenario trigger condition count");
+    trigger.conditions.reserve((size_t)conditionCount);
+    for (int32_t i = 0; i < conditionCount; i++) trigger.conditions.push_back(readCondition(reader));
+    trigger.conditionOrder = reader.vec<int32_t>((size_t)conditionCount);
+    return trigger;
+}
+
+void readTriggers(ByteReader &reader, Scenario &scenario) {
+    scenario.triggerSystemVersion = reader.get<double>();
+    if (!std::isfinite(scenario.triggerSystemVersion))
+        throw FormatError("invalid scenario trigger-system version");
+    scenario.objectiveState = reader.u8();
+    const uint32_t triggerCount = reader.u32();
+    if (triggerCount > (uint32_t)kMaxTriggerRecords)
+        throw FormatError("invalid scenario trigger count");
+    scenario.triggers.reserve(triggerCount);
+    for (uint32_t i = 0; i < triggerCount; i++) scenario.triggers.push_back(readTrigger(reader));
+    scenario.triggerOrder = reader.vec<uint32_t>(triggerCount);
+
+    const int32_t filesIncluded = reader.i32();
+    const int32_t compatibilityIncluded = reader.i32();
+    if ((filesIncluded != 0 && filesIncluded != 1) ||
+        (compatibilityIncluded != 0 && compatibilityIncluded != 1))
+        throw FormatError("invalid scenario included-file flags");
+    if (compatibilityIncluded) reader.skip(396);
+    if (filesIncluded) {
+        const int32_t fileCount = reader.i32();
+        if (fileCount < 0 || fileCount > kMaxTriggerRecords)
+            throw FormatError("invalid scenario included-file count");
+        for (int32_t i = 0; i < fileCount; i++) {
+            sizedString32(reader);
+            skipSizedBlock32(reader, "scenario included file");
+        }
+    }
+    if (reader.remaining() != 0) throw FormatError("unexpected data after scenario triggers");
+}
+
 void readScenarioObjects(ByteReader &reader, Scenario &scenario) {
     const uint32_t playerBlocks = reader.u32();
     if (!playerBlocks || playerBlocks > 16) throw FormatError("invalid scenario player-unit block count");
 
     // SWGB SCX 1.21 uses internal scenario version 1.15: food, carbon,
     // nova, ore, an additional ore slot, and population limit.
-    reader.skip(8 * 6 * sizeof(float));
+    for (size_t player = 0; player < kPlayablePlayers; player++) {
+        for (size_t resource = 0; resource < 5; resource++) {
+            const float value = reader.f32();
+            if (!std::isfinite(value)) throw FormatError("scenario player has a non-finite resource");
+            scenario.players[player].resources[resource] = value;
+        }
+        const float populationLimit = reader.f32();
+        if (!std::isfinite(populationLimit))
+            throw FormatError("scenario player has a non-finite population limit");
+        scenario.players[player].populationLimit = populationLimit;
+    }
 
     scenario.units.clear();
     for (uint32_t player = 0; player < playerBlocks; player++) {
@@ -204,15 +316,42 @@ void readScenarioObjects(ByteReader &reader, Scenario &scenario) {
     }
 
     const uint32_t playerCount = reader.u32();
-    if (!playerCount || playerCount > 16) throw FormatError("invalid secondary scenario player count");
-    const uint16_t playerNameLength = reader.u16();
-    reader.skip(playerNameLength);
-    const float cameraX = reader.f32();
-    const float cameraY = reader.f32();
-    if (std::isfinite(cameraX) && std::isfinite(cameraY) && cameraX >= 0 && cameraY >= 0) {
-        scenario.cameraX = cameraX;
-        scenario.cameraY = cameraY;
+    if (playerCount < 2 || playerCount > 16) throw FormatError("invalid secondary scenario player count");
+    const size_t recordCount = playerCount - 1;
+    for (size_t player = 0; player < recordCount; player++) {
+        ScenarioPlayer &state = scenario.players[player];
+        sizedString16(reader);
+        state.cameraX = reader.f32();
+        state.cameraY = reader.f32();
+        if (!std::isfinite(state.cameraX) || !std::isfinite(state.cameraY))
+            throw FormatError("scenario player has a non-finite camera");
+        reader.i16();
+        reader.i16();
+        state.alliedVictory = reader.u8() != 0;
+        const int16_t diplomacyCount = reader.i16();
+        if (diplomacyCount < 0 || diplomacyCount > 16)
+            throw FormatError("invalid secondary scenario diplomacy count");
+        for (int16_t i = 0; i < diplomacyCount; i++) state.diplomacy[(size_t)i] = reader.u8();
+        for (int16_t i = 0; i < diplomacyCount; i++) reader.u32();
+        const int32_t color = reader.i32();
+        if (color < 0 || color > 255) throw FormatError("invalid scenario player color");
+        state.color = (uint32_t)color;
+        const float recordVersion = reader.f32();
+        if (!std::isfinite(recordVersion)) throw FormatError("invalid secondary player-data version");
+        const int16_t extraCount = reader.i16();
+        if (extraCount < 0) throw FormatError("invalid secondary player-data record count");
+        if (std::fabs(recordVersion - 2.0f) < 0.0001f) reader.skip(8);
+        if ((uint64_t)(uint16_t)extraCount * 44 > reader.remaining())
+            throw FormatError("secondary player data exceeds remaining data");
+        reader.skip((size_t)extraCount * 44);
+        reader.skip(7);
+        reader.i32();
     }
+    if (scenario.players[0].cameraX >= 0 && scenario.players[0].cameraY >= 0) {
+        scenario.cameraX = scenario.players[0].cameraX;
+        scenario.cameraY = scenario.players[0].cameraY;
+    }
+    readTriggers(reader, scenario);
 }
 
 } // namespace

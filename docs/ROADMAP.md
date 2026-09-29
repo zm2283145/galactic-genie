@@ -16,7 +16,10 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   Galactic Empire mission 2, “Breaking Bread,” directly from the original `XCAM3.CPX`.
 - Initial scenario objects and the saved camera are loaded, including trees, resources, buildings, and
   units. Terrain aliases and civilization-specific farm terrain are resolved from the original data.
-- Player resources/state, triggers, objectives, scripted behavior, and campaign progression.
+- Player names, civilizations, colors, resources, population limits, diplomacy, and allied-victory state
+  are parsed. Trigger definitions, objective metadata, conditions, effects, display order, dialogue, and
+  selected-object references are parsed and validated across all 43 original `XCAM` scenarios.
+- Trigger execution, scripted behavior, and campaign progression.
 - Fog of war and explored/visible tile state.
 - Shadow and player-outline passes (PX_OUTLINE pixels drawn only when occluded).
 

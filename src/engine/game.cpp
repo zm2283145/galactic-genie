@@ -132,6 +132,8 @@ inline void toScreen(float x, float y, float &sx, float &sy) {
 
 bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     rng_.seed(seed);
+    players_ = {};
+    for (size_t i = 0; i < players_.size(); i++) players_[i].color = (uint32_t)i;
     mapSize_ = mapSize;
     generateTerrain(mapSize);
 
@@ -173,6 +175,7 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     }
 
     rng_.seed(1);
+    players_ = scenario.players;
     mapSize_ = (int)scenario.map.width;
     terrain_.resize(scenario.map.tiles.size());
     // Rotate scenario world coordinates 90 degrees counterclockwise. Transforming
@@ -394,8 +397,9 @@ void Game::spawnBase(int player, int civ, char L, float cx, float cy) {
 int Game::playerColorBase(int player) const {
     const auto &pc = assets_.dat().playerColours;
     if (player <= 0) return 16;
-    size_t i = (size_t)(player - 1);
-    return i < pc.size() ? pc[i].playerColorBase : 16;
+    const size_t playerIndex = (size_t)(player - 1);
+    const size_t colorIndex = playerIndex < players_.size() ? players_[playerIndex].color : playerIndex;
+    return colorIndex < pc.size() ? pc[colorIndex].playerColorBase : 16;
 }
 
 void Game::lookAt(float tx, float ty) { toScreen(tx, ty, camX_, camY_); }

@@ -72,6 +72,11 @@ static int cmdInfo(const char *dataDir) {
         printf(" %zu=%dx%dx%d", i, size.width, size.height, size.deltaY);
     }
     printf("\n");
+    for (size_t i = 0; i < d.playerColours.size(); i++) {
+        const auto &color = d.playerColours[i];
+        printf("  player color %zu: id %d, palette base %d, minimap %d, statistics %d\n",
+               i, color.id, color.playerColorBase, color.minimapColor, color.statisticsText);
+    }
     for (size_t i = 0; i < d.terrainBlock.terrains.size(); i++) {
         const auto &terrain = d.terrainBlock.terrains[i];
         if (terrain.blendType >= 8)
@@ -181,6 +186,33 @@ static bool loadScenario(const char *path, int entryNumber, Scenario &scenario, 
     return scenario.load(scx, &err);
 }
 
+static const char *effectName(int type) {
+    static const char *names[] = {
+        "None", "Change Diplomacy", "Research Technology", "Send Chat", "Play Sound",
+        "Send Tribute", "Unlock Gate", "Lock Gate", "Activate Trigger", "Deactivate Trigger",
+        "AI Script Goal", "Create Object", "Task Object", "Declare Victory", "Kill Object",
+        "Remove Object", "Change View", "Unload", "Change Ownership", "Patrol",
+        "Display Instructions", "Clear Instructions", "Freeze Unit", "Advanced Buttons",
+        "Damage Object", "Place Foundation", "Change Object Name", "Change Object HP",
+        "Change Object Attack", "Stop Unit", "Snap View", "Unknown 31", "Enable Tech",
+        "Disable Tech", "Enable Unit", "Disable Unit", "Flash Objects"
+    };
+    return type >= 0 && (size_t)type < sizeof(names) / sizeof(names[0]) ? names[type] : "Unknown";
+}
+
+static const char *conditionName(int type) {
+    static const char *names[] = {
+        "None", "Bring Object to Area", "Bring Object to Object", "Own Objects",
+        "Own Fewer Objects", "Objects in Area", "Destroy Object", "Capture Object",
+        "Accumulate Attribute", "Research Technology", "Timer", "Object Selected",
+        "AI Signal", "Player Defeated", "Object Has Target", "Object Visible",
+        "Object Not Visible", "Researching Technology", "Units Garrisoned",
+        "Difficulty Level", "Own Fewer Foundations", "Selected Objects in Area",
+        "Powered Objects in Area", "Units Queued Past Pop Cap"
+    };
+    return type >= 0 && (size_t)type < sizeof(names) / sizeof(names[0]) ? names[type] : "Unknown";
+}
+
 static int cmdScenario(const char *path, int entryNumber) {
     Scenario scenario;
     std::string err;
@@ -194,6 +226,28 @@ static int cmdScenario(const char *path, int entryNumber) {
            scenario.nextUnitId);
     printf("camera %.1f,%.1f\n", scenario.cameraX, scenario.cameraY);
     printf("instructions: %s\n", scenario.instructions.c_str());
+    for (size_t i = 0; i < 8; i++) {
+        const ScenarioPlayer &player = scenario.players[i];
+        printf("player %zu: active %d, human %d, civ %u, color %u, resources "
+               "%.0f/%.0f/%.0f/%.0f/%.0f, population %.0f, allied victory %d, name '%s'\n",
+               i + 1, player.active, player.human, player.civilization, player.color,
+               player.resources[0], player.resources[1], player.resources[2],
+               player.resources[3], player.resources[4], player.populationLimit,
+               player.alliedVictory, player.name.c_str());
+    }
+    printf("triggers: %zu, system %.2f, objective state %u\n", scenario.triggers.size(),
+           scenario.triggerSystemVersion, scenario.objectiveState);
+    for (size_t i = 0; i < scenario.triggers.size(); i++) {
+        const ScenarioTrigger &trigger = scenario.triggers[i];
+        printf("  %zu: enabled %d, loop %d, objective %d/%d, %zu effects, %zu conditions, '%s'\n",
+               i, trigger.enabled, trigger.looping, trigger.objective, trigger.objectiveOrder,
+               trigger.effects.size(), trigger.conditions.size(), trigger.name.c_str());
+        for (const ScenarioEffect &effect : trigger.effects)
+            printf("    effect %d %-23s '%s'\n", effect.type, effectName(effect.type),
+                   effect.message.c_str());
+        for (const ScenarioCondition &condition : trigger.conditions)
+            printf("    condition %d %s\n", condition.type, conditionName(condition.type));
+    }
     return 0;
 }
 

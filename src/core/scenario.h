@@ -33,6 +33,47 @@ struct ScenarioUnit {
     uint8_t player = 0;
 };
 
+struct ScenarioPlayer {
+    std::string name;
+    uint32_t civilization = 0;
+    uint32_t color = 0;
+    bool active = false;
+    bool human = false;
+    bool alliedVictory = false;
+    float cameraX = -1;
+    float cameraY = -1;
+    std::array<float, 6> resources{};
+    std::array<uint32_t, 16> diplomacy{};
+    float populationLimit = 0;
+};
+
+struct ScenarioEffect {
+    int32_t type = 0;
+    std::vector<int32_t> fields;
+    std::string message;
+    std::string sound;
+    std::vector<uint32_t> selectedUnitIds;
+};
+
+struct ScenarioCondition {
+    int32_t type = 0;
+    std::vector<int32_t> fields;
+};
+
+struct ScenarioTrigger {
+    bool enabled = false;
+    bool looping = false;
+    bool objective = false;
+    int32_t objectiveOrder = -1;
+    int32_t objectiveStringId = -1;
+    std::string description;
+    std::string name;
+    std::vector<ScenarioEffect> effects;
+    std::vector<int32_t> effectOrder;
+    std::vector<ScenarioCondition> conditions;
+    std::vector<int32_t> conditionOrder;
+};
+
 struct Scenario {
     std::string version;
     int32_t saveType = 0;
@@ -48,8 +89,13 @@ struct Scenario {
     float cameraX = -1;
     float cameraY = -1;
     std::array<uint32_t, 16> civilizations{};
+    std::array<ScenarioPlayer, 16> players{};
     ScenarioMap map;
     std::vector<ScenarioUnit> units;
+    double triggerSystemVersion = 0;
+    uint8_t objectiveState = 0;
+    std::vector<ScenarioTrigger> triggers;
+    std::vector<uint32_t> triggerOrder;
 
     bool load(const std::vector<uint8_t> &scx, std::string *err = nullptr);
 };

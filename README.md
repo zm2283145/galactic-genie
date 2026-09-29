@@ -15,7 +15,7 @@ It is written clean-room style: file formats come from public documentation (ope
 | Sprite atlas builder (per SLP and player colour) | done |
 | Isometric terrain renderer with `blendomatic.dat` priority/mode edge blending | done |
 | Terrain elevation with original slope geometry and neighbor-sensitive lighting | done |
-| CPX/SCX terrain, elevation, saved camera, and initial object loading (“Breaking Bread”) | done |
+| CPX/SCX terrain, elevation, player state, triggers, saved camera, and initial object loading (“Breaking Bread”) | done |
 | Units: idle/walk animation, 8-way facing with mirroring, graphic deltas for buildings | done |
 | Vita: vitaGL batched fixed-function renderer, stick/d-pad/touch scroll, L/R zoom | done |
 | PC `swgbtool`: data inspection, CPX/SCX listing, and procedural/scenario PNG rendering | done |

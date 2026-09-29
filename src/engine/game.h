@@ -6,6 +6,7 @@
 #include "assets.h"
 #include "../core/scenario.h"
 
+#include <array>
 #include <cstdint>
 #include <random>
 #include <string>
@@ -85,6 +86,7 @@ private:
     std::vector<uint8_t> tileElevation_;
     std::vector<uint8_t> tileSlope_;
     std::vector<Object> objects_;
+    std::array<ScenarioPlayer, 16> players_{};
     float camX_ = 0, camY_ = 0; // world-pixel position of the screen centre
     float zoom_ = 1.0f;
     bool debug_ = false;
