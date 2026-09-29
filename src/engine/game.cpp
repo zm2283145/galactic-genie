@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <map>
+#include <set>
 
 namespace swgb {
 
@@ -228,6 +229,18 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
         }
     }
     buildTileElevation();
+    std::set<std::pair<int32_t, uint8_t>> canonicalSlopes;
+    for (size_t i = 0; i < terrain_.size(); i++) {
+        const uint8_t slope = tileSlope_[i];
+        if (!slope) continue;
+        const dat::Terrain &draw = drawTerrain(terrains, terrain_[i]);
+        canonicalSlopes.insert({draw.slp, slope});
+    }
+    std::array<int8_t, 8> canonicalNeighbors;
+    canonicalNeighbors.fill(-1);
+    for (const auto &entry : canonicalSlopes)
+        assets_.terrainSlopeFrame(entry.first, entry.second, 0, canonicalNeighbors);
+
     objects_.clear();
     objects_.reserve(scenario.units.size() * 2);
     for (const ScenarioUnit &source : scenario.units) {
@@ -599,8 +612,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     assets_.beginTerrainFrame(64u * 1024u * 1024u);
     const float viewW = screenW / zoom_, viewH = screenH / zoom_;
     const float ox = camX_ - viewW / 2, oy = camY_ - viewH / 2; // world-pixel of screen top-left
-    const bool flattenTerrain = cameraMotionTime_ > 0;
-    const bool lowDetail = flattenTerrain || zoom_ < 0.6f;
+    const bool lowDetail = cameraMotionTime_ > 0 || zoom_ < 0.6f;
     // At overview zoom the blend overlays are sub-pixel detail but account for
     // hundreds of extra masked draws and slope-mask cache entries on Vita.
     const bool drawTerrainBlends = !lowDetail && assets_.hasBlendMasks();
@@ -643,8 +655,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             toScreen((float)tx, (float)ty, sx, sy);
             const size_t tileIndex = (size_t)ty * mapSize_ + tx;
             const int slope = tileSlope_[tileIndex];
-            if (!flattenTerrain)
-                sy -= tileElevation_[tileIndex] * assets_.dat().terrainBlock.elevHeight;
+            sy -= tileElevation_[tileIndex] * assets_.dat().terrainBlock.elevHeight;
             sx -= ox;
             sy -= oy;
             if (sx + kTileHalfW < 0 || sx - kTileHalfW > viewW || sy > viewH + 48 ||
@@ -653,17 +664,18 @@ void Game::render(Renderer &r, int screenW, int screenH) {
 
             std::array<int8_t, 8> neighborSlopes;
             neighborSlopes.fill(-1);
-            for (size_t i = 0; i < neighborSlopes.size(); i++) {
-                int nx = tx + slopeNeighborX[i], ny = ty + slopeNeighborY[i];
-                if (nx >= 0 && ny >= 0 && nx < mapSize_ && ny < mapSize_)
-                    neighborSlopes[i] = tileSlope_[(size_t)ny * mapSize_ + nx];
-            }
+            if (!lowDetail)
+                for (size_t i = 0; i < neighborSlopes.size(); i++) {
+                    int nx = tx + slopeNeighborX[i], ny = ty + slopeNeighborY[i];
+                    if (nx >= 0 && ny >= 0 && nx < mapSize_ && ny < mapSize_)
+                        neighborSlopes[i] = tileSlope_[(size_t)ny * mapSize_ + nx];
+                }
             const int terrainId = terrainAt(tx, ty);
             const dat::Terrain &terrain = terrains[terrainId];
             const dat::Terrain &draw = drawTerrain(terrains, terrainId);
             const SpriteSheet *flat = assets_.terrainSheet(draw.slp);
-            if (!flattenTerrain)
-                assets_.terrainSlopeFrame(draw.slp, slope, frameIndexFor(flat, tx, ty), neighborSlopes);
+            const size_t terrainFrame = lowDetail && slope ? 0 : frameIndexFor(flat, tx, ty);
+            assets_.terrainSlopeFrame(draw.slp, slope, terrainFrame, neighborSlopes);
 
             if (!drawTerrainBlends) continue;
             std::array<int, 8> neighbors;
@@ -712,8 +724,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         }
         float sx, sy;
         toScreen(o.x, o.y, sx, sy);
-        if (!flattenTerrain)
-            sy -= elevationAt(o.x, o.y) * assets_.dat().terrainBlock.elevHeight;
+        sy -= elevationAt(o.x, o.y) * assets_.dat().terrainBlock.elevHeight;
         sx -= ox;
         sy -= oy;
         if (sx < -400 || sx > viewW + 400 || sy < -100 || sy > viewH + 500) continue;
@@ -731,7 +742,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             const size_t tileIndex = (size_t)ty * mapSize_ + tx;
             const int slope = tileSlope_[tileIndex];
             const int elevation = tileElevation_[tileIndex];
-            if (!flattenTerrain) sy -= elevation * assets_.dat().terrainBlock.elevHeight;
+            sy -= elevation * assets_.dat().terrainBlock.elevHeight;
             sx -= ox;
             sy -= oy;
             if (sx + kTileHalfW < 0 || sx - kTileHalfW > viewW || sy > viewH + 48 || sy + 3 * kTileHalfH < 0)
@@ -741,25 +752,22 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             const dat::Terrain &draw = drawTerrain(terrains, terrainId);
             std::array<int8_t, 8> neighborSlopes;
             neighborSlopes.fill(-1);
-            for (size_t i = 0; i < neighborSlopes.size(); i++) {
-                int nx = tx + slopeNeighborX[i], ny = ty + slopeNeighborY[i];
-                if (nx >= 0 && ny >= 0 && nx < mapSize_ && ny < mapSize_)
-                    neighborSlopes[i] = tileSlope_[(size_t)ny * mapSize_ + nx];
-            }
+            if (!lowDetail)
+                for (size_t i = 0; i < neighborSlopes.size(); i++) {
+                    int nx = tx + slopeNeighborX[i], ny = ty + slopeNeighborY[i];
+                    if (nx >= 0 && ny >= 0 && nx < mapSize_ && ny < mapSize_)
+                        neighborSlopes[i] = tileSlope_[(size_t)ny * mapSize_ + nx];
+                }
             const SpriteSheet *flatBase = assets_.terrainSheet(draw.slp);
-            const size_t terrainFrame = frameIndexFor(flatBase, tx, ty);
-            const SpriteFrame *baseFrame = flattenTerrain
-                                               ? flatBase && terrainFrame < flatBase->frames.size()
-                                                     ? &flatBase->frames[terrainFrame]
-                                                     : nullptr
-                                               : assets_.terrainSlopeFrame(draw.slp, slope, terrainFrame,
-                                                                           neighborSlopes);
+            const size_t terrainFrame = lowDetail && slope ? 0 : frameIndexFor(flatBase, tx, ty);
+            const SpriteFrame *baseFrame =
+                assets_.terrainSlopeFrame(draw.slp, slope, terrainFrame, neighborSlopes);
             if (!baseFrame) continue;
             const SpriteFrame &f = *baseFrame;
-            const int deltaY = !flattenTerrain && slope < (int)assets_.dat().terrainBlock.tileSizes.size()
+            const int deltaY = slope < (int)assets_.dat().terrainBlock.tileSizes.size()
                                    ? assets_.dat().terrainBlock.tileSizes[(size_t)slope].deltaY
                                    : 0;
-            const float tileY = sy - deltaY - (!flattenTerrain && slope ? 12.0f : 0.0f);
+            const float tileY = sy - deltaY - (slope ? 12.0f : 0.0f);
             Quad q{sx - kTileHalfW, tileY, (float)f.w, (float)f.h, f.u, f.v, f.u + f.w, f.v + f.h};
             r.draw(f.tex, q);
             stats_.tiles++;
