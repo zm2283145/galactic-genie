@@ -38,6 +38,7 @@ constexpr int kSuperconductingShieldsTech = 570;
 constexpr int kShieldWallTech = 484;
 constexpr int kBuildingIconSlpBase = 53241;
 constexpr int kUnitIconSlpBase = 53251;
+constexpr int kTechnologyIconSlpBase = 50734;
 constexpr float kSelectionPanelHeight = 112.0f;
 constexpr float kFormationButtonX = 14.0f;
 constexpr float kFormationButtonY = 12.0f;
@@ -49,9 +50,17 @@ constexpr float kGroupPortraitY = 10.0f;
 constexpr float kGroupPortraitSize = 36.0f;
 constexpr float kGroupPortraitStepX = 41.0f;
 constexpr float kGroupPortraitStepY = 46.0f;
-constexpr float kActionMenuX = 500.0f;
-constexpr float kActionMenuY = 64.0f;
-constexpr float kActionMenuWidth = 440.0f;
+constexpr float kActionMenuX = 176.0f;
+constexpr float kActionMenuTop = 118.0f;
+constexpr float kActionMenuY = 164.0f;
+constexpr float kActionMenuWidth = 760.0f;
+constexpr float kActionMenuHeight = 306.0f;
+constexpr float kActionMenuCell = 52.0f;
+constexpr float kActionMenuIconSize = 44.0f;
+constexpr size_t kActionMenuColumns = 5;
+constexpr size_t kActionMenuRows = 3;
+constexpr size_t kActionMenuVisibleItems =
+    kActionMenuColumns * kActionMenuRows;
 constexpr float kActionMenuRowHeight = 42.0f;
 constexpr size_t kActionMenuMaxRows = 10;
 constexpr int kPowerRadiusGraphic = 5025;
@@ -280,6 +289,8 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     actionMenuOpen_ = false;
     actionMenuObjectId_ = 0;
     actionMenuTab_ = ActionMenuTab::Units;
+    actionMenuSelection_ = 0;
+    actionMenuScroll_ = 0;
     placementUnit_ = nullptr;
     placementBuilderId_ = 0;
     cheatMenuOpen_ = false;
@@ -531,6 +542,8 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     actionMenuOpen_ = false;
     actionMenuObjectId_ = 0;
     actionMenuTab_ = ActionMenuTab::Units;
+    actionMenuSelection_ = 0;
+    actionMenuScroll_ = 0;
     placementUnit_ = nullptr;
     placementBuilderId_ = 0;
     cheatMenuOpen_ = false;
@@ -1443,6 +1456,60 @@ uint32_t Game::spawnObjectForTesting(
     object->wander = false;
     rebuildAdjacency();
     return spawnId;
+}
+
+uint32_t Game::spawnFoundationForTesting(
+    int civilization, int unitId, int player,
+    float x, float y,
+    const std::vector<uint32_t> &builderIds) {
+    const dat::Unit *unit =
+        findUnit(civilization, unitId);
+    if (!unit) return 0;
+    const uint32_t spawnId = nextSpawnId_++;
+    Object *building = addObject(
+        unit, player, x, y, 0, spawnId);
+    if (!building) return 0;
+    building->wander = false;
+    building->underConstruction = true;
+    building->constructionTotal =
+        std::max(1.0f, (float)unit->trainTime);
+    building->constructionRemaining =
+        building->constructionTotal;
+    building->hitPoints = 1.0f;
+    rebuildAdjacency();
+    for (uint32_t builderId : builderIds) {
+        Object *worker = findObject(builderId);
+        if (worker)
+            assignBuilder(*worker, *building);
+    }
+    return spawnId;
+}
+
+bool Game::completeFoundationForTesting(
+    uint32_t spawnId) {
+    Object *building = findObject(spawnId);
+    if (!building ||
+        !building->underConstruction)
+        return false;
+    building->constructionRemaining = 0.0f;
+    return true;
+}
+
+bool Game::setConstructionProgressForTesting(
+    uint32_t spawnId, float progress) {
+    Object *building = findObject(spawnId);
+    if (!building ||
+        !building->underConstruction)
+        return false;
+    progress = std::max(
+        0.0f, std::min(0.999f, progress));
+    building->constructionRemaining =
+        building->constructionTotal *
+        (1.0f - progress);
+    building->hitPoints = std::max(
+        1.0f,
+        building->maxHitPoints * progress);
+    return true;
 }
 
 bool Game::damageObjectForTesting(
@@ -2561,7 +2628,6 @@ std::vector<int> Game::researchOptions(
                 building, technology.locationId) ||
             researchedTechs_[(size_t)player].count((int)id) ||
             disabledTechs_[(size_t)player].count((int)id) ||
-            !technologyRequirementsMet(player, technology) ||
             assets_.localizedString(
                 technology.languageDllName).empty())
             continue;
@@ -2586,6 +2652,189 @@ std::vector<int> Game::researchOptions(
             return a < b;
         });
     return options;
+}
+
+std::string Game::technologyDisplayName(
+    int technologyId) const {
+    if (technologyId < 0 ||
+        (size_t)technologyId >= assets_.dat().techs.size())
+        return "Technology " + std::to_string(technologyId);
+    const dat::Tech &technology =
+        assets_.dat().techs[(size_t)technologyId];
+    std::string name =
+        assets_.localizedString(technology.languageDllName);
+    if (!name.empty()) return name;
+    name = technology.name2.empty()
+               ? technology.name
+               : technology.name2;
+    const size_t age = name.find("AGE");
+    if ((name.rfind("OPEN-TECH-", 0) == 0 ||
+         name.rfind("TECH-", 0) == 0) &&
+        age != std::string::npos &&
+        age + 3 < name.size())
+        return "Tech Level " + name.substr(age + 3);
+    bool buildRequirement = false;
+    static constexpr const char *prefixes[] = {
+        "MADE-BLDG-", "AVAIL-", "TECH-", "UT-", "RT-",
+    };
+    for (const char *prefix : prefixes) {
+        const size_t length = std::char_traits<char>::length(prefix);
+        if (name.rfind(prefix, 0) != 0) continue;
+        buildRequirement =
+            std::string(prefix) == "MADE-BLDG-";
+        name.erase(0, length);
+        break;
+    }
+    for (char &character : name)
+        if (character == '-' || character == '_')
+            character = ' ';
+        else
+            character =
+                (char)std::tolower((unsigned char)character);
+    bool capitalize = true;
+    for (char &character : name) {
+        if (character == ' ') {
+            capitalize = true;
+            continue;
+        }
+        if (capitalize)
+            character =
+                (char)std::toupper((unsigned char)character);
+        capitalize = false;
+    }
+    if (name.empty())
+        name = "Technology " +
+               std::to_string(technologyId);
+    return buildRequirement ? "Build " + name : name;
+}
+
+std::vector<std::string>
+Game::technologyRequirementLines(
+    int player, int technologyId) const {
+    std::vector<std::string> lines;
+    if (technologyId < 0 ||
+        (size_t)technologyId >= assets_.dat().techs.size())
+        return lines;
+    const dat::Tech &technology =
+        assets_.dat().techs[(size_t)technologyId];
+    if (technology.requiredTechCount <= 0) {
+        lines.push_back("Requirements: none");
+        return lines;
+    }
+    int listed = 0;
+    for (int required : technology.requiredTechs)
+        if (required >= 0) listed++;
+    lines.push_back(
+        "Requires " +
+        std::to_string(technology.requiredTechCount) +
+        (technology.requiredTechCount == listed
+             ? " of:"
+             : " of these " +
+                   std::to_string(listed) + ":"));
+    for (int required : technology.requiredTechs) {
+        if (required < 0) continue;
+        const bool met =
+            player >= 0 &&
+            (size_t)player < researchedTechs_.size() &&
+            researchedTechs_[(size_t)player].count(
+                required) != 0;
+        lines.push_back(
+            std::string(met ? "[X] " : "[ ] ") +
+            technologyDisplayName(required));
+    }
+    return lines;
+}
+
+std::vector<std::string>
+Game::technologyEffectLines(
+    int technologyId) const {
+    std::vector<std::string> lines;
+    if (technologyId < 0 ||
+        (size_t)technologyId >= assets_.dat().techs.size())
+        return lines;
+    const dat::Tech &technology =
+        assets_.dat().techs[(size_t)technologyId];
+    const std::string description =
+        assets_.localizedString(
+            technology.languageDllDescription);
+    if (!description.empty())
+        lines.push_back(description);
+    if (technology.effectId < 0 ||
+        (size_t)technology.effectId >=
+            assets_.dat().effects.size())
+        return lines;
+    auto unitName = [&](int unitId) {
+        for (const dat::Civ &civilization :
+             assets_.dat().civs)
+            if (unitId >= 0 &&
+                (size_t)unitId < civilization.units.size() &&
+                civilization.units[(size_t)unitId].exists)
+                return unitDisplayName(
+                    civilization.units[(size_t)unitId]);
+        return std::string("unit ") +
+               std::to_string(unitId);
+    };
+    static constexpr const char *attributes[] = {
+        "hit points", "line of sight", "garrison capacity",
+        "collision width", "collision height", "movement speed",
+        "rotation speed", "unknown attribute 7", "armor",
+        "attack", "reload time", "accuracy", "range",
+        "work rate", "carrying capacity",
+    };
+    for (const dat::EffectCommand &command :
+         assets_.dat().effects[
+             (size_t)technology.effectId].commands) {
+        std::string effect;
+        if (command.type == 2 && command.a >= 0) {
+            effect =
+                (command.b != 0 ? "Unlocks " : "Disables ") +
+                unitName(command.a);
+        } else if (command.type == 3 &&
+                   command.a >= 0 && command.b >= 0) {
+            effect = "Upgrades " + unitName(command.a) +
+                     " to " + unitName(command.b);
+        } else if ((command.type == 0 ||
+                    command.type == 4 ||
+                    command.type == 5) &&
+                   command.c >= 0) {
+            const std::string attribute =
+                command.c < (int)std::size(attributes)
+                    ? attributes[(size_t)command.c]
+                    : "attribute " +
+                          std::to_string(command.c);
+            effect =
+                command.type == 0
+                    ? "Sets " + attribute + " to "
+                    : command.type == 4
+                          ? "Adds " +
+                                displayDecimal(command.d) +
+                                " " + attribute + " to "
+                          : "Multiplies " + attribute +
+                                " by " +
+                                displayDecimal(command.d) +
+                                " for ";
+            if (command.type == 0)
+                effect += displayDecimal(command.d) + " for ";
+            effect +=
+                command.a >= 0
+                    ? unitName(command.a)
+                    : command.b >= 0
+                          ? "class " +
+                                std::to_string(command.b)
+                          : "affected units";
+        }
+        if (effect.empty() ||
+            std::find(lines.begin(), lines.end(), effect) !=
+                lines.end())
+            continue;
+        lines.push_back(effect);
+        if (lines.size() >= 5) break;
+    }
+    if (lines.empty())
+        lines.push_back(
+            "Applies DAT effect " +
+            std::to_string(technology.effectId));
+    return lines;
 }
 
 std::vector<const dat::Unit *> Game::buildingOptions(
@@ -2917,8 +3166,8 @@ int Game::builderWorkingGraphic(
     for (const dat::Task &task : header.tasks)
         if ((task.pickForConstruction ||
              task.actionType == 101) &&
-            task.workingGraphic >= 0)
-            return task.workingGraphic;
+            task.proceedingGraphic >= 0)
+            return task.proceedingGraphic;
     return -1;
 }
 
@@ -3020,17 +3269,9 @@ Game::Object *Game::nearestDropSite(
             building.unit->type !=
                 dat::UT_Building)
             continue;
-        bool accepts =
-            building.unit->name.rfind(
-                "BLDG-MAIN", 0) == 0;
-        for (int16_t dropSite :
-             gatherer.dropSites)
-            if (dropSite >= 0 &&
-                (building.unit->id == dropSite ||
-                 building.unit->baseId == dropSite ||
-                 building.unit->copyId == dropSite))
-                accepts = true;
-        if (!accepts) continue;
+        if (!buildingAcceptsResource(
+                building, gatherer))
+            continue;
         const float dx = building.x - worker.x;
         const float dy = building.y - worker.y;
         const float distance = dx * dx + dy * dy;
@@ -3040,6 +3281,83 @@ Game::Object *Game::nearestDropSite(
         }
     }
     return closest;
+}
+
+bool Game::buildingAcceptsResource(
+    const Object &building,
+    const dat::Unit &gatherer) const {
+    if (!building.unit ||
+        building.unit->type != dat::UT_Building)
+        return false;
+    if (building.unit->name.rfind(
+            "BLDG-MAIN", 0) == 0)
+        return true;
+    for (int16_t dropSite : gatherer.dropSites)
+        if (dropSite >= 0 &&
+            (building.unit->id == dropSite ||
+             building.unit->baseId == dropSite ||
+             building.unit->copyId == dropSite))
+            return true;
+    return false;
+}
+
+bool Game::assignAutomaticWorkerTask(
+    Object &worker,
+    const Object &completedBuilding) {
+    if (!isWorker(worker) ||
+        worker.player != completedBuilding.player)
+        return false;
+    const float searchRange =
+        std::max(4.0f, worker.unit->lineOfSight);
+    const float searchRangeSquared =
+        searchRange * searchRange;
+    Object *resourceTarget = nullptr;
+    float resourceDistance =
+        std::numeric_limits<float>::max();
+    for (Object &resource : objects_) {
+        if (!isGatherable(resource)) continue;
+        const float dx = resource.x - worker.x;
+        const float dy = resource.y - worker.y;
+        const float distance = dx * dx + dy * dy;
+        if (distance > searchRangeSquared ||
+            distance >= resourceDistance)
+            continue;
+        Object probe = worker;
+        probe.gatherTargetId = resource.spawnId;
+        const dat::Unit *gatherer =
+            gathererUnit(probe);
+        if (!gatherer ||
+            !buildingAcceptsResource(
+                completedBuilding, *gatherer))
+            continue;
+        resourceTarget = &resource;
+        resourceDistance = distance;
+    }
+    if (resourceTarget)
+        return issueGatherCommand(
+            worker, *resourceTarget);
+
+    Object *foundation = nullptr;
+    float foundationDistance =
+        std::numeric_limits<float>::max();
+    for (Object &building : objects_) {
+        if (!building.active ||
+            !building.underConstruction ||
+            building.player != worker.player ||
+            building.spawnId ==
+                completedBuilding.spawnId)
+            continue;
+        const float dx = building.x - worker.x;
+        const float dy = building.y - worker.y;
+        const float distance = dx * dx + dy * dy;
+        if (distance > searchRangeSquared ||
+            distance >= foundationDistance)
+            continue;
+        foundation = &building;
+        foundationDistance = distance;
+    }
+    return foundation &&
+           assignBuilder(worker, *foundation);
 }
 
 bool Game::issueGatherCommand(
@@ -3544,12 +3862,19 @@ void Game::setGateLocked(Object &gate, bool locked) {
 }
 
 bool Game::openSelectedActionMenu() {
-    Object *subject = nullptr;
-    for (Object &object : objects_) {
-        if (!object.selected || !isInspectable(object)) continue;
-        if (subject) return false;
-        subject = &object;
-    }
+    std::vector<Object *> selected =
+        selectedObjectsInOrder(false);
+    if (selected.empty()) return false;
+    Object *subject = selected.front();
+    if (selected.size() > 1 &&
+        !std::all_of(
+            selected.begin(), selected.end(),
+            [&](const Object *object) {
+                return object &&
+                       object->player == localPlayer_ &&
+                       isWorker(*object);
+            }))
+        return false;
     if (!subject || subject->player != localPlayer_)
         return false;
     if (subject->underConstruction) {
@@ -3586,6 +3911,8 @@ bool Game::openSelectedActionMenu() {
     }
     actionMenuOpen_ = true;
     actionMenuObjectId_ = subject->spawnId;
+    actionMenuSelection_ = 0;
+    actionMenuScroll_ = 0;
     return true;
 }
 
@@ -3638,9 +3965,11 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
         return true;
     }
     if (screenX < kActionMenuX ||
-        screenX >= std::min((float)screenW,
-                            kActionMenuX + kActionMenuWidth) ||
-        screenY < 28.0f)
+        screenX >= std::min(
+            (float)screenW,
+            kActionMenuX + kActionMenuWidth) ||
+        screenY < kActionMenuTop ||
+        screenY >= kActionMenuTop + kActionMenuHeight)
         return true;
     if (screenY < kActionMenuY) {
         if (isWorker(*subject)) {
@@ -3672,6 +4001,8 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
                               tabs.size()))));
             actionMenuTab_ = tabs[(size_t)tab];
         }
+        actionMenuSelection_ = 0;
+        actionMenuScroll_ = 0;
         return true;
     }
     size_t optionCount = 0;
@@ -3687,11 +4018,10 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
     } else {
         optionCount = researchOptions(*subject).size();
     }
-    const size_t visibleRows =
-        std::min(optionCount, kActionMenuMaxRows);
     const float queueY =
         kActionMenuY +
-        visibleRows * kActionMenuRowHeight;
+        kActionMenuRows * kActionMenuCell +
+        48.0f;
     if (!subject->productionQueue.empty() &&
         screenY >= queueY &&
         screenY < queueY + 50.0f) {
@@ -3705,23 +4035,38 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
                 *subject, (size_t)index);
         return true;
     }
-    const int row =
-        (int)((screenY - kActionMenuY) /
-              kActionMenuRowHeight);
-    if (row < 0 ||
-        (size_t)row >= kActionMenuMaxRows)
+    const float gridX = kActionMenuX + 12.0f;
+    const float gridWidth =
+        kActionMenuColumns * kActionMenuCell;
+    const float gridHeight =
+        kActionMenuRows * kActionMenuCell;
+    if (screenX < gridX ||
+        screenX >= gridX + gridWidth ||
+        screenY < kActionMenuY ||
+        screenY >= kActionMenuY + gridHeight)
         return true;
+    const size_t column =
+        (size_t)((screenX - gridX) /
+                 kActionMenuCell);
+    const size_t row =
+        (size_t)((screenY - kActionMenuY) /
+                 kActionMenuCell);
+    const size_t optionIndex =
+        actionMenuScroll_ +
+        row * kActionMenuColumns + column;
+    if (optionIndex >= optionCount) return true;
+    actionMenuSelection_ = optionIndex;
 
     if (isWorker(*subject)) {
         const std::vector<const dat::Unit *> options =
             buildingOptions(*subject, actionMenuTab_);
-        if ((size_t)row >= options.size()) return true;
+        if (optionIndex >= options.size()) return true;
         return beginBuildingPlacement(
-            *subject, *options[(size_t)row]);
+            *subject, *options[optionIndex]);
     }
 
     if (actionMenuTab_ == ActionMenuTab::Commands) {
-        if (row != 0) return true;
+        if (optionIndex != 0) return true;
         if (subject->gate) {
             setGateLocked(*subject, !subject->locked);
         } else {
@@ -3751,10 +4096,18 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
     if (actionMenuTab_ == ActionMenuTab::Research) {
         const std::vector<int> options =
             researchOptions(*subject);
-        if ((size_t)row >= options.size()) return true;
-        const int technologyId = options[(size_t)row];
+        if (optionIndex >= options.size()) return true;
+        const int technologyId = options[optionIndex];
         const dat::Tech &technology =
             assets_.dat().techs[(size_t)technologyId];
+        if (!technologyRequirementsMet(
+                localPlayer_, technology)) {
+            statusMessage_ =
+                technologyDisplayName(technologyId) +
+                " IS LOCKED";
+            statusTime_ = 3.0f;
+            return true;
+        }
         for (const dat::Tech::Cost &cost : technology.costs) {
             if (!cost.flag || cost.type < 0 ||
                 cost.amount <= 0)
@@ -3778,8 +4131,8 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
     } else {
         const std::vector<const dat::Unit *> options =
             productionOptions(*subject);
-        if ((size_t)row >= options.size()) return true;
-        const dat::Unit *unit = options[(size_t)row];
+        if (optionIndex >= options.size()) return true;
+        const dat::Unit *unit = options[optionIndex];
         for (const dat::ResourceCost &cost : unit->costs) {
             if (!cost.flag || cost.type < 0 ||
                 cost.amount <= 0)
@@ -3945,9 +4298,11 @@ bool Game::placeBuilding(float screenX, float screenY,
 
 void Game::updateConstruction(float dt) {
     struct CompletedBuilding {
+        uint32_t spawnId;
         const dat::Unit *unit;
         int player;
         float x, y, facing;
+        std::vector<uint32_t> builders;
     };
     std::vector<CompletedBuilding> completed;
     const size_t count = objects_.size();
@@ -4016,17 +4371,21 @@ void Game::updateConstruction(float dt) {
             playWorldUnitSound(
                 building,
                 building.unit->trainSound);
+        std::vector<uint32_t> builders;
         for (Object &builder : objects_)
             if (builder.constructionTargetId ==
                 building.spawnId) {
+                builders.push_back(builder.spawnId);
                 builder.constructionTargetId = 0;
                 builder.state = State::Idle;
                 builder.animTime = 0.0f;
             }
         building.constructionBuilderId = 0;
         completed.push_back(
-            {building.unit, building.player, building.x,
-             building.y, building.facing});
+            {building.spawnId, building.unit,
+             building.player, building.x,
+             building.y, building.facing,
+             std::move(builders)});
     }
     for (const CompletedBuilding &building : completed) {
         const int civilization =
@@ -4048,6 +4407,20 @@ void Game::updateConstruction(float dt) {
     if (!completed.empty()) {
         refreshAllAutomaticTechnologies();
         rebuildAdjacency();
+        for (const CompletedBuilding &building :
+             completed) {
+            const Object *completedObject =
+                findObject(building.spawnId);
+            if (!completedObject) continue;
+            for (uint32_t builderId :
+                 building.builders) {
+                Object *builder =
+                    findObject(builderId);
+                if (builder)
+                    assignAutomaticWorkerTask(
+                        *builder, *completedObject);
+            }
+        }
     }
 }
 
@@ -6228,8 +6601,10 @@ void Game::update(float dt, const InputState &in) {
         if (in.menuBack)
             cheatMenuOpen_ = false;
     }
+    bool actionMenuControlConsumed = false;
     if (actionMenuOpen_ &&
         (in.actionTabLeft || in.actionTabRight)) {
+        actionMenuControlConsumed = true;
         Object *subject = findObject(actionMenuObjectId_);
         if (subject && isWorker(*subject)) {
             const int direction =
@@ -6273,13 +6648,109 @@ void Game::update(float dt, const InputState &in) {
                 actionMenuTab_ = tabs[(size_t)index];
             }
         }
+        actionMenuSelection_ = 0;
+        actionMenuScroll_ = 0;
+    }
+    if (actionMenuOpen_) {
+        Object *subject =
+            findObject(actionMenuObjectId_);
+        size_t optionCount = 0;
+        if (subject && isWorker(*subject))
+            optionCount =
+                buildingOptions(
+                    *subject, actionMenuTab_).size();
+        else if (subject &&
+                 actionMenuTab_ ==
+                     ActionMenuTab::Commands)
+            optionCount = 1;
+        else if (subject &&
+                 actionMenuTab_ ==
+                     ActionMenuTab::Units)
+            optionCount =
+                productionOptions(*subject).size();
+        else if (subject)
+            optionCount =
+                researchOptions(*subject).size();
+
+        const float gridX = kActionMenuX + 12.0f;
+        if (in.cursorVisible &&
+            in.pointerX >= gridX &&
+            in.pointerX <
+                gridX +
+                    kActionMenuColumns *
+                        kActionMenuCell &&
+            in.pointerY >= kActionMenuY &&
+            in.pointerY <
+                kActionMenuY +
+                    kActionMenuRows *
+                        kActionMenuCell) {
+            const size_t column =
+                (size_t)((in.pointerX - gridX) /
+                         kActionMenuCell);
+            const size_t row =
+                (size_t)((in.pointerY -
+                          kActionMenuY) /
+                         kActionMenuCell);
+            const size_t hovered =
+                actionMenuScroll_ +
+                row * kActionMenuColumns +
+                column;
+            if (hovered < optionCount)
+                actionMenuSelection_ = hovered;
+        }
+        if (optionCount > 0 &&
+            (in.menuUp || in.menuDown ||
+             in.menuLeft || in.menuRight)) {
+            actionMenuControlConsumed = true;
+            int next = (int)std::min(
+                actionMenuSelection_,
+                optionCount - 1);
+            if (in.menuUp)
+                next -= (int)kActionMenuColumns;
+            if (in.menuDown)
+                next += (int)kActionMenuColumns;
+            if (in.menuLeft) next--;
+            if (in.menuRight) next++;
+            next = std::max(
+                0, std::min(
+                       (int)optionCount - 1, next));
+            actionMenuSelection_ = (size_t)next;
+            actionMenuScroll_ =
+                (actionMenuSelection_ /
+                 kActionMenuVisibleItems) *
+                kActionMenuVisibleItems;
+        }
+        if (in.menuActivate && optionCount > 0) {
+            actionMenuControlConsumed = true;
+            const size_t visible =
+                actionMenuSelection_ -
+                actionMenuScroll_;
+            handleActionMenuClick(
+                gridX +
+                    (visible %
+                     kActionMenuColumns) *
+                        kActionMenuCell +
+                    kActionMenuCell * 0.5f,
+                kActionMenuY +
+                    (visible /
+                     kActionMenuColumns) *
+                        kActionMenuCell +
+                    kActionMenuCell * 0.5f,
+                in.screenW, in.screenH);
+        } else if (in.menuBack) {
+            actionMenuControlConsumed = true;
+            actionMenuOpen_ = false;
+            actionMenuObjectId_ = 0;
+        }
     }
 
+    const bool consumeCameraInput =
+        consumeWorldInput || actionMenuOpen_;
     float scrollX =
-        consumeWorldInput ? 0.0f : in.scrollX;
+        consumeCameraInput ? 0.0f : in.scrollX;
     float scrollY =
-        consumeWorldInput ? 0.0f : in.scrollY;
-    if (in.cursorVisible && !consumeWorldInput) {
+        consumeCameraInput ? 0.0f : in.scrollY;
+    if (in.cursorVisible && !consumeCameraInput) {
         constexpr float edge = 24.0f;
         if (in.pointerX <= edge)
             scrollX = std::min(scrollX, -(edge - in.pointerX) / edge);
@@ -6292,9 +6763,11 @@ void Game::update(float dt, const InputState &in) {
     }
     const float scrollSpeed = 900.0f / zoom_;
     camX_ += scrollX * scrollSpeed * dt -
-             (consumeWorldInput ? 0.0f : in.dragX / zoom_);
+             (consumeCameraInput ? 0.0f
+                                 : in.dragX / zoom_);
     camY_ += scrollY * scrollSpeed * dt -
-             (consumeWorldInput ? 0.0f : in.dragY / zoom_);
+             (consumeCameraInput ? 0.0f
+                                 : in.dragY / zoom_);
     // Clamp the camera to the map diamond's bounding box.
     float minX = -mapSize_ * kTileHalfW, maxX = mapSize_ * kTileHalfW;
     float maxY = 2.0f * mapSize_ * kTileHalfH;
@@ -6576,7 +7049,9 @@ void Game::update(float dt, const InputState &in) {
         }
         repairHandled = true;
     }
-    if (!consumeWorldInput && !placementHandled &&
+    if (!consumeWorldInput &&
+        !actionMenuControlConsumed &&
+        !placementHandled &&
         !garrisonHandled && !repairHandled &&
         in.selectPressed) {
         if (actionMenuOpen_)
@@ -6588,7 +7063,9 @@ void Game::update(float dt, const InputState &in) {
             selectAtScreen(in.pointerX, in.pointerY, in.screenW,
                            in.screenH);
     }
-    if (!consumeWorldInput && !placementHandled &&
+    if (!consumeWorldInput &&
+        !actionMenuControlConsumed &&
+        !placementHandled &&
         !garrisonHandled && !repairHandled &&
         in.cycleAttackMode) {
         if (actionMenuOpen_) {
@@ -6598,7 +7075,9 @@ void Game::update(float dt, const InputState &in) {
             cycleSelectedAttackMode();
         }
     }
-    if (!consumeWorldInput && !placementHandled &&
+    if (!consumeWorldInput &&
+        !actionMenuControlConsumed &&
+        !placementHandled &&
         !garrisonHandled && !repairHandled &&
         in.commandPressed) {
         if (actionMenuOpen_) {
@@ -6609,7 +7088,9 @@ void Game::update(float dt, const InputState &in) {
                             in.screenW, in.screenH);
         }
     }
-    if (!consumeWorldInput && !placementHandled &&
+    if (!consumeWorldInput &&
+        !actionMenuControlConsumed &&
+        !placementHandled &&
         !garrisonHandled && !repairHandled &&
         in.pointerTap) {
         if (actionMenuOpen_) {
@@ -7164,7 +7645,8 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
                        int initialFrame, int depth, bool drawShadows, float viewW, float viewH,
                        int sortLayerOverride, int sortBias,
                        float sortYOverride, uint32_t ownerId,
-                       bool outlineCandidate, int powerState) {
+                       bool outlineCandidate, int powerState,
+                       int frameOverride) {
     const dat::Graphic *g = assets_.dat().graphic(graphicId);
     if (!g) return;
     if (!drawShadows && depth > 0 && g->layer == 5) return;
@@ -7193,10 +7675,17 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
                 const SpriteSheet *sh = assets_.sheet(self.slp, playerColorBase(player));
                 if (!sh) continue;
                 size_t fr; bool flip;
-                if (!pickFrame(self, sh->frames.size(), facing,
-                               resolvedTime, resolvedFrame,
-                               fr, flip))
+                if (frameOverride >= 0) {
+                    fr = std::min<size_t>(
+                        (size_t)frameOverride,
+                        sh->frames.size() - 1);
+                    flip = false;
+                } else if (!pickFrame(
+                               self, sh->frames.size(),
+                               facing, resolvedTime,
+                               resolvedFrame, fr, flip)) {
                     continue;
+                }
                 const SpriteFrame &f = sh->frames[fr];
                 float x = sx + d.offsetX - (flip ? f.w - f.hotX : f.hotX), y = sy + d.offsetY - f.hotY;
                 if (viewW > 0 && (x + f.w <= 0 || x >= viewW || y + f.h <= 0 || y >= viewH)) continue;
@@ -7231,10 +7720,17 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
     if (!sh) return;
     size_t fr;
     bool flip;
-    if (!pickFrame(*g, sh->frames.size(), facing,
+    if (frameOverride >= 0) {
+        fr = std::min<size_t>(
+            (size_t)frameOverride,
+            sh->frames.size() - 1);
+        flip = false;
+    } else if (!pickFrame(
+                   *g, sh->frames.size(), facing,
                    resolvedTime, resolvedFrame,
-                   fr, flip))
+                   fr, flip)) {
         return;
+    }
     const SpriteFrame &f = sh->frames[fr];
     if (f.w == 0 || f.h == 0) return;
     float x = sx - (flip ? f.w - f.hotX : f.hotX), y = sy - f.hotY;
@@ -7514,18 +8010,33 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             gid = o.unit->attackGraphic;
         gid = civilizationGraphic(gid, o.player);
         float graphicTime = o.animTime;
+        float graphicFacing = o.facing;
+        int graphicFrameOverride = -1;
         if (o.underConstruction) {
             const dat::Graphic *construction =
                 assets_.dat().graphic(gid);
+            const float progress =
+                o.constructionTotal > 0
+                    ? 1.0f -
+                          o.constructionRemaining /
+                              o.constructionTotal
+                    : 1.0f;
             if (construction &&
+                construction->frameCount == 1 &&
+                construction->angleCount == 3) {
+                const int stage = std::max(
+                    0, std::min(
+                           2, (int)(std::max(
+                                          0.0f,
+                                          std::min(
+                                              0.999f,
+                                              progress)) *
+                                      3.0f)));
+                graphicFrameOverride = stage;
+                graphicTime = 0.0f;
+            } else if (construction &&
                 construction->frameDuration > 0 &&
                 construction->frameCount > 1) {
-                const float progress =
-                    o.constructionTotal > 0
-                        ? 1.0f -
-                              o.constructionRemaining /
-                                  o.constructionTotal
-                        : 1.0f;
                 graphicTime = std::max(
                     0.0f,
                     std::min(0.999f, progress)) *
@@ -7540,13 +8051,13 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 ? (isPowered(o) ? 1 : 0)
                 : -1;
         drawGraphic(
-            r, gid, sx, sy, o.facing, graphicTime,
+            r, gid, sx, sy, graphicFacing, graphicTime,
             o.player, o.initialFrame, 0,
             o.drawShadows && !overview, viewW, viewH,
             -1, 0, -1000000000.0f, o.spawnId,
             o.player > 0 &&
                 o.unit->type != dat::UT_Building,
-            powerState);
+            powerState, graphicFrameOverride);
         if (o.underConstruction &&
             isPowerCore(o)) {
             drawGraphic(
@@ -9030,6 +9541,556 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     }
 
     if (actionMenuOpen_) {
+        Object *subject = findObject(actionMenuObjectId_);
+        if (subject && subject->active) {
+            const float invZoom = 1.0f / zoom_;
+            const bool worker = isWorker(*subject);
+            const std::vector<const dat::Unit *> units =
+                worker
+                    ? buildingOptions(*subject,
+                                      actionMenuTab_)
+                    : actionMenuTab_ ==
+                              ActionMenuTab::Units
+                          ? productionOptions(*subject)
+                          : std::vector<
+                                const dat::Unit *>{};
+            const std::vector<int> technologies =
+                !worker &&
+                        actionMenuTab_ ==
+                            ActionMenuTab::Research
+                    ? researchOptions(*subject)
+                    : std::vector<int>{};
+            const bool commandOption =
+                !worker &&
+                actionMenuTab_ ==
+                    ActionMenuTab::Commands;
+            const size_t optionCount =
+                commandOption
+                    ? 1
+                    : units.empty()
+                          ? technologies.size()
+                          : units.size();
+            if (optionCount > 0) {
+                actionMenuSelection_ =
+                    std::min(actionMenuSelection_,
+                             optionCount - 1);
+                if (actionMenuSelection_ <
+                        actionMenuScroll_ ||
+                    actionMenuSelection_ >=
+                        actionMenuScroll_ +
+                            kActionMenuVisibleItems)
+                    actionMenuScroll_ =
+                        (actionMenuSelection_ /
+                         kActionMenuVisibleItems) *
+                        kActionMenuVisibleItems;
+            } else {
+                actionMenuSelection_ = 0;
+                actionMenuScroll_ = 0;
+            }
+
+            r.fillRect(
+                kActionMenuX * invZoom,
+                kActionMenuTop * invZoom,
+                kActionMenuWidth * invZoom,
+                kActionMenuHeight * invZoom,
+                2, 8, 14, 248);
+            r.fillRect(
+                kActionMenuX * invZoom,
+                kActionMenuTop * invZoom,
+                kActionMenuWidth * invZoom,
+                3.0f * invZoom,
+                85, 210, 226, 255);
+            r.fillRect(
+                kActionMenuX * invZoom,
+                (kActionMenuTop +
+                 kActionMenuHeight - 3.0f) *
+                    invZoom,
+                kActionMenuWidth * invZoom,
+                3.0f * invZoom,
+                20, 87, 115, 255);
+
+            std::vector<ActionMenuTab> tabs;
+            std::vector<std::string> tabLabels;
+            if (worker) {
+                tabs = {
+                    ActionMenuTab::Economy,
+                    ActionMenuTab::Military,
+                    ActionMenuTab::Defense,
+                };
+                tabLabels = {
+                    "L  ECONOMY", "MILITARY",
+                    "DEFENSE  R",
+                };
+            } else {
+                if (!productionOptions(*subject).empty()) {
+                    tabs.push_back(
+                        ActionMenuTab::Units);
+                    tabLabels.push_back("L  UNITS");
+                }
+                if (!researchOptions(*subject).empty()) {
+                    tabs.push_back(
+                        ActionMenuTab::Research);
+                    tabLabels.push_back("RESEARCH");
+                }
+                if (subject->gate ||
+                    subject->unit->garrisonCapacity > 0) {
+                    tabs.push_back(
+                        ActionMenuTab::Commands);
+                    tabLabels.push_back("COMMANDS  R");
+                }
+            }
+            const float tabWidth =
+                kActionMenuWidth /
+                std::max<size_t>(1, tabs.size());
+            for (size_t tab = 0;
+                 tab < tabs.size(); tab++) {
+                const bool active =
+                    actionMenuTab_ == tabs[tab];
+                const float x =
+                    kActionMenuX +
+                    tab * tabWidth;
+                r.fillRect(
+                    x * invZoom,
+                    (kActionMenuTop + 7.0f) *
+                        invZoom,
+                    (tabWidth - 3.0f) * invZoom,
+                    34.0f * invZoom,
+                    active ? 15 : 5,
+                    active ? 80 : 25,
+                    active ? 105 : 38, 255);
+                r.fillRect(
+                    x * invZoom,
+                    (kActionMenuTop + 7.0f) *
+                        invZoom,
+                    (tabWidth - 3.0f) * invZoom,
+                    2.0f * invZoom,
+                    active ? 118 : 38,
+                    active ? 227 : 92,
+                    active ? 235 : 112, 255);
+                drawBitmapText(
+                    r, {tabLabels[tab]},
+                    (x + 12.0f) * invZoom,
+                    (kActionMenuTop + 18.0f) *
+                        invZoom,
+                    1.5f * invZoom,
+                    active ? 255 : 180,
+                    active ? 255 : 205,
+                    active ? 245 : 220);
+            }
+
+            const int civilization =
+                civilizationForPlayer(subject->player);
+            const int iconSet =
+                civilization >= 0 &&
+                        (size_t)civilization <
+                            assets_.dat().civs.size()
+                    ? std::max(
+                          1,
+                          (int)assets_.dat()
+                              .civs[(size_t)civilization]
+                              .iconSet)
+                    : 1;
+            const SpriteSheet *technologyIcons =
+                assets_.interfaceSheet(
+                    kTechnologyIconSlpBase +
+                    iconSet - 1);
+            const float gridX =
+                kActionMenuX + 12.0f;
+            for (size_t visible = 0;
+                 visible <
+                 kActionMenuVisibleItems;
+                 visible++) {
+                const size_t option =
+                    actionMenuScroll_ + visible;
+                const float x =
+                    gridX +
+                    (visible %
+                     kActionMenuColumns) *
+                        kActionMenuCell;
+                const float y =
+                    kActionMenuY +
+                    (visible /
+                     kActionMenuColumns) *
+                        kActionMenuCell;
+                const bool selected =
+                    option < optionCount &&
+                    option == actionMenuSelection_;
+                r.fillRect(
+                    x * invZoom, y * invZoom,
+                    kActionMenuIconSize * invZoom,
+                    kActionMenuIconSize * invZoom,
+                    selected ? 34 : 8,
+                    selected ? 126 : 35,
+                    selected ? 151 : 50, 255);
+                r.fillRect(
+                    (x + 2.0f) * invZoom,
+                    (y + 2.0f) * invZoom,
+                    (kActionMenuIconSize - 4.0f) *
+                        invZoom,
+                    (kActionMenuIconSize - 4.0f) *
+                        invZoom,
+                    2, 8, 14, 255);
+                if (option >= optionCount) continue;
+
+                const dat::Unit *unit =
+                    !units.empty()
+                        ? units[option]
+                        : nullptr;
+                const dat::Tech *technology =
+                    !technologies.empty()
+                        ? &assets_.dat().techs[
+                              (size_t)
+                                  technologies[option]]
+                        : nullptr;
+                const SpriteSheet *icons =
+                    unit
+                        ? assets_.interfaceSheet(
+                              (unit->type ==
+                                       dat::UT_Building
+                                   ? kBuildingIconSlpBase
+                                   : kUnitIconSlpBase) +
+                              iconSet - 1)
+                        : technology
+                              ? technologyIcons
+                              : commandIcons;
+                const int iconId =
+                    unit
+                        ? unit->iconId
+                        : technology
+                              ? technology->iconId
+                              : subject->gate
+                                    ? (subject->locked
+                                           ? (int)
+                                                 kCommandUnlockGateIcon
+                                           : (int)
+                                                 kCommandLockGateIcon)
+                                    : (int)
+                                          kCommandEjectIcon;
+                if (icons && iconId >= 0 &&
+                    (size_t)iconId <
+                        icons->frames.size()) {
+                    const SpriteFrame &icon =
+                        icons->frames[
+                            (size_t)iconId];
+                    const float scale =
+                        std::min(
+                            (kActionMenuIconSize -
+                             8.0f) /
+                                icon.w,
+                            (kActionMenuIconSize -
+                             8.0f) /
+                                icon.h) *
+                        invZoom;
+                    r.draw(
+                        icon.tex,
+                        {(x + 4.0f) * invZoom,
+                         (y + 4.0f) * invZoom,
+                         icon.w * scale,
+                         icon.h * scale,
+                         icon.u, icon.v,
+                         icon.u + icon.w,
+                         icon.v + icon.h});
+                }
+                const bool locked =
+                    technology &&
+                    !technologyRequirementsMet(
+                        subject->player,
+                        *technology);
+                if (locked) {
+                    r.fillRect(
+                        (x + 2.0f) * invZoom,
+                        (y + 27.0f) * invZoom,
+                        (kActionMenuIconSize - 4.0f) *
+                            invZoom,
+                        15.0f * invZoom,
+                        35, 5, 8, 225);
+                    drawBitmapText(
+                        r, {"LOCKED"},
+                        (x + 5.0f) * invZoom,
+                        (y + 31.0f) * invZoom,
+                        0.9f * invZoom,
+                        255, 170, 150);
+                }
+            }
+
+            const float detailsX =
+                kActionMenuX + 286.0f;
+            const float detailsY =
+                kActionMenuY;
+            const float detailsWidth =
+                kActionMenuWidth - 298.0f;
+            r.fillRect(
+                detailsX * invZoom,
+                detailsY * invZoom,
+                detailsWidth * invZoom,
+                194.0f * invZoom,
+                4, 17, 25, 255);
+            r.fillRect(
+                detailsX * invZoom,
+                detailsY * invZoom,
+                3.0f * invZoom,
+                194.0f * invZoom,
+                48, 156, 178, 255);
+
+            const dat::Unit *selectedUnit =
+                !units.empty() &&
+                        actionMenuSelection_ <
+                            units.size()
+                    ? units[actionMenuSelection_]
+                    : nullptr;
+            const int selectedTechnology =
+                !technologies.empty() &&
+                        actionMenuSelection_ <
+                            technologies.size()
+                    ? technologies[
+                          actionMenuSelection_]
+                    : -1;
+            std::string title;
+            if (selectedUnit)
+                title =
+                    unitDisplayName(*selectedUnit);
+            else if (selectedTechnology >= 0)
+                title = technologyDisplayName(
+                    selectedTechnology);
+            else if (commandOption)
+                title = subject->gate
+                            ? (subject->locked
+                                   ? "Unlock Gate"
+                                   : "Lock Gate")
+                            : "Eject All";
+            if (title.size() > 38)
+                title.resize(38);
+            drawBitmapText(
+                r, {title},
+                (detailsX + 14.0f) * invZoom,
+                (detailsY + 11.0f) * invZoom,
+                2.0f * invZoom,
+                255, 244, 190);
+
+            std::string costText;
+            static constexpr const char
+                *resourceNames[] = {
+                    "FOOD", "CARBON", "ORE", "NOVA",
+                };
+            auto appendCost =
+                [&](int type, int amount,
+                    bool enabled) {
+                    if (!enabled || type < 0 ||
+                        amount <= 0)
+                        return;
+                    if (!costText.empty())
+                        costText += "   ";
+                    costText +=
+                        type < 4
+                            ? resourceNames[(size_t)type]
+                            : "RESOURCE " +
+                                  std::to_string(type);
+                    costText += " " +
+                                std::to_string(amount);
+                };
+            int duration = 0;
+            if (selectedUnit) {
+                duration =
+                    std::max<int16_t>(
+                        0, selectedUnit->trainTime);
+                for (const dat::ResourceCost &cost :
+                     selectedUnit->costs)
+                    appendCost(
+                        cost.type, cost.amount,
+                        cost.flag != 0);
+            } else if (selectedTechnology >= 0) {
+                const dat::Tech &technology =
+                    assets_.dat().techs[
+                        (size_t)selectedTechnology];
+                duration =
+                    std::max<int16_t>(
+                        0, technology.researchTime);
+                for (const dat::Tech::Cost &cost :
+                     technology.costs)
+                    appendCost(
+                        cost.type, cost.amount,
+                        cost.flag != 0);
+            }
+            if (!costText.empty()) {
+                costText += "   TIME " +
+                            std::to_string(duration) +
+                            "S";
+                drawBitmapText(
+                    r, {costText},
+                    (detailsX + 14.0f) * invZoom,
+                    (detailsY + 35.0f) * invZoom,
+                    1.35f * invZoom,
+                    166, 225, 232);
+            }
+
+            std::vector<std::string> detailLines;
+            if (selectedUnit) {
+                const std::string description =
+                    assets_.localizedString(
+                        selectedUnit
+                            ->languageDllHelp);
+                const std::vector<std::string> wrapped =
+                    wrapText(
+                        description.empty()
+                            ? "Creates or constructs " +
+                                  unitDisplayName(
+                                      *selectedUnit) +
+                                  "."
+                            : description,
+                        47);
+                detailLines.insert(
+                    detailLines.end(),
+                    wrapped.begin(), wrapped.end());
+                detailLines.push_back(
+                    "Hit points: " +
+                    std::to_string(
+                        selectedUnit->hitPoints));
+            } else if (selectedTechnology >= 0) {
+                for (const std::string &effect :
+                     technologyEffectLines(
+                         selectedTechnology)) {
+                    const auto wrapped =
+                        wrapText(effect, 47);
+                    detailLines.insert(
+                        detailLines.end(),
+                        wrapped.begin(),
+                        wrapped.end());
+                }
+                detailLines.push_back("");
+                for (const std::string &requirement :
+                     technologyRequirementLines(
+                         subject->player,
+                         selectedTechnology)) {
+                    const auto wrapped =
+                        wrapText(requirement, 47);
+                    detailLines.insert(
+                        detailLines.end(),
+                        wrapped.begin(),
+                        wrapped.end());
+                }
+            } else if (commandOption) {
+                detailLines.push_back(
+                    subject->gate
+                        ? "Changes whether units may pass through this gate."
+                        : "Ejects every garrisoned unit from this building.");
+            }
+            if (detailLines.size() > 11)
+                detailLines.resize(11);
+            drawBitmapText(
+                r, detailLines,
+                (detailsX + 14.0f) * invZoom,
+                (detailsY + 59.0f) * invZoom,
+                1.35f * invZoom,
+                234, 239, 238);
+
+            const std::string pageText =
+                optionCount == 0
+                    ? "NO OPTIONS"
+                    : std::to_string(
+                          actionMenuScroll_ + 1) +
+                          "-" +
+                          std::to_string(
+                              std::min(
+                                  optionCount,
+                                  actionMenuScroll_ +
+                                      kActionMenuVisibleItems)) +
+                          " / " +
+                          std::to_string(optionCount) +
+                          "   D-PAD: SELECT   X: CHOOSE";
+            drawBitmapText(
+                r, {pageText},
+                (gridX + 2.0f) * invZoom,
+                (kActionMenuY +
+                 kActionMenuRows *
+                     kActionMenuCell +
+                 9.0f) *
+                    invZoom,
+                1.05f * invZoom,
+                172, 217, 226);
+
+            if (!subject->productionQueue.empty()) {
+                const float queueY =
+                    kActionMenuY +
+                    kActionMenuRows *
+                        kActionMenuCell +
+                    48.0f;
+                const float slotWidth =
+                    (kActionMenuWidth - 24.0f) /
+                    5.0f;
+                for (size_t index = 0;
+                     index < 5; index++) {
+                    const float x =
+                        kActionMenuX + 12.0f +
+                        index * slotWidth;
+                    const bool occupied =
+                        index <
+                        subject->productionQueue.size();
+                    r.fillRect(
+                        x * invZoom,
+                        queueY * invZoom,
+                        (slotWidth - 4.0f) *
+                            invZoom,
+                        43.0f * invZoom,
+                        occupied ? 7 : 3,
+                        occupied ? 47 : 17,
+                        occupied ? 65 : 25,
+                        255);
+                    if (!occupied) continue;
+                    const ProductionItem &queued =
+                        subject
+                            ->productionQueue[index];
+                    std::string name =
+                        queued.unit
+                            ? unitDisplayName(
+                                  *queued.unit)
+                            : technologyDisplayName(
+                                  queued.technologyId);
+                    if (name.size() > 17)
+                        name.resize(17);
+                    drawBitmapText(
+                        r,
+                        {std::to_string(index + 1) +
+                         " " + name},
+                        (x + 5.0f) * invZoom,
+                        (queueY + 7.0f) *
+                            invZoom,
+                        1.05f * invZoom,
+                        220, 235, 238);
+                    drawBitmapText(
+                        r, {"X CANCEL"},
+                        (x + 5.0f) * invZoom,
+                        (queueY + 24.0f) *
+                            invZoom,
+                        0.9f * invZoom,
+                        244, 151, 129);
+                    if (index == 0) {
+                        const float progress =
+                            queued.duration > 0
+                                ? std::max(
+                                      0.0f,
+                                      std::min(
+                                          1.0f,
+                                          1.0f -
+                                              subject
+                                                      ->productionRemaining /
+                                                  queued.duration))
+                                : 1.0f;
+                        r.fillRect(
+                            (x + 3.0f) *
+                                invZoom,
+                            (queueY + 38.0f) *
+                                invZoom,
+                            (slotWidth - 10.0f) *
+                                progress * invZoom,
+                            3.0f * invZoom,
+                            78, 214, 223, 255);
+                    }
+                }
+            }
+        }
+    }
+
+    if (false && actionMenuOpen_) {
         Object *subject = findObject(actionMenuObjectId_);
         if (subject && subject->active) {
             const float invZoom = 1.0f / zoom_;

@@ -204,6 +204,8 @@ int main() {
             in.toggleCheatMenu = cheatChord;
             in.menuUp = (pressed & SCE_CTRL_UP) != 0;
             in.menuDown = (pressed & SCE_CTRL_DOWN) != 0;
+            in.menuLeft = (pressed & SCE_CTRL_LEFT) != 0;
+            in.menuRight = (pressed & SCE_CTRL_RIGHT) != 0;
             in.menuActivate = (pressed & SCE_CTRL_CROSS) != 0;
             in.menuBack = (pressed & SCE_CTRL_CIRCLE) != 0;
             in.actionTabLeft =

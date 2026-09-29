@@ -71,7 +71,9 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   flashing green/red footprints, walk to foundations, switch to their original Builder state, and
   construct buildings with progressive graphics and hit points. Multiple workers can be assigned to
   one foundation using the original diminishing-returns build-rate curve; retasked workers can resume
-  a foundation through a contextual command. Workers use original resource cursors, task variants,
+  a foundation through a contextual command. After completing a resource drop site, assigned workers
+  automatically gather a compatible nearby node; otherwise they continue onto the nearest friendly
+  foundation within their original line of sight. Workers use original resource cursors, task variants,
   working/carrying animations, capacities, and civilization drop sites while gathering food,
   carbon, ore, and nova, and multiple selected workers can share one gather order; depleted static
   nodes are removed. Farms are available as a base economy building rather than depending on their
@@ -100,13 +102,16 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   cursor scrolls the camera at screen edges. Unit panels and control groups remain.
 - The command/info panel shows the selected unit or building portrait, live health and shields,
   non-zero combat attributes, stance, multi-selection portraits with individual health, formation controls,
-  Vita command hints, and contextual action menus. Buildings separate civilization-correct Units
-  and Research tabs, support touch or L/R switching, and show every cancellable queue item plus
-  current progress. Gates expose lock/unlock commands rather than production; selected gate
-  footprints follow their oriented annexes. Unit/group panels use the original command sheet for
+  Vita command hints, and an original-style five-by-three icon command grid with a high-contrast
+  information pane. Buildings separate civilization-correct Units and Research tabs, support touch
+  or L/R switching, and show every cancellable queue item plus current progress. Research pages retain
+  future locked technologies and show their exact met/unmet prerequisite count, costs, duration, and
+  DAT-derived effects instead of hiding them. Gates expose lock/unlock commands rather than production;
+  selected gate footprints follow their oriented annexes. Unit/group panels use the original command sheet for
   garrison targeting, repair targeting, gate locking, and ejection; eligible buildings provide
   ejection and capacity feedback. Choosing a formation immediately rearranges idle combat units.
-  Workers open three categorized building pages with placement previews. Empty buildings do not
+  Multiple selected workers can open the same three categorized building pages and share the resulting
+  construction order and placement preview. Empty buildings do not
   expose an action-menu hint. Selection status distinguishes the local player,
   named allies, neutral sides, and enemies using scenario diplomacy, scenario player names, and
   civilization names. Status icons expose powered, unpowered, shielded, and unshielded tooltips.

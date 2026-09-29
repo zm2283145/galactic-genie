@@ -37,6 +37,8 @@ struct InputState {
     bool toggleCheatMenu = false;
     bool menuUp = false;
     bool menuDown = false;
+    bool menuLeft = false;
+    bool menuRight = false;
     bool menuActivate = false;
     bool menuBack = false;
     bool actionTabLeft = false;
@@ -153,6 +155,13 @@ public:
     bool objectShielded(uint32_t spawnId) const;
     uint32_t spawnObjectForTesting(int civilization, int unitId, int player,
                                    float x, float y);
+    uint32_t spawnFoundationForTesting(
+        int civilization, int unitId, int player,
+        float x, float y,
+        const std::vector<uint32_t> &builderIds);
+    bool completeFoundationForTesting(uint32_t spawnId);
+    bool setConstructionProgressForTesting(
+        uint32_t spawnId, float progress);
     bool damageObjectForTesting(uint32_t spawnId, int damage);
     bool moveObjectForTesting(uint32_t spawnId, float x, float y);
     int objectPlayer(uint32_t spawnId) const;
@@ -202,6 +211,17 @@ public:
         return player >= 0 &&
                (size_t)player < researchedTechs_.size() &&
                researchedTechs_[(size_t)player].count(technologyId);
+    }
+    bool technologyRequirementsMetForTesting(
+        int player, int technologyId) const {
+        if (technologyId < 0 ||
+            (size_t)technologyId >=
+                assets_.dat().techs.size())
+            return false;
+        return technologyRequirementsMet(
+            player,
+            assets_.dat().techs[
+                (size_t)technologyId]);
     }
     bool fullTechTreeUnlocked() const {
         return fullTechTreeCheat_;
@@ -443,6 +463,12 @@ private:
         const Object &building, int locationId) const;
     std::vector<int> researchOptions(
         const Object &building) const;
+    std::string technologyDisplayName(
+        int technologyId) const;
+    std::vector<std::string> technologyRequirementLines(
+        int player, int technologyId) const;
+    std::vector<std::string> technologyEffectLines(
+        int technologyId) const;
     std::vector<const dat::Unit *> buildingOptions(
         const Object &worker,
         ActionMenuTab category) const;
@@ -485,6 +511,12 @@ private:
     Object *nearestDropSite(
         const Object &worker,
         const dat::Unit &gatherer);
+    bool buildingAcceptsResource(
+        const Object &building,
+        const dat::Unit &gatherer) const;
+    bool assignAutomaticWorkerTask(
+        Object &worker,
+        const Object &completedBuilding);
     void updateGathering(float dt);
     bool isFriendlyPlayer(int sourcePlayer,
                           int targetPlayer) const;
@@ -553,7 +585,8 @@ private:
                      float sortYOverride = -1000000000.0f,
                      uint32_t ownerId = 0,
                      bool outlineCandidate = false,
-                     int powerState = -1);
+                     int powerState = -1,
+                     int frameOverride = -1);
     int graphicSortLayer(int graphicId, int depth = 0) const;
 
     Assets &assets_;
@@ -615,6 +648,8 @@ private:
     bool actionMenuOpen_ = false;
     uint32_t actionMenuObjectId_ = 0;
     ActionMenuTab actionMenuTab_ = ActionMenuTab::Units;
+    size_t actionMenuSelection_ = 0;
+    size_t actionMenuScroll_ = 0;
     const dat::Unit *placementUnit_ = nullptr;
     uint32_t placementBuilderId_ = 0;
     bool cheatMenuOpen_ = false;
