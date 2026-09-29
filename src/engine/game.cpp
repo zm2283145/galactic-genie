@@ -1786,6 +1786,18 @@ void Game::cycleSelectedAttackMode() {
 
 void Game::issueAttack(Object &source, Object &target, float approachAngle,
                        bool automatic, float approachDistance) {
+    if (approachDistance <= 0) {
+        const float contact =
+            collisionRadius(source) + collisionRadius(target) +
+            0.08f;
+        const float range = attackRange(source, target);
+        approachDistance =
+            std::max(contact, range * 0.8f);
+        if (source.unit->minRange > 0)
+            approachDistance =
+                std::max(approachDistance,
+                         source.unit->minRange + 0.2f);
+    }
     source.attackTargetId = target.spawnId;
     source.attackRepathTime = 0;
     source.attackApproachAngle = approachAngle;
@@ -1861,7 +1873,27 @@ void Game::retryAttackApproach(Object &source) {
     const float handedness = (source.spawnId & 1u) ? 1.0f : -1.0f;
     source.attackApproachAngle +=
         handedness * 2.39996323f;
-    source.attackApproachDistance = 0;
+    if (const Object *target =
+            findObject(source.attackTargetId)) {
+        const float contact =
+            collisionRadius(source) +
+            collisionRadius(*target) + 0.08f;
+        const float range = attackRange(source, *target);
+        source.attackApproachDistance =
+            std::max(contact, range * 0.8f);
+        if (source.unit->minRange > 0)
+            source.attackApproachDistance =
+                std::max(source.attackApproachDistance,
+                         source.unit->minRange + 0.2f);
+        source.targetX =
+            target->x +
+            std::cos(source.attackApproachAngle) *
+                source.attackApproachDistance;
+        source.targetY =
+            target->y +
+            std::sin(source.attackApproachAngle) *
+                source.attackApproachDistance;
+    }
     source.path.clear();
     source.pathIndex = 0;
     source.state = State::Idle;
@@ -3899,7 +3931,8 @@ int Game::graphicSortLayer(int graphicId, int depth) const {
 
 void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float facing, float animTime, int player,
                        int initialFrame, int depth, bool drawShadows, float viewW, float viewH,
-                       int sortLayerOverride, int sortBias) {
+                       int sortLayerOverride, int sortBias,
+                       float sortYOverride) {
     const dat::Graphic *g = assets_.dat().graphic(graphicId);
     if (!g) return;
     if (!drawShadows && depth > 0 && g->layer == 5) return;
@@ -3923,13 +3956,19 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
                         : std::min<int>(g->layer, 20);
                 g_draws.push_back(
                     {(int64_t)sortLayer << 40 |
-                         (int64_t)(sy * 16 + 65536) << 8 |
+                         (int64_t)((sortYOverride > -100000000.0f
+                                        ? sortYOverride
+                                        : sy) *
+                                       16 +
+                                   65536)
+                             << 8 |
                          ((sortBias + depth) & 0xFF),
                      f.tex, q});
             } else {
                 drawGraphic(r, d.graphicId, sx + d.offsetX, sy + d.offsetY, facing, animTime, player,
                             initialFrame, depth + 1, drawShadows, viewW, viewH,
-                            sortLayerOverride, sortBias);
+                            sortLayerOverride, sortBias,
+                            sortYOverride);
             }
         }
         return;
@@ -3949,8 +3988,12 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
         sortLayerOverride >= 0
             ? sortLayerOverride
             : std::min<int>(g->layer, 20);
+    const float sortY =
+        sortYOverride > -100000000.0f
+            ? sortYOverride
+            : sy;
     int64_t key = (int64_t)sortLayer << 40 |
-                  (int64_t)(sy * 16 + 65536) << 8 |
+                  (int64_t)(sortY * 16 + 65536) << 8 |
                   ((sortBias + depth) & 0xFF);
     g_draws.push_back({key, f.tex, q});
 }
@@ -3994,6 +4037,21 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         else if (selectedAttacker->attackMode != object.attackMode)
             mixedAttackModes = true;
     }
+    const auto selectedStanceLabel = [&]() {
+        if (!selectedAttacker || mixedAttackModes)
+            return "MIXED";
+        switch (selectedAttacker->attackMode) {
+        case AttackMode::Aggressive:
+            return "AGGRESSIVE";
+        case AttackMode::Defensive:
+            return "DEFENSIVE";
+        case AttackMode::StandGround:
+            return "STAND GROUND";
+        case AttackMode::Passive:
+            return "PASSIVE";
+        }
+        return "MIXED";
+    };
     const SpriteFrame *panelPortrait = nullptr;
     bool panelPortraitFlipped = false;
     if (panelObject) {
@@ -4168,13 +4226,13 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             } else {
                 drawGraphic(r, damageGraphic.graphicId, sx, sy, o.facing, o.animTime,
                             o.player, 0, 0, false, viewW, viewH,
-                            damageSortLayer, 128);
+                            damageSortLayer, 128, sy);
             }
         }
         if (replacement)
             drawGraphic(r, replacement->graphicId, sx, sy, o.facing, o.animTime,
                         o.player, 0, 0, false, viewW, viewH,
-                        damageSortLayer, 128);
+                        damageSortLayer, 128, sy);
     }
     for (const Remains &remains : remains_) {
         int graphicId = remains.dyingGraphic;
@@ -4680,25 +4738,10 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         drawBitmapText(r, {combatLine}, infoX, panelY + 67.0f * invZoom,
                        1.4f * invZoom, 190, 210, 220);
 
-        const char *mode = "MIXED";
-        if (selectedAttacker && !mixedAttackModes)
-            switch (selectedAttacker->attackMode) {
-            case AttackMode::Aggressive:
-                mode = "AGGRESSIVE";
-                break;
-            case AttackMode::Defensive:
-                mode = "DEFENSIVE";
-                break;
-            case AttackMode::StandGround:
-                mode = "STAND GROUND";
-                break;
-            case AttackMode::Passive:
-                mode = "PASSIVE";
-                break;
-            }
         std::string status = panelObject->player == localPlayer_
                                  ? (selectedAttacker
-                                        ? std::string("STANCE: ") + mode
+                                        ? std::string("STANCE: ") +
+                                              selectedStanceLabel()
                                         : "FRIENDLY")
                                  : "ENEMY";
         drawBitmapText(r, {status}, infoX, panelY + 89.0f * invZoom,
@@ -4710,7 +4753,33 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                    (screenW * invZoom - commandsX - 14.0f * invZoom),
                    86.0f * invZoom, 14, 20, 31, 245);
         if (panelObject->player == localPlayer_) {
-            if (panelObject->unit->type == dat::UT_Building) {
+            if (panelSelectionCount > 1) {
+                const std::string stance =
+                    selectedAttacker
+                        ? std::string("STANCE: ") +
+                              selectedStanceLabel()
+                        : "STANCE: N/A";
+                drawBitmapText(r, {stance},
+                               commandsX + 12.0f * invZoom,
+                               panelY + 20.0f * invZoom,
+                               1.25f * invZoom,
+                               mixedAttackModes ? 255 : 120,
+                               mixedAttackModes ? 190 : 220,
+                               mixedAttackModes ? 100 : 255);
+                drawBitmapText(r, {"O: MOVE / ATTACK"},
+                               commandsX + 12.0f * invZoom,
+                               panelY + 40.0f * invZoom,
+                               1.18f * invZoom);
+                drawBitmapText(r, {"TRIANGLE: CHANGE STANCE"},
+                               commandsX + 12.0f * invZoom,
+                               panelY + 60.0f * invZoom,
+                               1.05f * invZoom);
+                drawBitmapText(r, {"X: SELECT   SQUARE: BOX"},
+                               commandsX + 12.0f * invZoom,
+                               panelY + 80.0f * invZoom,
+                               0.95f * invZoom,
+                               175, 190, 205);
+            } else if (panelObject->unit->type == dat::UT_Building) {
                 drawBitmapText(r, {"TRIANGLE: PRODUCTION"},
                                commandsX + 12.0f * invZoom,
                                panelY + 24.0f * invZoom,
