@@ -34,6 +34,7 @@ const char *kScenarioSoundDir = "ux0:data/swgb/Sound/Scenario";
 const char *kMusicDir = "ux0:data/swgb/Music";
 const char *kTerrainSoundDir = "ux0:data/swgb/Sound/Terrain";
 const int kScreenW = 960, kScreenH = 544;
+constexpr bool kUseCompactTestMap = true;
 
 FILE *g_log = nullptr;
 
@@ -104,27 +105,33 @@ int main() {
         }
         logf("assets loaded in %llu ms", (unsigned long long)((sceKernelGetProcessTimeWide() - t0) / 1000));
 
-        auto campaign = swgb::CpxArchive::open(kCampaignPath, &err);
-        if (!campaign) {
-            errorScreen(err + " (copy XCAM3.CPX to ux0:data/swgb/Campaign)");
-            sceKernelExitProcess(0);
-            return 0;
-        }
-        std::vector<uint8_t> scx;
-        if (!campaign->read(1, scx, &err)) {
-            errorScreen(err);
-            sceKernelExitProcess(0);
-            return 0;
-        }
         swgb::Scenario scenario;
-        if (!scenario.load(scx, &err)) {
-            errorScreen(err);
-            sceKernelExitProcess(0);
-            return 0;
+        if (!kUseCompactTestMap) {
+            auto campaign = swgb::CpxArchive::open(
+                kCampaignPath, &err);
+            if (!campaign) {
+                errorScreen(
+                    err +
+                    " (copy XCAM3.CPX to ux0:data/swgb/Campaign)");
+                sceKernelExitProcess(0);
+                return 0;
+            }
+            std::vector<uint8_t> scx;
+            if (!campaign->read(1, scx, &err) ||
+                !scenario.load(scx, &err)) {
+                errorScreen(err);
+                sceKernelExitProcess(0);
+                return 0;
+            }
+            logf("scenario %s loaded: %ux%u, %u units, player data %.2f",
+                 scenario.originalFilename.c_str(),
+                 (unsigned)scenario.map.width,
+                 (unsigned)scenario.map.height,
+                 (unsigned)scenario.units.size(),
+                 scenario.playerDataVersion);
+        } else {
+            logf("compact gameplay test map selected");
         }
-        logf("scenario %s loaded: %ux%u, %u units, player data %.2f", scenario.originalFilename.c_str(),
-             (unsigned)scenario.map.width, (unsigned)scenario.map.height, (unsigned)scenario.units.size(),
-             scenario.playerDataVersion);
 
         swgb::Game game(assets);
         game.setLogger([](const std::string &s) { logf("%s", s.c_str()); });
@@ -151,7 +158,12 @@ int main() {
             if (!audio.playEffect(resourceId, data))
                 logf("unit sound %s (%d) could not play", fileName.c_str(), resourceId);
         });
-        if (!game.initScenario(scenario, &err)) {
+        const bool initialized =
+            kUseCompactTestMap
+                ? game.initCompactTestMap(
+                      0x5A17u, 64, &err)
+                : game.initScenario(scenario, &err);
+        if (!initialized) {
             errorScreen(err);
             sceKernelExitProcess(0);
             return 0;

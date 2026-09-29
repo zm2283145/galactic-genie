@@ -13,7 +13,9 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   per-frame slope cache are done. Terrain blend masks are resampled through the same slope filters.
 - Cliffs, trees and gaia resources (carbon, ore, nova, fruit, animals).
 - CPX campaign archive and SCX terrain/elevation loading are done. The Vita vertical slice now opens
-  Galactic Empire mission 2, “Breaking Bread,” directly from the original `XCAM3.CPX`.
+  Galactic Empire mission 2, “Breaking Bread,” directly from the original `XCAM3.CPX`. Development
+  builds can instead start on an isolated compact test map containing both bases, power and shield
+  coverage, a walled gate, resources, livestock, and shielded/unshielded targets.
 - Initial scenario objects and the saved camera are loaded, including trees, resources, buildings, and
   units. Terrain aliases and civilization-specific farm terrain are resolved from the original data.
 - Player names, civilizations, colors, resources, population limits, diplomacy, and allied-victory state
@@ -36,7 +38,10 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   shared formation routes, route-tangent marching columns, slowest-member group speed with bounded
   catch-up, collision-free movement within established formations, and precise destination formations.
   Workers, traders, and distant stragglers move independently. Broader task-list actions remain.
-- Unit commands from the dat task lists (`UnitHeader.tasks`): move, attack, gather, build, repair, garrison.
+- Unit commands from the dat task lists (`UnitHeader.tasks`): move, attack, gather, build, repair,
+  and garrison. Workers repair owned or allied buildings and DAT-designated mechanical classes,
+  consume half of the target's original resource cost across a full HP restoration, and use the
+  original working animation.
 - The initial combat slice includes contextual hostile targeting, runtime hit points, DAT-driven
   attack/armor classes, range and minimum range, reload timing, attack animations and sounds,
   original projectile flight and weapon sounds, health-bar depletion, death sounds, and progressive
@@ -60,14 +65,22 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   technology-driven economy, military, and defense building pages, validate placement and costs with
   flashing green/red footprints, walk to foundations, switch to their original Builder state, and
   construct buildings with progressive graphics and hit points. Retasked workers can resume a
-  foundation through a contextual command. Gathering/drop sites, multiple builders,
-  repair/construction cancellation, shield damage, and population-limit enforcement remain.
+  foundation through a contextual command. Workers use original resource cursors, task variants,
+  working/carrying animations, capacities, and civilization drop sites while gathering food,
+  carbon, ore, and nova; depleted static nodes are removed. Neutral Nerfs and Banthas use the
+  original Gaia color and convert through proximity capture. Live-animal slaughter, farms,
+  fishing, automatic adjacent-node retargeting, multiple builders, and population-limit
+  enforcement remain.
 - Researched technology effects apply packed DAT attack/armor modifiers plus generic health, speed,
   and reload-time modifiers, along with chained unit/building upgrade and age effects. Remaining
   attributes and resource effects still need
   to be applied.
-- SWGB-specific mechanics: power coverage and shield-coverage detection are implemented. Shield
-  absorption/regeneration, air units, Jedi/Sith conversion, and holocrons remain.
+- SWGB-specific mechanics: power and shield coverage are implemented. A powered Shield Generator
+  gives eligible units and buildings a gold shield bar equal to maximum HP, with original
+  tiered regeneration, non-stacking coverage, overflow damage, and one-HP per-hit leakage for
+  mobile units but not buildings. Unpowered generators drain shields at 40 points per second,
+  reduced to 20 by Superconducting Shields; Shield Wall enables adjacent wall coverage.
+  Air-unit special behavior, Jedi/Sith conversion, and holocrons remain.
 
 ## Milestone 4: interface and input on Vita
 - Replace the temporary bitmap trigger-dialogue font with UI rendering from `interfac.drs` SLPs.
@@ -76,19 +89,21 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 - Single, box, and visible-type selection, original leader-first group ordering and command audio,
   selection sounds, and contextual original normal/move/attack cursors are implemented. The command
   cursor scrolls the camera at screen edges. Unit panels and control groups remain.
-- The command/info panel shows the selected unit or building portrait, live health, attack,
-  armor, range, stance, multi-selection portraits with individual health, formation controls,
+- The command/info panel shows the selected unit or building portrait, live health and shields,
+  non-zero combat attributes, stance, multi-selection portraits with individual health, formation controls,
   Vita command hints, and contextual action menus. Buildings separate civilization-correct Units
   and Research tabs, support touch or L/R switching, and show every cancellable queue item plus
   current progress. Gates expose lock/unlock commands rather than production; selected gate
-  footprints follow their oriented annexes. Unit/group panels provide original-icon garrison
-  targeting, while eligible buildings provide ejection and capacity feedback. Workers open a
-  Buildings page with a placement preview. Selection status distinguishes the local player,
+  footprints follow their oriented annexes. Unit/group panels use the original command sheet for
+  garrison targeting, repair targeting, gate locking, and ejection; eligible buildings provide
+  ejection and capacity feedback. Choosing a formation immediately rearranges idle combat units.
+  Workers open three categorized building pages with placement previews. Empty buildings do not
+  expose an action-menu hint. Selection status distinguishes the local player,
   named allies, neutral sides, and enemies using scenario diplomacy. A persistent resource and population bar is shown at
   the top. A scrollable L + R + Select test menu exposes
   the original base-game and Clone Campaigns cheats, including resource grants, unit spawns, instant
   production/construction, victory/player defeat, and hidden DAT cheat technologies. General worker
-  task buttons, minimap, and pause menu remain.
+  guard/patrol buttons, minimap, and pause menu remain.
 - Audio: selection, move, and attack acknowledgements plus camera-relative weapon-fire, impact, and
   death effects are implemented. The original Ogg soundtrack streams from storage, ducks beneath
   scenario dialogue, and mixes with terrain-specific world ambience. Garrison/ejection, gate

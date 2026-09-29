@@ -191,7 +191,17 @@ static int cmdUnit(const char *dataDir, int id) {
             for (const auto &cost : unit.costs)
                 if (cost.flag && cost.type >= 0)
                     printf(" %d=%d", cost.type, cost.amount);
-            printf("; default task header %d\n", unit.defaultTaskId);
+            printf("; default task header %d, capacity %d, work rate %.3f, "
+                   "storage",
+                   unit.defaultTaskId, unit.resourceCapacity,
+                   unit.workRate);
+            for (const auto &storage :
+                 unit.resourceStorages)
+                if (storage.type >= 0 &&
+                    storage.amount != 0)
+                    printf(" %d=%.1f/%u", storage.type,
+                           storage.amount, storage.flag);
+            printf("\n");
             if ((size_t)unit.id <
                 assets.dat().unitHeaders.size()) {
                 for (const auto &task :
@@ -200,11 +210,20 @@ static int cmdUnit(const char *dataDir, int id) {
                          .tasks)
                     printf("    task %d type %d action %d class %d unit %d "
                            "terrain %d default %u target %u build %u "
+                           "resource %d*%d->%d gather %d "
+                           "work %.3f/%.3f range %.2f "
                            "graphics %d/%d/%d/%d\n",
                            task.id, task.taskType, task.actionType,
                            task.classId, task.unitId, task.terrainId,
                            task.isDefault, task.enableTargeting,
                            task.pickForConstruction,
+                           task.resourceIn,
+                           task.resourceMultiplier,
+                           task.resourceOut,
+                           task.gatherType,
+                           task.workValue1,
+                           task.workValue2,
+                           task.workRange,
                            task.movingGraphic,
                            task.proceedingGraphic,
                            task.workingGraphic,
@@ -1825,6 +1844,304 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         commandCenterBeforeAge == 109 &&
         game.objectUnitId(commandCenterId) == 71;
 
+    Game systems(assets);
+    if (!systems.init(0x51E1D, mapSize, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    const uint32_t powerCoreId =
+        systems.spawnObjectForTesting(
+            3, 12, 1, 6.0f, 48.0f);
+    const uint32_t shieldGeneratorId =
+        systems.spawnObjectForTesting(
+            3, 335, 1, 11.0f, 48.0f);
+    const bool shieldFixturesCreated =
+        powerCoreId != 0 &&
+        shieldGeneratorId != 0;
+    const uint32_t shieldBuildingId =
+        systems.spawnObjectForTesting(
+            3, 70, 1, 13.0f, 48.0f);
+    const uint32_t shieldWorkerId =
+        systems.spawnObjectForTesting(
+            3, 83, 1, 12.0f, 46.0f);
+    systems.update(20.0f, {});
+    const float chargedBuildingShield =
+        systems.objectShieldPoints(
+            shieldBuildingId);
+    const float chargedWorkerShield =
+        systems.objectShieldPoints(
+            shieldWorkerId);
+    const float buildingHealthBeforeShieldHit =
+        systems.objectHitPoints(
+            shieldBuildingId);
+    const float workerHealthBeforeShieldHit =
+        systems.objectHitPoints(
+            shieldWorkerId);
+    systems.damageObjectForTesting(
+        shieldBuildingId, 10);
+    systems.damageObjectForTesting(
+        shieldWorkerId, 10);
+    const bool buildingShieldAbsorbed =
+        chargedBuildingShield >= 39.9f &&
+        std::abs(
+            systems.objectHitPoints(
+                shieldBuildingId) -
+            buildingHealthBeforeShieldHit) <
+            0.01f &&
+        systems.objectShieldPoints(
+            shieldBuildingId) <=
+            chargedBuildingShield - 9.9f;
+    const bool mobileShieldBleedThrough =
+        chargedWorkerShield >= 39.9f &&
+        std::abs(
+            systems.objectHitPoints(
+                shieldWorkerId) -
+            (workerHealthBeforeShieldHit - 1.0f)) <
+            0.01f;
+    const float workerShieldBeforeOverflow =
+        systems.objectShieldPoints(
+            shieldWorkerId);
+    const float workerHealthBeforeOverflow =
+        systems.objectHitPoints(
+            shieldWorkerId);
+    systems.damageObjectForTesting(
+        shieldWorkerId, 50);
+    const float expectedOverflow =
+        50.0f -
+        workerShieldBeforeOverflow + 1.0f;
+    const bool shieldOverflowDamagedHealth =
+        systems.objectShieldPoints(
+            shieldWorkerId) == 0 &&
+        std::abs(
+            systems.objectHitPoints(
+                shieldWorkerId) -
+            (workerHealthBeforeOverflow -
+             expectedOverflow)) <
+            0.01f;
+    systems.moveObjectForTesting(
+        shieldBuildingId, 40.0f, 48.0f);
+    systems.update(0.1f, {});
+    const bool shieldClearedOutsideRadius =
+        systems.objectShieldPoints(
+            shieldBuildingId) == 0 &&
+        systems.objectMaxShieldPoints(
+            shieldBuildingId) == 0;
+    systems.moveObjectForTesting(
+        shieldBuildingId, 13.0f, 48.0f);
+    systems.update(400.0f, {});
+    const float poweredShield =
+        systems.objectShieldPoints(
+            shieldBuildingId);
+    const bool shieldChargedFully =
+        poweredShield >=
+        systems.objectMaxShieldPoints(
+            shieldBuildingId) - 0.001f;
+    systems.moveObjectForTesting(
+        powerCoreId, 40.0f, 40.0f);
+    systems.update(0.5f, {});
+    const bool unpoweredShieldDrained =
+        systems.objectShieldPoints(
+            shieldBuildingId) <=
+            poweredShield - 19.9f;
+
+    const float testBaseX = mapSize * 0.30f;
+    const float testBaseY = mapSize * 0.35f;
+    constexpr uint32_t gatherWorkerId = 6;
+    systems.moveObjectForTesting(
+        gatherWorkerId,
+        testBaseX + 4.0f,
+        testBaseY + 2.0f);
+    const uint32_t foodId =
+        systems.spawnObjectForTesting(
+            0, 59, 0,
+            testBaseX + 5.5f,
+            testBaseY + 2.0f);
+    const float foodBeforeGathering =
+        systems.resource(1, 0);
+    const bool gatherOrderIssued =
+        systems.issueGatherForTesting(
+            gatherWorkerId, foodId);
+    for (int frame = 0; frame < 2400 &&
+         systems.resource(1, 0) <=
+             foodBeforeGathering; frame++)
+        systems.update(1.0f / 30.0f, {});
+    const bool workerGatheredAndDeposited =
+        gatherOrderIssued &&
+        systems.resource(1, 0) >
+            foodBeforeGathering;
+
+    const uint32_t repairWorkerId =
+        systems.spawnObjectForTesting(
+            3, 83, 1, 29.0f, 48.0f);
+    const uint32_t repairBuildingId =
+        systems.spawnObjectForTesting(
+            3, 70, 1, 31.0f, 48.0f);
+    systems.setResourceForTesting(
+        1, 1, 1000.0f);
+    systems.damageObjectForTesting(
+        repairBuildingId, 100);
+    const float repairHealthBefore =
+        systems.objectHitPoints(
+            repairBuildingId);
+    const float repairCarbonBefore =
+        systems.resource(1, 1);
+    const bool repairOrderIssued =
+        systems.issueRepairForTesting(
+            repairWorkerId,
+            repairBuildingId);
+    for (int frame = 0; frame < 600;
+         frame++)
+        systems.update(1.0f / 30.0f, {});
+    const float repairHealthAfter =
+        systems.objectHitPoints(
+            repairBuildingId);
+    const float repairCarbonAfter =
+        systems.resource(1, 1);
+    const bool workerRepairedBuilding =
+        repairOrderIssued &&
+        repairHealthAfter >
+            repairHealthBefore &&
+        repairCarbonAfter <
+            repairCarbonBefore;
+
+    systems.setDiplomacyForTesting(
+        1, 3, 0);
+    const uint32_t alliedRepairWorkerId =
+        systems.spawnObjectForTesting(
+            3, 83, 1, 35.0f, 48.0f);
+    const uint32_t alliedMechId =
+        systems.spawnObjectForTesting(
+            3, 244, 3, 37.0f, 48.0f);
+    for (int resourceType = 0;
+         resourceType < 4; resourceType++)
+        systems.setResourceForTesting(
+            1, resourceType, 1000.0f);
+    systems.damageObjectForTesting(
+        alliedMechId, 50);
+    const float alliedMechHealthBefore =
+        systems.objectHitPoints(alliedMechId);
+    float alliedRepairResourcesBefore = 0;
+    for (int resourceType = 0;
+         resourceType < 4; resourceType++)
+        alliedRepairResourcesBefore +=
+            systems.resource(1, resourceType);
+    const bool alliedRepairOrderIssued =
+        systems.issueRepairForTesting(
+            alliedRepairWorkerId,
+            alliedMechId);
+    for (int frame = 0; frame < 600;
+         frame++)
+        systems.update(1.0f / 30.0f, {});
+    float alliedRepairResourcesAfter = 0;
+    for (int resourceType = 0;
+         resourceType < 4; resourceType++)
+        alliedRepairResourcesAfter +=
+            systems.resource(1, resourceType);
+    const bool workerRepairedAlliedMech =
+        alliedRepairOrderIssued &&
+        systems.objectHitPoints(alliedMechId) >
+            alliedMechHealthBefore &&
+        alliedRepairResourcesAfter <
+            alliedRepairResourcesBefore;
+
+    const uint32_t nerfId =
+        systems.spawnObjectForTesting(
+            0, 594, 0,
+            testBaseX + 7.0f,
+            testBaseY + 7.0f);
+    systems.moveObjectForTesting(
+        11, testBaseX + 7.5f,
+        testBaseY + 7.0f);
+    systems.update(0.1f, {});
+    const bool livestockCaptured =
+        systems.objectPlayer(nerfId) == 1;
+
+    const uint32_t gateTestId =
+        systems.spawnObjectForTesting(
+            3, 64, 1, 50.0f, 10.0f);
+    systems.moveObjectForTesting(
+        7, 49.0f, 10.0f);
+    const bool gateLocked =
+        systems.setGateLockedForTesting(
+            gateTestId, true);
+    const bool gatePositionPassable =
+        systems.positionPassableForTesting(
+            7, 50.0f, 10.0f);
+    const bool lockedGateBlocks =
+        gateLocked && !gatePositionPassable;
+
+    systems.selectObjectForTesting(2);
+    InputState emptyMenuInput;
+    emptyMenuInput.screenW = screenW;
+    emptyMenuInput.screenH = screenH;
+    emptyMenuInput.cycleAttackMode = true;
+    systems.update(0.001f, emptyMenuInput);
+    const bool emptyMenuHidden =
+        !systems.actionMenuOpenForTesting();
+
+    systems.moveObjectForTesting(
+        11, 42.0f, 20.0f);
+    systems.moveObjectForTesting(
+        12, 44.0f, 20.0f);
+    const bool formationSelectionReady =
+        systems.selectObjectsForTesting(
+            {11, 12});
+    InputState formationInput;
+    formationInput.screenW = screenW;
+    formationInput.screenH = screenH;
+    formationInput.pointerX = 20.0f;
+    formationInput.pointerY =
+        screenH - 92.0f;
+    formationInput.selectPressed = true;
+    systems.update(0.001f, formationInput);
+    const bool formationMovedImmediately =
+        formationSelectionReady &&
+        systems.selectedMovingObjectCount() >
+            0;
+
+    if (out) {
+        systems.selectObjectForTesting(
+            repairWorkerId);
+        systems.lookAtObject(repairWorkerId);
+        systems.render(
+            renderer, screenW, screenH);
+        std::string repairUiOut(out);
+        const size_t extension =
+            repairUiOut.find_last_of('.');
+        repairUiOut.insert(
+            extension == std::string::npos
+                ? repairUiOut.size()
+                : extension,
+            "-repair-ui");
+        if (!renderer.savePng(repairUiOut)) {
+            fprintf(
+                stderr,
+                "error: could not write %s\n",
+                repairUiOut.c_str());
+            return 1;
+        }
+        systems.selectObjectForTesting(2);
+        systems.lookAtObject(2);
+        systems.render(
+            renderer, screenW, screenH);
+        std::string emptyStatsOut(out);
+        const size_t statsExtension =
+            emptyStatsOut.find_last_of('.');
+        emptyStatsOut.insert(
+            statsExtension == std::string::npos
+                ? emptyStatsOut.size()
+                : statsExtension,
+            "-empty-stats");
+        if (!renderer.savePng(
+                emptyStatsOut)) {
+            fprintf(
+                stderr,
+                "error: could not write %s\n",
+                emptyStatsOut.c_str());
+            return 1;
+        }
+    }
+
     const CombatStats combat = game.combatStats();
     const MovementStats movement = game.movementStats();
     const float finalHitPoints = game.objectHitPoints(targetId);
@@ -1837,6 +2154,10 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            "worker builds/pages %d/%d, research queued/cost/cancelled/completed/upgrade %d/%d/%d/%d/%d, "
            "garrison mode/entered/ejected %d/%d/%d, "
            "foundation placed/reassigned/builder/completed %d/%d/%d/%d, "
+           "shields building/mobile/overflow/leave/full/drain %d/%d/%d/%d/%d/%d, "
+           "gather/repair/ally-mech/livestock/gate/empty-menu %d/%d/%d/%d/%d/%d, "
+           "formation immediate %d, "
+           "repair order/hp/carbon %d/%.1f->%.1f/%.1f->%.1f gate locked/passable %d/%d, "
            "building damage/destroy %.2f/%.2fs\n",
            targetId, initialHitPoints, finalHitPoints,
            combat.ordersIssued, combat.attacksLanded, combat.unitsKilled,
@@ -1869,6 +2190,29 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
                : 0,
            builderStateEntered ? 1 : 0,
            constructionCompleted ? 1 : 0,
+           buildingShieldAbsorbed ? 1 : 0,
+           mobileShieldBleedThrough ? 1 : 0,
+           shieldOverflowDamagedHealth ? 1 : 0,
+           shieldClearedOutsideRadius ? 1 : 0,
+           shieldChargedFully ? 1 : 0,
+           shieldFixturesCreated &&
+                   unpoweredShieldDrained
+               ? 1
+               : 0,
+           workerGatheredAndDeposited ? 1 : 0,
+           workerRepairedBuilding ? 1 : 0,
+           workerRepairedAlliedMech ? 1 : 0,
+           livestockCaptured ? 1 : 0,
+           lockedGateBlocks ? 1 : 0,
+           emptyMenuHidden ? 1 : 0,
+           formationMovedImmediately ? 1 : 0,
+           repairOrderIssued ? 1 : 0,
+           repairHealthBefore,
+           repairHealthAfter,
+           repairCarbonBefore,
+           repairCarbonAfter,
+           gateLocked ? 1 : 0,
+           gatePositionPassable ? 1 : 0,
            buildingElapsed, destructionElapsed);
     const bool heardBlaster =
         std::find(acknowledgementSounds.begin(), acknowledgementSounds.end(), 71) !=
@@ -1899,6 +2243,20 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         !constructionReassigned ||
         !builderStateEntered ||
         !constructionCompleted ||
+        !buildingShieldAbsorbed ||
+        !mobileShieldBleedThrough ||
+        !shieldOverflowDamagedHealth ||
+        !shieldClearedOutsideRadius ||
+        !shieldChargedFully ||
+        !shieldFixturesCreated ||
+        !unpoweredShieldDrained ||
+        !workerGatheredAndDeposited ||
+        !workerRepairedBuilding ||
+        !workerRepairedAlliedMech ||
+        !livestockCaptured ||
+        !lockedGateBlocks ||
+        !emptyMenuHidden ||
+        !formationMovedImmediately ||
         upgradedBuildingDamage <= baseBuildingDamage) {
         fprintf(stderr, "error: combat validation failed\n");
         return 1;

@@ -96,6 +96,9 @@ public:
     explicit Game(Assets &assets) : assets_(assets) {}
 
     bool init(uint32_t seed, int mapSize, std::string *err);
+    bool initCompactTestMap(
+        uint32_t seed, int mapSize,
+        std::string *err);
     bool initScenario(const Scenario &scenario, std::string *err);
     void update(float dt, const InputState &in);
     void render(Renderer &r, int screenW, int screenH);
@@ -104,6 +107,8 @@ public:
     void lookAt(float tx, float ty);
     bool lookAtObject(uint32_t spawnId);
     bool selectObjectForTesting(uint32_t spawnId);
+    bool selectObjectsForTesting(
+        const std::vector<uint32_t> &spawnIds);
     const FrameStats &stats() const { return stats_; }
     void setLogger(std::function<void(const std::string &)> fn) { log_ = std::move(fn); }
     void setSoundPlayer(std::function<float(const std::string &)> fn) {
@@ -143,6 +148,31 @@ public:
     CombatStats combatStats() const;
     float objectHitPoints(uint32_t spawnId) const;
     float objectMaxHitPoints(uint32_t spawnId) const;
+    float objectShieldPoints(uint32_t spawnId) const;
+    float objectMaxShieldPoints(uint32_t spawnId) const;
+    bool objectShielded(uint32_t spawnId) const;
+    uint32_t spawnObjectForTesting(int civilization, int unitId, int player,
+                                   float x, float y);
+    bool damageObjectForTesting(uint32_t spawnId, int damage);
+    bool moveObjectForTesting(uint32_t spawnId, float x, float y);
+    int objectPlayer(uint32_t spawnId) const;
+    bool setGateLockedForTesting(
+        uint32_t spawnId, bool locked);
+    bool positionPassableForTesting(
+        uint32_t spawnId, float x, float y) const;
+    bool issueRepairForTesting(
+        uint32_t workerId, uint32_t targetId);
+    bool issueGatherForTesting(
+        uint32_t workerId, uint32_t targetId);
+    void setResourceForTesting(
+        int player, int resourceType,
+        float amount);
+    void setDiplomacyForTesting(
+        int sourcePlayer, int targetPlayer,
+        uint32_t stance);
+    bool actionMenuOpenForTesting() const {
+        return actionMenuOpen_;
+    }
     int objectUnitId(uint32_t spawnId) const;
     int objectAttackDamage(uint32_t sourceId,
                            uint32_t targetId) const;
@@ -181,12 +211,16 @@ private:
         Walk,
         Attack,
         Build,
+        Gather,
+        Repair,
     };
     enum class CursorMode : uint8_t {
         Normal,
         Move,
         Attack,
         Garrison,
+        Gather,
+        Repair,
     };
     enum class ActionMenuTab : uint8_t {
         Units,
@@ -224,6 +258,11 @@ private:
         float stateTime = 0;
         float targetX = 0, targetY = 0;
         float hitPoints = 1, maxHitPoints = 1;
+        float shieldPoints = 0, maxShieldPoints = 0;
+        float resourceAmount = 0;
+        float carriedAmount = 0;
+        int resourceType = -1;
+        int carriedResourceType = -1;
         std::vector<std::array<float, 2>> path;
         size_t pathIndex = 0;
         float blockedTime = 0;
@@ -264,6 +303,9 @@ private:
         float constructionTotal = 0;
         uint32_t constructionBuilderId = 0;
         uint32_t constructionTargetId = 0;
+        uint32_t gatherTargetId = 0;
+        uint32_t dropOffTargetId = 0;
+        uint32_t repairTargetId = 0;
         uint32_t garrisonTargetId = 0;
         uint32_t spawnId = 0;
         int32_t garrisonedInId = -1;
@@ -328,6 +370,7 @@ private:
     void rebuildAdjacency();
     bool configureGate(Object &object);
     void rebuildMobileOccupancy();
+    void updateLivestockOwnership();
     void updateTriggers(float dt);
     bool conditionMet(const ScenarioCondition &condition, float triggerElapsed);
     void executeEffect(const ScenarioEffect &effect);
@@ -407,9 +450,35 @@ private:
         int graphicId, int depth = 0) const;
     bool requiresPower(const Object &building) const;
     bool isPowered(const Object &building) const;
-    bool isShielded(const Object &building) const;
+    const Object *shieldGeneratorFor(
+        const Object &object) const;
+    bool isShielded(const Object &object) const;
+    void updateShields(float dt);
     const dat::Unit *builderUnit(
         const Object &worker) const;
+    int builderWorkingGraphic(
+        const Object &worker) const;
+    bool isGatherable(const Object &object) const;
+    const dat::Unit *gathererUnit(
+        const Object &worker) const;
+    const dat::Task *gatherTask(
+        const Object &worker,
+        const dat::Unit &gatherer) const;
+    bool issueGatherCommand(
+        Object &worker, Object &resource);
+    Object *nearestDropSite(
+        const Object &worker,
+        const dat::Unit &gatherer);
+    void updateGathering(float dt);
+    bool isFriendlyPlayer(int sourcePlayer,
+                          int targetPlayer) const;
+    bool isRepairableBy(
+        const Object &worker,
+        const Object &target,
+        bool requireDamage = true) const;
+    bool issueRepairCommand(
+        Object &worker, Object &target);
+    void updateRepairing(float dt);
     bool canGarrison(const Object &unit,
                      const Object &building) const;
     size_t garrisonedCount(const Object &building,
@@ -536,6 +605,7 @@ private:
     bool forceExploreCheat_ = false;
     bool forceSightCheat_ = false;
     bool garrisonCursorActive_ = false;
+    bool repairCursorActive_ = false;
     float ambienceTime_ = 2.0f;
     uint32_t ambienceSequence_ = 0;
     std::string statusMessage_;
