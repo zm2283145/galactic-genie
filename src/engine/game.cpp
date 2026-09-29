@@ -890,6 +890,16 @@ float Game::resource(int player, int resourceId) const {
     return found == resources_[(size_t)player].end() ? 0 : found->second;
 }
 
+bool Game::researchTechnology(int player, int technologyId) {
+    if (player < 0 ||
+        (size_t)player >= researchedTechs_.size() ||
+        technologyId < 0 ||
+        (size_t)technologyId >= assets_.dat().techs.size())
+        return false;
+    researchedTechs_[(size_t)player].insert(technologyId);
+    return true;
+}
+
 size_t Game::activeObjectCount() const {
     return (size_t)std::count_if(objects_.begin(), objects_.end(),
                                  [](const Object &object) { return object.active; });
@@ -976,6 +986,15 @@ float Game::objectHitPoints(uint32_t spawnId) const {
 float Game::objectMaxHitPoints(uint32_t spawnId) const {
     const Object *object = findObject(spawnId);
     return object ? object->maxHitPoints : 0.0f;
+}
+
+int Game::objectAttackDamage(uint32_t sourceId,
+                             uint32_t targetId) const {
+    const Object *source = findObject(sourceId);
+    const Object *target = findObject(targetId);
+    return source && target
+               ? attackDamage(*source, *target)
+               : 0;
 }
 
 bool Game::objectSelected(uint32_t spawnId) const {
@@ -1090,18 +1109,133 @@ float Game::attackRange(const Object &source, const Object &target) const {
     return std::max(contact, source.unit->maxRange);
 }
 
-int Game::attackDamage(const Object &source, const Object &target) const {
-    int damage = 0;
-    for (const dat::AttackOrArmor &attack : source.unit->attacks) {
-        int armour = target.unit->baseArmor;
-        for (const dat::AttackOrArmor &candidate : target.unit->armours)
-            if (candidate.cls == attack.cls) {
-                armour = candidate.amount;
-                break;
+bool Game::technologyCommandApplies(
+    const dat::EffectCommand &command,
+    const Object &object) const {
+    return (command.a < 0 || command.a == object.unit->id) &&
+           (command.b < 0 || command.b == object.unit->cls);
+}
+
+int Game::modifiedAttackAmount(
+    const Object &source,
+    const dat::AttackOrArmor &attack) const {
+    float amount = attack.amount;
+    if (source.player < 0 ||
+        (size_t)source.player >= researchedTechs_.size())
+        return attack.amount;
+    for (int technologyId :
+         researchedTechs_[(size_t)source.player]) {
+        if (technologyId < 0 ||
+            (size_t)technologyId >= assets_.dat().techs.size())
+            continue;
+        const dat::Tech &technology =
+            assets_.dat().techs[(size_t)technologyId];
+        if (technology.effectId < 0 ||
+            (size_t)technology.effectId >=
+                assets_.dat().effects.size())
+            continue;
+        for (const dat::EffectCommand &command :
+             assets_.dat()
+                 .effects[(size_t)technology.effectId]
+                 .commands) {
+            if (command.c != 9 ||
+                !technologyCommandApplies(command, source))
+                continue;
+            if (command.type == 5) {
+                amount *= command.d;
+                continue;
             }
-        damage += std::max(0, (int)attack.amount - armour);
+            if (command.type != 0 && command.type != 4)
+                continue;
+            const int packed = (int)std::lround(command.d);
+            if (((packed >> 8) & 0xFF) != attack.cls)
+                continue;
+            const int value =
+                (int)(int8_t)(packed & 0xFF);
+            amount = command.type == 0
+                         ? (float)value
+                         : amount + value;
+        }
     }
-    return source.unit->attacks.empty() ? 0 : std::max(1, damage);
+    return (int)std::lround(amount);
+}
+
+int Game::modifiedArmourAmount(const Object &target,
+                               int armourClass,
+                               bool &present) const {
+    float amount = target.unit->baseArmor;
+    present = false;
+    for (const dat::AttackOrArmor &armour :
+         target.unit->armours)
+        if (armour.cls == armourClass) {
+            amount = armour.amount;
+            present = true;
+            break;
+        }
+    if (target.player < 0 ||
+        (size_t)target.player >= researchedTechs_.size())
+        return (int)std::lround(amount);
+    for (int technologyId :
+         researchedTechs_[(size_t)target.player]) {
+        if (technologyId < 0 ||
+            (size_t)technologyId >= assets_.dat().techs.size())
+            continue;
+        const dat::Tech &technology =
+            assets_.dat().techs[(size_t)technologyId];
+        if (technology.effectId < 0 ||
+            (size_t)technology.effectId >=
+                assets_.dat().effects.size())
+            continue;
+        for (const dat::EffectCommand &command :
+             assets_.dat()
+                 .effects[(size_t)technology.effectId]
+                 .commands) {
+            if (command.c != 8 ||
+                !technologyCommandApplies(command, target))
+                continue;
+            if (command.type == 5) {
+                if (present) amount *= command.d;
+                continue;
+            }
+            if (command.type != 0 && command.type != 4)
+                continue;
+            const int packed = (int)std::lround(command.d);
+            if (((packed >> 8) & 0xFF) != armourClass)
+                continue;
+            const int value =
+                (int)(int8_t)(packed & 0xFF);
+            if (!present) {
+                amount = 0;
+                present = true;
+            }
+            amount = command.type == 0
+                         ? (float)value
+                         : amount + value;
+        }
+    }
+    return (int)std::lround(amount);
+}
+
+int Game::attackDamage(const Object &source,
+                       const Object &target) const {
+    int damage = 0;
+    for (const dat::AttackOrArmor &attack :
+         source.unit->attacks) {
+        bool armourPresent = false;
+        const int armour =
+            modifiedArmourAmount(target, attack.cls,
+                                 armourPresent);
+        const int attackAmount =
+            modifiedAttackAmount(source, attack);
+        damage += std::max(
+            attackAmount -
+                (armourPresent ? armour
+                               : target.unit->baseArmor),
+            0);
+    }
+    return source.unit->attacks.empty()
+               ? 0
+               : std::max(1, damage);
 }
 
 int Game::graphicSound(int graphicId) const {
@@ -1442,6 +1576,9 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
 
     Object *enemy = enemyAtScreen(screenX, screenY, screenW, screenH);
     if (enemy) {
+        struct ReservedAttackSlot {
+            float x, y, radius;
+        };
         Object *acknowledgement = nullptr;
         std::vector<Object *> attackers;
         for (Object *source : selected)
@@ -1449,35 +1586,129 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
             else
                 attackers.push_back(source);
         float centroidX = 0, centroidY = 0;
-        float approachSpacing = 0.18f;
         for (const Object *source : attackers) {
             centroidX += source->x;
             centroidY += source->y;
-            const float contact =
-                collisionRadius(*source) + collisionRadius(*enemy) + 0.08f;
-            float approachDistance =
-                std::max(contact, attackRange(*source, *enemy) * 0.8f);
-            if (source->unit->minRange > 0)
-                approachDistance =
-                    std::max(approachDistance, source->unit->minRange + 0.2f);
-            const float separation = collisionRadius(*source) * 2.0f + 0.12f;
-            const float ratio =
-                std::min(0.95f, separation / std::max(0.1f, approachDistance * 2.0f));
-            approachSpacing =
-                std::max(approachSpacing, 2.0f * std::asin(ratio));
         }
-        approachSpacing = std::min(0.8f, approachSpacing);
         const float baseAngle =
             attackers.empty()
                 ? 0
                 : std::atan2(centroidY / attackers.size() - enemy->y,
                              centroidX / attackers.size() - enemy->x);
-        for (size_t i = 0; i < attackers.size(); i++) {
-            Object *source = attackers[i];
-            const float offset =
-                ((float)i - ((float)attackers.size() - 1.0f) * 0.5f) *
-                approachSpacing;
-            issueAttack(*source, *enemy, baseAngle + offset);
+        std::stable_sort(
+            attackers.begin(), attackers.end(),
+            [&](const Object *a, const Object *b) {
+                return attackRange(*a, *enemy) <
+                       attackRange(*b, *enemy);
+            });
+        std::vector<ReservedAttackSlot> reserved;
+        reserved.reserve(attackers.size());
+        for (Object *source : attackers) {
+            const float sourceRadius = collisionRadius(*source);
+            const float contact =
+                sourceRadius + collisionRadius(*enemy) + 0.08f;
+            const float maximumDistance =
+                std::max(contact, attackRange(*source, *enemy) - 0.05f);
+            const float minimumDistance =
+                source->unit->minRange > 0
+                    ? std::min(maximumDistance,
+                               std::max(contact,
+                                        source->unit->minRange + 0.2f))
+                    : contact;
+            const float preferredDistance =
+                std::max(minimumDistance,
+                         std::min(maximumDistance,
+                                  attackRange(*source, *enemy) * 0.8f));
+            const float sourceAngle =
+                std::atan2(source->y - enemy->y,
+                           source->x - enemy->x);
+            const float radialStep =
+                std::max(0.35f, sourceRadius * 2.0f + 0.12f);
+            float slotAngle = sourceAngle;
+            float slotDistance = preferredDistance;
+            bool foundSlot = false;
+            auto slotOpen = [&](float angle, float distance) {
+                const float x = enemy->x + std::cos(angle) * distance;
+                const float y = enemy->y + std::sin(angle) * distance;
+                if (!positionPassable(*source, x, y, false))
+                    return false;
+                for (const ReservedAttackSlot &slot : reserved) {
+                    const float dx = x - slot.x;
+                    const float dy = y - slot.y;
+                    const float separation =
+                        sourceRadius + slot.radius + 0.08f;
+                    if (dx * dx + dy * dy <
+                        separation * separation)
+                        return false;
+                }
+                return true;
+            };
+            for (int band = 0; band <= 12 && !foundSlot; band++) {
+                const float offsets[] = {
+                    band == 0 ? 0.0f : -band * radialStep,
+                    band == 0 ? 0.0f : band * radialStep};
+                for (float radialOffset : offsets) {
+                    const float distance =
+                        preferredDistance + radialOffset;
+                    if (distance < minimumDistance - 0.001f ||
+                        distance > maximumDistance + 0.001f)
+                        continue;
+                    const float separation =
+                        sourceRadius * 2.0f + 0.12f;
+                    const int samples =
+                        std::max(16, std::min(
+                                         96,
+                                         (int)std::ceil(
+                                             2.0f * kPi * distance /
+                                             separation)));
+                    for (int sample = 0; sample < samples; sample++) {
+                        const int alternating =
+                            sample == 0
+                                ? 0
+                                : ((sample + 1) / 2) *
+                                      (sample & 1 ? 1 : -1);
+                        const float angle =
+                            sourceAngle +
+                            alternating *
+                                (2.0f * kPi / samples);
+                        if (!slotOpen(angle, distance))
+                            continue;
+                        slotAngle = angle;
+                        slotDistance = distance;
+                        foundSlot = true;
+                        break;
+                    }
+                    if (foundSlot) break;
+                }
+            }
+            for (int ring = 1; ring <= 16 && !foundSlot; ring++) {
+                const float distance =
+                    maximumDistance + ring * radialStep;
+                const int samples =
+                    std::max(16, std::min(
+                                     96,
+                                     (int)std::ceil(
+                                         2.0f * kPi * distance /
+                                         (sourceRadius * 2.0f + 0.12f))));
+                for (int sample = 0; sample < samples; sample++) {
+                    const float angle =
+                        baseAngle +
+                        (sample + (ring & 1) * 0.5f) *
+                            (2.0f * kPi / samples);
+                    if (!slotOpen(angle, distance))
+                        continue;
+                    slotAngle = angle;
+                    slotDistance = distance;
+                    foundSlot = true;
+                    break;
+                }
+            }
+            reserved.push_back(
+                {enemy->x + std::cos(slotAngle) * slotDistance,
+                 enemy->y + std::sin(slotAngle) * slotDistance,
+                 sourceRadius});
+            issueAttack(*source, *enemy, slotAngle, false,
+                        slotDistance);
             if (!acknowledgement) acknowledgement = source;
         }
         if (!acknowledgement) return;
@@ -1554,10 +1785,17 @@ void Game::cycleSelectedAttackMode() {
 }
 
 void Game::issueAttack(Object &source, Object &target, float approachAngle,
-                       bool automatic) {
+                       bool automatic, float approachDistance) {
     source.attackTargetId = target.spawnId;
     source.attackRepathTime = 0;
     source.attackApproachAngle = approachAngle;
+    source.attackApproachDistance = approachDistance;
+    if (approachDistance > 0) {
+        source.targetX =
+            target.x + std::cos(approachAngle) * approachDistance;
+        source.targetY =
+            target.y + std::sin(approachAngle) * approachDistance;
+    }
     source.attackSlotRetries = 0;
     source.attackStallTime = 0;
     source.attackBestDistance = std::numeric_limits<float>::max();
@@ -1621,10 +1859,9 @@ void Game::finishAttack(Object &source, bool returnToPost) {
 void Game::retryAttackApproach(Object &source) {
     source.attackSlotRetries++;
     const float handedness = (source.spawnId & 1u) ? 1.0f : -1.0f;
-    const float direction = (source.attackSlotRetries & 1u) ? 1.0f : -1.0f;
-    const float magnitude =
-        0.28f * (1.0f + std::min(3u, source.attackSlotRetries / 2u));
-    source.attackApproachAngle += handedness * direction * magnitude;
+    source.attackApproachAngle +=
+        handedness * 2.39996323f;
+    source.attackApproachDistance = 0;
     source.path.clear();
     source.pathIndex = 0;
     source.state = State::Idle;
@@ -1918,9 +2155,14 @@ void Game::updateAttack(Object &source, float dt) {
     }
 
     const float contact = collisionRadius(source) + collisionRadius(*target) + 0.08f;
-    float desiredDistance = std::max(contact, range * 0.8f);
-    if (source.unit->minRange > 0)
-        desiredDistance = std::max(desiredDistance, source.unit->minRange + 0.2f);
+    float desiredDistance =
+        source.attackApproachDistance > 0
+            ? source.attackApproachDistance
+            : std::max(contact, range * 0.8f);
+    if (source.attackApproachDistance <= 0 &&
+        source.unit->minRange > 0)
+        desiredDistance =
+            std::max(desiredDistance, source.unit->minRange + 0.2f);
     const float awayX = std::cos(source.attackApproachAngle);
     const float awayY = std::sin(source.attackApproachAngle);
     const float destinationX = target->x + awayX * desiredDistance;
@@ -2005,6 +2247,22 @@ bool Game::positionPassable(const Object &object, float x, float y, bool dynamic
                         object.moveGroupId != 0 &&
                         object.moveGroupId == other.moveGroupId)
                         continue;
+                    if (object.attackTargetId != 0 &&
+                        object.attackTargetId ==
+                            other.attackTargetId &&
+                        object.attackApproachDistance > 0 &&
+                        other.attackApproachDistance > 0) {
+                        const float slotDx =
+                            object.targetX - other.targetX;
+                        const float slotDy =
+                            object.targetY - other.targetY;
+                        const float slotSeparation =
+                            radius + collisionRadius(other) +
+                            0.04f;
+                        if (slotDx * slotDx + slotDy * slotDy >=
+                            slotSeparation * slotSeparation)
+                            continue;
+                    }
                     const float dx = x - other.x, dy = y - other.y;
                     const float separation =
                         radius + collisionRadius(other) + 0.04f;
@@ -2774,10 +3032,10 @@ void Game::executeEffect(const ScenarioEffect &effect) {
         break;
     }
     case 2:
-        if (sourcePlayer >= 0 && (size_t)sourcePlayer < researchedTechs_.size() && technology >= 0)
-            researchedTechs_[(size_t)sourcePlayer].insert(technology);
+        researchTechnology(sourcePlayer, technology);
         if (warnedEffects_.insert(effect.type).second)
-            log("technology research is tracked; DAT technology modifiers are not applied yet");
+            log("technology research applies DAT attack and armor modifiers; "
+                "other modifiers remain");
         break;
     case 3:
         queueInstruction(effect.message, triggerField(effect.fields, 12), effect.sound);
@@ -3293,6 +3551,20 @@ void Game::update(float dt, const InputState &in) {
                 object.moveGroupId != 0 &&
                 object.moveGroupId == other.moveGroupId)
                 continue;
+            if (object.attackTargetId != 0 &&
+                object.attackTargetId == other.attackTargetId &&
+                object.attackApproachDistance > 0 &&
+                other.attackApproachDistance > 0) {
+                const float slotDx =
+                    object.targetX - other.targetX;
+                const float slotDy =
+                    object.targetY - other.targetY;
+                const float slotSeparation =
+                    radius + collisionRadius(other) + 0.04f;
+                if (slotDx * slotDx + slotDy * slotDy >=
+                    slotSeparation * slotSeparation)
+                    continue;
+            }
             const float otherDx = nextX - other.x;
             const float otherDy = nextY - other.y;
             const float separation =

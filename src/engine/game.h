@@ -114,6 +114,7 @@ public:
     bool gateLocked(uint32_t spawnId) const;
     bool objectActive(uint32_t spawnId) const;
     float resource(int player, int resourceId) const;
+    bool researchTechnology(int player, int technologyId);
     const std::string &currentInstruction() const { return currentInstruction_; }
     size_t activeObjectCount() const;
     size_t selectedObjectCount() const;
@@ -122,6 +123,8 @@ public:
     CombatStats combatStats() const;
     float objectHitPoints(uint32_t spawnId) const;
     float objectMaxHitPoints(uint32_t spawnId) const;
+    int objectAttackDamage(uint32_t sourceId,
+                           uint32_t targetId) const;
     bool objectSelected(uint32_t spawnId) const;
     bool objectScreenPosition(uint32_t spawnId, int screenW, int screenH,
                               float &screenX, float &screenY) const;
@@ -165,6 +168,7 @@ private:
         float attackCooldown = 0;
         float attackRepathTime = 0;
         float attackApproachAngle = 0;
+        float attackApproachDistance = 0;
         float attackStallTime = 0;
         float attackBestDistance = 0;
         float autoAcquireTime = 0;
@@ -270,6 +274,14 @@ private:
     bool canAttack(const Object &object) const;
     float attackRange(const Object &source, const Object &target) const;
     int attackDamage(const Object &source, const Object &target) const;
+    int modifiedAttackAmount(
+        const Object &source,
+        const dat::AttackOrArmor &attack) const;
+    int modifiedArmourAmount(const Object &target, int armourClass,
+                             bool &present) const;
+    bool technologyCommandApplies(
+        const dat::EffectCommand &command,
+        const Object &object) const;
     int graphicSound(int graphicId) const;
     float collisionRadius(const Object &object) const;
     bool isInspectable(const Object &object) const;
@@ -292,7 +304,8 @@ private:
     void commandAtScreen(float screenX, float screenY, int screenW, int screenH);
     void cycleSelectedAttackMode();
     void issueAttack(Object &source, Object &target, float approachAngle,
-                     bool automatic = false);
+                     bool automatic = false,
+                     float approachDistance = 0);
     void acquireAutomaticTarget(Object &source);
     void finishAttack(Object &source, bool returnToPost);
     void retryAttackApproach(Object &source);

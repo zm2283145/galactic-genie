@@ -33,6 +33,7 @@ static int usage() {
             "  swgbtool restriction <DataDir> <restrictionId>\n"
             "  swgbtool unit <DataDir> <unitId>\n"
             "  swgbtool units <DataDir> <name-fragment>\n"
+            "  swgbtool tech <DataDir> <techId>\n"
             "  swgbtool sound <DataDir> <soundId>\n"
             "  swgbtool drs    <file.drs>\n"
             "  swgbtool drs-slps <file.drs>\n"
@@ -262,6 +263,37 @@ static int cmdUnits(const char *dataDir, const char *fragment) {
                graphic ? graphic->frameDuration : 0,
                graphic ? graphic->sequenceType : 0,
                unit.copyId, unit.baseId);
+    }
+    return 0;
+}
+
+static int cmdTech(const char *dataDir, int id) {
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    std::string err;
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    const auto &techs = assets.dat().techs;
+    if (id < 0 || (size_t)id >= techs.size()) {
+        fprintf(stderr, "error: technology %d is unavailable\n", id);
+        return 1;
+    }
+    const dat::Tech &tech = techs[(size_t)id];
+    printf("tech %d '%s' internal '%s' civ %d location %d time %d effect %d\n",
+           id, assets.localizedString(tech.languageDllName).c_str(),
+           tech.name2.c_str(), tech.civ, tech.locationId,
+           tech.researchTime, tech.effectId);
+    if (tech.effectId >= 0 &&
+        (size_t)tech.effectId < assets.dat().effects.size()) {
+        const dat::Effect &effect =
+            assets.dat().effects[(size_t)tech.effectId];
+        printf("  effect '%s'\n", effect.name.c_str());
+        for (const dat::EffectCommand &command : effect.commands)
+            printf("    type %u a %d b %d c %d d %.3f\n",
+                   command.type, command.a, command.b,
+                   command.c, command.d);
     }
     return 0;
 }
@@ -964,6 +996,16 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
     // spawnBase creates five buildings, five workers, then four troopers.
     // The second base therefore starts at spawn 18 and its first trooper is 28.
     constexpr uint32_t targetId = 28;
+    constexpr uint32_t sourceTrooperId = 11;
+    constexpr uint32_t technologyTargetId = 19;
+    const int baseBuildingDamage =
+        game.objectAttackDamage(sourceTrooperId,
+                                technologyTargetId);
+    const bool researchedFocusCoils =
+        game.researchTechnology(1, 66);
+    const int upgradedBuildingDamage =
+        game.objectAttackDamage(sourceTrooperId,
+                                technologyTargetId);
     game.lookAt(mapSize * 0.62f + 8.0f, mapSize * 0.60f + 1.0f);
     float screenX = 0, screenY = 0;
     if (!game.objectScreenPosition(targetId, screenW, screenH, screenX, screenY)) {
@@ -1099,7 +1141,8 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
     input.pointerY = screenY - 36.0f;
     input.commandPressed = true;
     game.update(0.001f, input);
-    for (float buildingElapsed = 0;
+    float buildingElapsed = 0;
+    for (;
          buildingElapsed < 120.0f &&
          game.objectHitPoints(buildingId) > buildingMaxHitPoints * 0.74f;
          buildingElapsed += step)
@@ -1139,8 +1182,10 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
     input.pointerY = screenY - 24.0f;
     input.commandPressed = true;
     game.update(0.001f, input);
-    for (float destructionElapsed = 0;
-         destructionElapsed < 240.0f && game.objectActive(destroyedBuildingId);
+    float destructionElapsed = 0;
+    for (;
+         destructionElapsed < 240.0f &&
+         game.objectActive(destroyedBuildingId);
          destructionElapsed += step)
         game.update(step, {});
     const bool buildingDestroyed = !game.objectActive(destroyedBuildingId);
@@ -1169,7 +1214,8 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            "building %.0f -> %.0f selected %d, remains %d -> %zu, overlaps %zu, "
            "building destroyed/remains/decayed %d/%d/%d, edge scroll %d, "
            "attack audio %d, offscreen muted %d, approach retries %zu, "
-           "automatic/retaliation/armed %zu/%zu/%zu\n",
+           "automatic/retaliation/armed %zu/%zu/%zu, tech damage %d -> %d, "
+           "building damage/destroy %.2f/%.2fs\n",
            targetId, initialHitPoints, finalHitPoints,
            combat.ordersIssued, combat.attacksLanded, combat.unitsKilled,
            combat.projectilesLaunched, combat.attackPathsComputed,
@@ -1182,7 +1228,9 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            offscreenWorldMuted ? 1 : 0,
            combat.attackApproachRetries,
            combat.automaticTargetsAcquired, combat.retaliationOrders,
-           combat.armedBuildingsEngaged);
+           combat.armedBuildingsEngaged,
+           baseBuildingDamage, upgradedBuildingDamage,
+           buildingElapsed, destructionElapsed);
     const bool heardBlaster =
         std::find(acknowledgementSounds.begin(), acknowledgementSounds.end(), 71) !=
         acknowledgementSounds.end();
@@ -1197,7 +1245,10 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         movement.overlappingPairs != 0 || !buildingDestroyed ||
         !sawBuildingRemains || !remainsDecayed || !edgeScrolled ||
         !attackPlayedOnce || !offscreenWorldMuted ||
-        combat.automaticTargetsAcquired == 0) {
+        combat.automaticTargetsAcquired == 0 ||
+        combat.attackApproachRetries > 8 ||
+        !researchedFocusCoils ||
+        upgradedBuildingDamage <= baseBuildingDamage) {
         fprintf(stderr, "error: combat validation failed\n");
         return 1;
     }
@@ -1237,6 +1288,7 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "restriction") && argc >= 4) return cmdRestriction(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "unit") && argc >= 4) return cmdUnit(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "units") && argc >= 4) return cmdUnits(argv[2], argv[3]);
+    if (!strcmp(cmd, "tech") && argc >= 4) return cmdTech(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "sound") && argc >= 4) return cmdSound(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "drs")) return cmdDrs(argv[2]);
     if (!strcmp(cmd, "drs-slps")) return cmdDrsSlps(argv[2]);
