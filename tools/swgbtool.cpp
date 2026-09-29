@@ -162,13 +162,29 @@ static int cmdUnit(const char *dataDir, int id) {
                                          : nullptr;
             const auto *projectileGraphic =
                 projectile ? assets.dat().graphic(projectile->standingGraphic[0]) : nullptr;
+            const auto *deadUnit =
+                unit.deadUnitId >= 0 && (size_t)unit.deadUnitId < units.size()
+                    ? &units[(size_t)unit.deadUnitId]
+                    : nullptr;
+            const auto *deadGraphic =
+                deadUnit ? assets.dat().graphic(deadUnit->standingGraphic[0]) : nullptr;
             printf("  sounds damage/dying %d/%d, graphics stand/walk/dying %d/%d/%d, "
-                   "graphic sounds stand/attack/projectile/dying %d/%d/%d/%d\n",
+                   "dead unit %d, graphic sounds stand/attack/projectile/dying %d/%d/%d/%d\n",
                    unit.damageSound, unit.dyingSound, unit.standingGraphic[0],
-                   unit.walkingGraphic, unit.dyingGraphic, graphic ? graphic->soundId : -1,
+                   unit.walkingGraphic, unit.dyingGraphic, unit.deadUnitId,
+                   graphic ? graphic->soundId : -1,
                    attackGraphic ? attackGraphic->soundId : -1,
                    projectileGraphic ? projectileGraphic->soundId : -1,
                    dyingGraphic ? dyingGraphic->soundId : -1);
+            printf("  death animation frames/duration/sequence %d/%.3f/0x%02x, "
+                   "remains graphic %d frames/duration/sequence %d/%.3f/0x%02x\n",
+                   dyingGraphic ? dyingGraphic->frameCount : 0,
+                   dyingGraphic ? dyingGraphic->frameDuration : 0,
+                   dyingGraphic ? dyingGraphic->sequenceType : 0,
+                   deadUnit ? deadUnit->standingGraphic[0] : -1,
+                   deadGraphic ? deadGraphic->frameCount : 0,
+                   deadGraphic ? deadGraphic->frameDuration : 0,
+                   deadGraphic ? deadGraphic->sequenceType : 0);
             printf("  damage graphics:");
             for (const auto &damage : unit.damageGraphics) {
                 const auto *damageGraphic = assets.dat().graphic(damage.graphicId);
@@ -819,6 +835,17 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         fprintf(stderr, "error: combat sandbox target %u is unavailable\n", targetId);
         return 1;
     }
+    const float edgeBeforeX = screenX;
+    input = {};
+    input.pointerX = screenW;
+    input.pointerY = screenH * 0.5f;
+    input.cursorVisible = true;
+    game.update(0.1f, input);
+    float edgeAfterX = 0, edgeAfterY = 0;
+    game.objectScreenPosition(targetId, screenW, screenH, edgeAfterX, edgeAfterY);
+    const bool edgeScrolled = edgeAfterX < edgeBeforeX - 1.0f;
+    game.lookAt(mapSize * 0.62f + 8.0f, mapSize * 0.60f + 1.0f);
+    game.objectScreenPosition(targetId, screenW, screenH, screenX, screenY);
     const float initialHitPoints = game.objectHitPoints(targetId);
     input = {};
     input.pointerX = screenX;
@@ -853,6 +880,18 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
             savedProjectile = true;
         }
         if (!game.objectActive(targetId)) break;
+    }
+    const bool sawRemains = game.combatStats().activeRemains > 0;
+    if (out && sawRemains) {
+        game.render(renderer, screenW, screenH);
+        std::string deathOut(out);
+        const size_t extension = deathOut.find_last_of('.');
+        deathOut.insert(extension == std::string::npos ? deathOut.size() : extension,
+                        "-death");
+        if (!renderer.savePng(deathOut)) {
+            fprintf(stderr, "error: could not write %s\n", deathOut.c_str());
+            return 1;
+        }
     }
     if (!sawProjectile) {
         fprintf(stderr, "error: combat sandbox rendered no projectile\n");
@@ -893,27 +932,76 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         }
     }
 
+    constexpr uint32_t destroyedBuildingId = 19;
+    input = {};
+    input.boxSelectCommit = true;
+    input.boxStartX = 0;
+    input.boxStartY = 0;
+    input.boxEndX = screenW - 1.0f;
+    input.boxEndY = screenH - 1.0f;
+    game.update(0.001f, input);
+    game.lookAt(mapSize * 0.62f - 3.0f, mapSize * 0.60f + 1.0f);
+    if (!game.objectScreenPosition(
+            destroyedBuildingId, screenW, screenH, screenX, screenY)) {
+        fprintf(stderr, "error: destruction target %u is unavailable\n",
+                destroyedBuildingId);
+        return 1;
+    }
+    input = {};
+    input.pointerX = screenX;
+    input.pointerY = screenY - 24.0f;
+    input.commandPressed = true;
+    game.update(0.001f, input);
+    for (float destructionElapsed = 0;
+         destructionElapsed < 240.0f && game.objectActive(destroyedBuildingId);
+         destructionElapsed += step)
+        game.update(step, {});
+    const bool buildingDestroyed = !game.objectActive(destroyedBuildingId);
+    const bool sawBuildingRemains = game.combatStats().activeRemains > 0;
+    if (out && sawBuildingRemains) {
+        game.render(renderer, screenW, screenH);
+        std::string destructionOut(out);
+        const size_t extension = destructionOut.find_last_of('.');
+        destructionOut.insert(
+            extension == std::string::npos ? destructionOut.size() : extension,
+            "-destruction");
+        if (!renderer.savePng(destructionOut)) {
+            fprintf(stderr, "error: could not write %s\n", destructionOut.c_str());
+            return 1;
+        }
+    }
+    for (float decayElapsed = 0; decayElapsed < 65.0f; decayElapsed += step)
+        game.update(step, {});
+    const bool remainsDecayed = game.combatStats().activeRemains == 0;
+
     const CombatStats combat = game.combatStats();
+    const MovementStats movement = game.movementStats();
     const float finalHitPoints = game.objectHitPoints(targetId);
     printf("combat: target %u hp %.0f -> %.0f, orders %zu, hits %zu, "
            "kills %zu, projectiles %zu, paths %zu, sounds %zu, elapsed %.2f; "
-           "building %.0f -> %.0f selected %d\n",
+           "building %.0f -> %.0f selected %d, remains %d -> %zu, overlaps %zu, "
+           "building destroyed/remains/decayed %d/%d/%d, edge scroll %d\n",
            targetId, initialHitPoints, finalHitPoints,
            combat.ordersIssued, combat.attacksLanded, combat.unitsKilled,
            combat.projectilesLaunched, combat.attackPathsComputed,
            acknowledgementSounds.size(), elapsed, buildingMaxHitPoints,
-           damagedBuildingHitPoints, buildingSelected ? 1 : 0);
+           damagedBuildingHitPoints, buildingSelected ? 1 : 0,
+           sawRemains ? 1 : 0, combat.activeRemains, movement.overlappingPairs,
+           buildingDestroyed ? 1 : 0, sawBuildingRemains ? 1 : 0,
+           remainsDecayed ? 1 : 0, edgeScrolled ? 1 : 0);
     const bool heardBlaster =
         std::find(acknowledgementSounds.begin(), acknowledgementSounds.end(), 71) !=
         acknowledgementSounds.end();
     const bool heardDeath =
         std::find(acknowledgementSounds.begin(), acknowledgementSounds.end(), 298) !=
         acknowledgementSounds.end();
-    if (combat.ordersIssued != 2 || combat.attacksLanded == 0 ||
+    if (combat.ordersIssued != 3 || combat.attacksLanded == 0 ||
         game.objectActive(targetId) || combat.unitsKilled == 0 ||
         combat.projectilesLaunched == 0 || !heardBlaster || !heardDeath ||
         damagedBuildingHitPoints > buildingMaxHitPoints * 0.75f ||
-        !buildingSelected || combat.attackPathsComputed > 1000) {
+        !buildingSelected || !sawRemains || combat.activeRemains != 0 ||
+        movement.overlappingPairs != 0 || !buildingDestroyed ||
+        !sawBuildingRemains || !remainsDecayed || !edgeScrolled) {
         fprintf(stderr, "error: combat validation failed\n");
         return 1;
     }

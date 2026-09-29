@@ -160,6 +160,7 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     objects_.clear();
     objectIndices_.clear();
     projectiles_.clear();
+    remains_.clear();
     selectionClickAge_ = 1000.0f;
     lastSelectionUnitId_ = -1;
     nextSpawnId_ = 1;
@@ -245,6 +246,7 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     projectilesLaunched_ = attackPathsComputed_ = 0;
     objectIndices_.clear();
     projectiles_.clear();
+    remains_.clear();
     selectionClickAge_ = 1000.0f;
     lastSelectionUnitId_ = -1;
     nextSpawnId_ = scenario.nextUnitId;
@@ -832,6 +834,7 @@ CombatStats Game::combatStats() const {
     stats.unitsKilled = unitsKilled_;
     stats.projectilesLaunched = projectilesLaunched_;
     stats.activeProjectiles = projectiles_.size();
+    stats.activeRemains = remains_.size();
     stats.attackPathsComputed = attackPathsComputed_;
     for (const Object &object : objects_)
         if (object.active && object.attackTargetId) stats.activeOrders++;
@@ -1149,9 +1152,18 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
     Object *enemy = enemyAtScreen(screenX, screenY, screenW, screenH);
     if (enemy) {
         Object *acknowledgement = nullptr;
-        for (Object *source : selected) {
+        std::vector<Object *> attackers;
+        for (Object *source : selected)
             if (!canAttack(*source) || !isEnemy(*source, *enemy)) continue;
-            issueAttack(*source, *enemy);
+            else
+                attackers.push_back(source);
+        for (size_t i = 0; i < attackers.size(); i++) {
+            Object *source = attackers[i];
+            const float naturalAngle =
+                std::atan2(source->y - enemy->y, source->x - enemy->x);
+            const float offset =
+                ((float)i - ((float)attackers.size() - 1.0f) * 0.5f) * 0.18f;
+            issueAttack(*source, *enemy, naturalAngle + offset);
             if (!acknowledgement) acknowledgement = source;
         }
         if (!acknowledgement) return;
@@ -1182,9 +1194,10 @@ void Game::playUnitAcknowledgement(const Object &object, bool attack) {
     if (soundId >= 0) playUnitSound_(soundId, civilizationForPlayer(object.player));
 }
 
-void Game::issueAttack(Object &source, Object &target) {
+void Game::issueAttack(Object &source, Object &target, float approachAngle) {
     source.attackTargetId = target.spawnId;
     source.attackRepathTime = 0;
+    source.attackApproachAngle = approachAngle;
     source.path.clear();
     source.pathIndex = 0;
     source.blockedTime = 0;
@@ -1199,6 +1212,30 @@ void Game::killObject(Object &object) {
     object.state = State::Idle;
     object.path.clear();
     object.attackTargetId = 0;
+
+    Remains remains;
+    remains.dyingGraphic = object.unit->dyingGraphic;
+    remains.deadUnit =
+        findUnit(civilizationForPlayer(object.player), object.unit->deadUnitId);
+    remains.player = object.player;
+    remains.x = object.x;
+    remains.y = object.y;
+    remains.facing = object.facing;
+    remains.drawShadows = object.drawShadows;
+    if (const dat::Graphic *graphic = assets_.dat().graphic(remains.dyingGraphic))
+        remains.dyingDuration =
+            std::max(0.1f, graphic->frameCount * graphic->frameDuration);
+    if (remains.deadUnit && remains.deadUnit->standingGraphic[0] >= 0) {
+        const dat::Graphic *graphic =
+            assets_.dat().graphic(remains.deadUnit->standingGraphic[0]);
+        remains.remainsDuration =
+            graphic && (graphic->sequenceType & kSequenceAnimated) &&
+                    graphic->frameCount > 1 && graphic->frameDuration > 0
+                ? graphic->frameCount * graphic->frameDuration
+                : 60.0f;
+    }
+    if (remains.dyingGraphic >= 0 || remains.deadUnit) remains_.push_back(remains);
+
     if (playUnitSound_) {
         int soundId = object.unit->dyingSound;
         if (soundId < 0) soundId = graphicSound(object.unit->dyingGraphic);
@@ -1298,6 +1335,17 @@ void Game::updateProjectiles(float dt) {
     }
 }
 
+void Game::updateRemains(float dt) {
+    for (Remains &remains : remains_) remains.age += dt;
+    remains_.erase(
+        std::remove_if(remains_.begin(), remains_.end(),
+                       [](const Remains &remains) {
+                           return remains.age >=
+                                  remains.dyingDuration + remains.remainsDuration;
+                       }),
+        remains_.end());
+}
+
 void Game::updateAttack(Object &source, float dt) {
     source.attackCooldown = std::max(0.0f, source.attackCooldown - dt);
     source.attackRepathTime -= dt;
@@ -1347,18 +1395,14 @@ void Game::updateAttack(Object &source, float dt) {
     float desiredDistance = std::max(contact, range * 0.8f);
     if (source.unit->minRange > 0)
         desiredDistance = std::max(desiredDistance, source.unit->minRange + 0.2f);
-    float awayX = 1.0f, awayY = 0.0f;
-    if (distance > 0.0001f) {
-        awayX = -dx / distance;
-        awayY = -dy / distance;
-    }
+    const float awayX = std::cos(source.attackApproachAngle);
+    const float awayY = std::sin(source.attackApproachAngle);
     const float destinationX = target->x + awayX * desiredDistance;
     const float destinationY = target->y + awayY * desiredDistance;
     if (source.state == State::Walk && source.pathIndex < source.path.size()) {
         const float destinationDx = destinationX - source.targetX;
         const float destinationDy = destinationY - source.targetY;
-        if (destinationDx * destinationDx + destinationDy * destinationDy <= 0.25f ||
-            source.attackRepathTime > 0)
+        if (destinationDx * destinationDx + destinationDy * destinationDy <= 0.25f)
             return;
     }
     attackPathsComputed_++;
@@ -2032,9 +2076,21 @@ void Game::update(float dt, const InputState &in) {
         }
     }
 
+    float scrollX = in.scrollX, scrollY = in.scrollY;
+    if (in.cursorVisible) {
+        constexpr float edge = 24.0f;
+        if (in.pointerX <= edge)
+            scrollX = std::min(scrollX, -(edge - in.pointerX) / edge);
+        else if (in.pointerX >= in.screenW - edge)
+            scrollX = std::max(scrollX, (in.pointerX - (in.screenW - edge)) / edge);
+        if (in.pointerY <= edge)
+            scrollY = std::min(scrollY, -(edge - in.pointerY) / edge);
+        else if (in.pointerY >= in.screenH - edge)
+            scrollY = std::max(scrollY, (in.pointerY - (in.screenH - edge)) / edge);
+    }
     const float scrollSpeed = 900.0f / zoom_;
-    camX_ += in.scrollX * scrollSpeed * dt - in.dragX / zoom_;
-    camY_ += in.scrollY * scrollSpeed * dt - in.dragY / zoom_;
+    camX_ += scrollX * scrollSpeed * dt - in.dragX / zoom_;
+    camY_ += scrollY * scrollSpeed * dt - in.dragY / zoom_;
     // Clamp the camera to the map diamond's bounding box.
     float minX = -mapSize_ * kTileHalfW, maxX = mapSize_ * kTileHalfW;
     float maxY = 2.0f * mapSize_ * kTileHalfH;
@@ -2129,6 +2185,25 @@ void Game::update(float dt, const InputState &in) {
                 nextY = o.y + dy * scale;
                 moved = positionPassable(o, nextX, nextY, true);
             }
+            if (!moved && dist > 0.0001f) {
+                const float directionX = dx / dist, directionY = dy / dist;
+                const float handedness = (o.spawnId & 1u) ? 1.0f : -1.0f;
+                static constexpr float turns[4] = {
+                    0.78539816f, -0.78539816f, 1.57079633f, -1.57079633f};
+                for (float turn : turns) {
+                    const float angle = turn * handedness;
+                    const float sidestepX =
+                        directionX * std::cos(angle) - directionY * std::sin(angle);
+                    const float sidestepY =
+                        directionX * std::sin(angle) + directionY * std::cos(angle);
+                    nextX = o.x + sidestepX * step;
+                    nextY = o.y + sidestepY * step;
+                    if (positionPassable(o, nextX, nextY, true)) {
+                        moved = true;
+                        break;
+                    }
+                }
+            }
             if (moved) {
                 o.x = nextX;
                 o.y = nextY;
@@ -2161,6 +2236,7 @@ void Game::update(float dt, const InputState &in) {
         }
     }
     updateProjectiles(dt);
+    updateRemains(dt);
 }
 
 // Picks the SLP frame for a graphic given a world-space facing and time.
@@ -2413,18 +2489,50 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             drawGraphic(r, replacement->graphicId, sx, sy, o.facing, o.animTime,
                         o.player, 0, 0, false, viewW, viewH);
     }
-    for (const Projectile &projectile : projectiles_) {
-        if (!projectile.unit) continue;
+    for (const Remains &remains : remains_) {
+        int graphicId = remains.dyingGraphic;
+        float animTime = remains.age;
+        if (remains.age >= remains.dyingDuration) {
+            graphicId = remains.deadUnit ? remains.deadUnit->standingGraphic[0] : -1;
+            animTime -= remains.dyingDuration;
+        }
+        if (graphicId < 0) continue;
         float sx, sy;
-        toScreen(projectile.x, projectile.y, sx, sy);
-        sy -= elevationAt(projectile.x, projectile.y) *
-                  assets_.dat().terrainBlock.elevHeight +
-              projectile.z * kTileHalfH;
+        toScreen(remains.x, remains.y, sx, sy);
+        sy -= elevationAt(remains.x, remains.y) *
+              assets_.dat().terrainBlock.elevHeight;
         sx -= ox;
         sy -= oy;
-        if (sx < -100 || sx > viewW + 100 || sy < -100 || sy > viewH + 100) continue;
-        drawGraphic(r, projectile.unit->standingGraphic[0], sx, sy, projectile.facing,
-                    projectile.animTime, projectile.player, 0, 0, false, viewW, viewH);
+        if (sx < -400 || sx > viewW + 400 || sy < -100 || sy > viewH + 500) continue;
+        drawGraphic(r, graphicId, sx, sy, remains.facing, animTime,
+                    remains.player, 0, 0, remains.drawShadows && !overview,
+                    viewW, viewH);
+    }
+    for (const Projectile &projectile : projectiles_) {
+        if (!projectile.unit) continue;
+        const dat::Graphic *graphic =
+            assets_.dat().graphic(projectile.unit->standingGraphic[0]);
+        const SpriteSheet *sheet =
+            graphic ? assets_.sheet(graphic->slp, playerColorBase(projectile.player)) : nullptr;
+        const bool tiny = sheet && !sheet->frames.empty() &&
+                          sheet->frames[0].w <= 4 && sheet->frames[0].h <= 4;
+        const int trailCopies = tiny ? 5 : 1;
+        for (int trail = trailCopies - 1; trail >= 0; trail--) {
+            const float trailDistance = trail * 0.08f;
+            const float x = projectile.x - std::cos(projectile.facing) * trailDistance;
+            const float y = projectile.y - std::sin(projectile.facing) * trailDistance;
+            float sx, sy;
+            toScreen(x, y, sx, sy);
+            sy -= elevationAt(x, y) * assets_.dat().terrainBlock.elevHeight +
+                  projectile.z * kTileHalfH;
+            sx -= ox;
+            sy -= oy;
+            if (sx < -100 || sx > viewW + 100 || sy < -100 || sy > viewH + 100)
+                continue;
+            drawGraphic(r, projectile.unit->standingGraphic[0], sx, sy,
+                        projectile.facing, projectile.animTime, projectile.player,
+                        0, 0, false, viewW, viewH);
+        }
     }
     r.beginFrame(screenW, screenH, zoom_, 0, 0, 0);
 
@@ -2517,6 +2625,60 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         }
     }
 
+    // Selection footprints sit on the terrain so foreground sprites occlude them.
+    for (const Object &object : objects_) {
+        if (!object.active || object.hidden || !object.draw || !object.selected)
+            continue;
+        float screenX, screenY;
+        objectScreenPosition(object, screenW, screenH, screenX, screenY);
+        const float sx = screenX / zoom_, sy = screenY / zoom_;
+        if (object.unit->type != dat::UT_Building) {
+            if (!selectionRing) continue;
+            const float radiusX =
+                std::max(14.0f, object.unit->outlineSize[0] * 96.0f);
+            const float radiusY =
+                std::max(6.0f, object.unit->outlineSize[1] * 48.0f);
+            const float halfW = radiusX * 64.0f / 59.0f;
+            const float halfH = radiusY * 32.0f / 26.0f;
+            r.draw(selectionRing,
+                   {sx - halfW, sy - halfH, halfW * 2.0f, halfH * 2.0f,
+                    0, 0, 128, 64});
+            continue;
+        }
+
+        const float halfX = std::max(0.5f, object.unit->collisionSize[0]);
+        const float halfY = std::max(0.5f, object.unit->collisionSize[1]);
+        const std::array<std::array<float, 2>, 4> points = {{
+            {sx + (-halfX + halfY) * kTileHalfW,
+             sy + (-halfX - halfY) * kTileHalfH},
+            {sx + (halfX + halfY) * kTileHalfW,
+             sy + (halfX - halfY) * kTileHalfH},
+            {sx + (halfX - halfY) * kTileHalfW,
+             sy + (halfX + halfY) * kTileHalfH},
+            {sx + (-halfX - halfY) * kTileHalfW,
+             sy + (-halfX + halfY) * kTileHalfH},
+        }};
+        auto drawEdge = [&](const std::array<float, 2> &from,
+                            const std::array<float, 2> &to,
+                            float thickness, uint8_t color) {
+            const float dx = to[0] - from[0], dy = to[1] - from[1];
+            const int steps =
+                std::max(1, (int)std::ceil(std::max(std::abs(dx), std::abs(dy))));
+            for (int step = 0; step <= steps; step++) {
+                const float amount = (float)step / steps;
+                r.fillRect(from[0] + dx * amount - thickness * 0.5f,
+                           from[1] + dy * amount - thickness * 0.5f,
+                           thickness, thickness, color, color, color, 255);
+            }
+        };
+        for (size_t point = 0; point < points.size(); point++)
+            drawEdge(points[point], points[(point + 1) % points.size()],
+                     3.0f / zoom_, 0);
+        for (size_t point = 0; point < points.size(); point++)
+            drawEdge(points[point], points[(point + 1) % points.size()],
+                     1.5f / zoom_, 255);
+    }
+
     // --- objects -------------------------------------------------------
     std::stable_sort(g_draws.begin(), g_draws.end(),
                      [](const SpriteDraw &a, const SpriteDraw &b) { return a.key < b.key; });
@@ -2537,21 +2699,6 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         r.fillRect(sx + pulse, sy - pulse, 2 / zoom_, pulse * 2, 255, 255, 0, 220);
     }
 
-    if (selectionRing)
-        for (const Object &object : objects_) {
-            if (!object.active || object.hidden || !object.draw || !object.selected) continue;
-            float screenX, screenY;
-            objectScreenPosition(object, screenW, screenH, screenX, screenY);
-            const float sx = screenX / zoom_, sy = screenY / zoom_;
-            const float radiusX = std::max(14.0f, object.unit->outlineSize[0] * 96.0f);
-            const float radiusY = std::max(6.0f, object.unit->outlineSize[1] * 48.0f);
-            const float halfW = radiusX * 64.0f / 59.0f;
-            const float halfH = radiusY * 32.0f / 26.0f;
-            r.draw(selectionRing,
-                   {sx - halfW, sy - halfH, halfW * 2.0f, halfH * 2.0f,
-                    0, 0, 128, 64});
-        }
-
     for (const Object &object : objects_) {
         if (!object.active || object.hidden || !object.draw || !object.selected) continue;
         float screenX, screenY;
@@ -2564,28 +2711,11 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             (std::max(1.0f, object.unit->outlineSize[2]) * 24.0f + 8.0f);
         const float health =
             std::max(0.0f, std::min(1.0f, object.hitPoints / object.maxHitPoints));
-        uint8_t red = 20, green = 220, blue = 55;
-        if (object.player != localPlayer_) {
-            const uint32_t stance =
-                localPlayer_ > 0 && (size_t)localPlayer_ <= players_.size() &&
-                        object.player >= 0 && object.player < 16
-                    ? players_[(size_t)localPlayer_ - 1].diplomacy[(size_t)object.player]
-                    : UINT32_MAX;
-            if (stance == 3) {
-                red = 230;
-                green = 35;
-                blue = 35;
-            } else {
-                red = 235;
-                green = 205;
-                blue = 45;
-            }
-        }
         r.fillRect(sx - barWidth * 0.5f - 1.0f / zoom_, barY - 1.0f / zoom_,
                    barWidth + 2.0f / zoom_, barHeight + 2.0f / zoom_,
                    0, 0, 0, 230);
         r.fillRect(sx - barWidth * 0.5f, barY, barWidth * health, barHeight,
-                   red, green, blue, 255);
+                   20, 220, 55, 255);
     }
 
     if (commandMarkerTime_ > 0) {

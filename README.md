@@ -62,20 +62,21 @@ cmake -B build-pc && cmake --build build-pc
 5. The app writes a log to `ux0:data/swgb/swgb.log`. `tools\deploy_vita.ps1 -PullLog` fetches it.
 
 Controls: left stick, d-pad, or a touch drag scrolls; L/R zoom. The right stick moves the
-command cursor and X selects a visible unit or building for inspection. With friendly units
-selected, O over a hostile unit issues an attack order;
-O over terrain issues a move order. A touch tap uses the same contextual selection or command
-behavior. Double-tap a unit or press X twice to select every matching friendly unit in the
-viewport. Hold Square and move the right stick, or hold Square while touch-dragging, to
+command cursor, and holding it against a screen edge scrolls the camera. X selects a visible
+unit or building for inspection. With friendly units selected, O over a hostile unit issues an
+attack order; O over terrain issues a move order. A touch tap uses the same contextual selection
+or command behavior. Double-tap a unit or press X twice to select every matching friendly unit
+in the viewport. Hold Square and move the right stick, or hold Square while touch-dragging, to
 box-select units. The normal, move, and attack cursors are loaded from the original
 `interfac.drs`, with a procedural fallback if they are unavailable. SELECT toggles the minimap
 overlay and START quits.
 
 Combat currently includes pursuit with collision-aware A* pathfinding, attack animations and
 acknowledgements, original projectile graphics and weapon sounds, DAT attack/armor classes,
-reload timing, health-bar depletion, death sounds, and progressive building fire/damage graphics.
-X can also select a visible hostile unit or building for inspection without allowing it to receive
-orders. Accuracy, blast damage, retaliation, death animations, and corpses remain to be implemented.
+reload timing, health-bar depletion, death sounds and animations, decaying unit remains and
+building rubble, and progressive building fire/damage graphics. X can also select a visible
+hostile unit or building for inspection without allowing it to receive orders. Accuracy, blast
+damage, and retaliation remain to be implemented.
 
 ## License
 

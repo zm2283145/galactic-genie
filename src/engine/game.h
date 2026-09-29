@@ -54,6 +54,7 @@ struct CombatStats {
     size_t unitsKilled = 0;
     size_t projectilesLaunched = 0;
     size_t activeProjectiles = 0;
+    size_t activeRemains = 0;
     size_t attackPathsComputed = 0;
 };
 
@@ -132,6 +133,7 @@ private:
         float blockedTime = 0;
         float attackCooldown = 0;
         float attackRepathTime = 0;
+        float attackApproachAngle = 0;
         uint32_t attackTargetId = 0;
         float homeX = 0, homeY = 0;
         bool wander = true;
@@ -158,6 +160,18 @@ private:
         float animTime = 0;
         uint32_t targetId = 0;
         int damage = 0;
+    };
+
+    struct Remains {
+        const dat::Unit *deadUnit = nullptr;
+        int dyingGraphic = -1;
+        int player = 0;
+        float x = 0, y = 0;
+        float facing = 0;
+        float age = 0;
+        float dyingDuration = 0;
+        float remainsDuration = 0;
+        bool drawShadows = true;
     };
 
     struct TriggerRuntime {
@@ -217,10 +231,11 @@ private:
     void selectBox(float startX, float startY, float endX, float endY,
                    int screenW, int screenH);
     void commandAtScreen(float screenX, float screenY, int screenW, int screenH);
-    void issueAttack(Object &source, Object &target);
+    void issueAttack(Object &source, Object &target, float approachAngle);
     void updateAttack(Object &source, float dt);
     void launchProjectile(const Object &source, const Object &target, int damage);
     void updateProjectiles(float dt);
+    void updateRemains(float dt);
     void damageObject(Object &object, int damage);
     void killObject(Object &object);
     void objectScreenPosition(const Object &object, int screenW, int screenH,
@@ -249,6 +264,7 @@ private:
     std::vector<Object> objects_;
     std::unordered_map<uint32_t, size_t> objectIndices_;
     std::vector<Projectile> projectiles_;
+    std::vector<Remains> remains_;
     std::vector<uint32_t> mobileObjectIndices_;
     std::vector<std::vector<uint32_t>> mobileObjectCells_;
     int mobileObjectGridWidth_ = 0;
