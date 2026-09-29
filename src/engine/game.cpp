@@ -246,6 +246,8 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
                                 ? source.rotation
                                 : source.rotation - kPi * 0.5f;
             object.wander = false;
+            // Its detached layer-5 silhouette reads as a second ship over the landed prop.
+            object.drawShadows = part->name != "BLDG-LLAMBDASH";
             object.initialFrame = initialFrame;
             objects_.push_back(object);
         };
@@ -535,9 +537,10 @@ static bool pickFrame(const dat::Graphic &g, size_t slpFrames, float facing, flo
 static std::vector<SpriteDraw> g_draws; // reused between frames
 
 void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float facing, float animTime, int player,
-                       int initialFrame, int depth) {
+                       int initialFrame, int depth, bool drawShadows, float viewW, float viewH) {
     const dat::Graphic *g = assets_.dat().graphic(graphicId);
     if (!g) return;
+    if (!drawShadows && depth > 0 && g->layer == 5) return;
     if (!g->deltas.empty() && depth < 3) {
         for (const auto &d : g->deltas) {
             if (d.graphicId == -1) {
@@ -550,11 +553,12 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
                 if (!pickFrame(self, sh->frames.size(), facing, animTime, initialFrame, fr, flip)) continue;
                 const SpriteFrame &f = sh->frames[fr];
                 float x = sx + d.offsetX - (flip ? f.w - f.hotX : f.hotX), y = sy + d.offsetY - f.hotY;
+                if (viewW > 0 && (x + f.w <= 0 || x >= viewW || y + f.h <= 0 || y >= viewH)) continue;
                 Quad q{x, y, (float)f.w, (float)f.h, flip ? f.u + f.w : f.u, f.v, flip ? f.u : f.u + f.w, f.v + f.h};
                 g_draws.push_back({(int64_t)std::min<int>(g->layer, 20) << 40 | (int64_t)(sy * 16 + 65536) << 8, f.tex, q});
             } else {
                 drawGraphic(r, d.graphicId, sx + d.offsetX, sy + d.offsetY, facing, animTime, player,
-                            initialFrame, depth + 1);
+                            initialFrame, depth + 1, drawShadows, viewW, viewH);
             }
         }
         return;
@@ -567,6 +571,7 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
     const SpriteFrame &f = sh->frames[fr];
     if (f.w == 0 || f.h == 0) return;
     float x = sx - (flip ? f.w - f.hotX : f.hotX), y = sy - f.hotY;
+    if (viewW > 0 && (x + f.w <= 0 || x >= viewW || y + f.h <= 0 || y >= viewH)) return;
     Quad q{x, y, (float)f.w, (float)f.h, flip ? f.u + f.w : f.u, f.v, flip ? f.u : f.u + f.w, f.v + f.h};
     // Sort: graphic layer first (shadows/rubble under units), then screen y.
     int64_t key = (int64_t)std::min<int>(g->layer, 20) << 40 | (int64_t)(sy * 16 + 65536) << 8 | (depth & 0xFF);
@@ -575,7 +580,7 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
 
 void Game::drawGraphicNow(Renderer &r, int graphicId, float sx, float sy, float facing, float t, int player) {
     g_draws.clear();
-    drawGraphic(r, graphicId, sx, sy, facing, t, player, 0, 0);
+    drawGraphic(r, graphicId, sx, sy, facing, t, player, 0, 0, true, 0, 0);
     std::stable_sort(g_draws.begin(), g_draws.end(),
                      [](const SpriteDraw &a, const SpriteDraw &b) { return a.key < b.key; });
     for (const SpriteDraw &d : g_draws) r.draw(d.tex, d.q);
@@ -587,6 +592,9 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     assets_.beginTerrainFrame(64u * 1024u * 1024u);
     const float viewW = screenW / zoom_, viewH = screenH / zoom_;
     const float ox = camX_ - viewW / 2, oy = camY_ - viewH / 2; // world-pixel of screen top-left
+    // At overview zoom the blend overlays are sub-pixel detail but account for
+    // hundreds of extra masked draws and slope-mask cache entries on Vita.
+    const bool drawTerrainBlends = zoom_ >= 0.6f && assets_.hasBlendMasks();
 
     // --- terrain -------------------------------------------------------
     const auto &terrains = assets_.dat().terrainBlock.terrains;
@@ -646,7 +654,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             const SpriteSheet *flat = assets_.terrainSheet(draw.slp);
             assets_.terrainSlopeFrame(draw.slp, slope, frameIndexFor(flat, tx, ty), neighborSlopes);
 
-            if (!assets_.hasBlendMasks()) continue;
+            if (!drawTerrainBlends) continue;
             std::array<int, 8> neighbors;
             neighbors.fill(-1);
             std::array<bool, 8> active;
@@ -691,9 +699,9 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         if (sx < -400 || sx > viewW + 400 || sy < -100 || sy > viewH + 500) continue;
         int gid = o.unit->standingGraphic[0];
         if (o.state == State::Walk && o.unit->walkingGraphic >= 0) gid = o.unit->walkingGraphic;
-        drawGraphic(r, gid, sx, sy, o.facing, o.animTime, o.player, o.initialFrame, 0);
+        drawGraphic(r, gid, sx, sy, o.facing, o.animTime, o.player, o.initialFrame, 0,
+                    o.drawShadows, viewW, viewH);
     }
-    g_draws.clear();
     r.beginFrame(screenW, screenH, zoom_, 0, 0, 0);
 
     for (int ty = y0; ty <= y1; ty++) {
@@ -732,7 +740,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             r.draw(f.tex, q);
             stats_.tiles++;
 
-            if (!assets_.hasBlendMasks()) continue;
+            if (!drawTerrainBlends) continue;
             std::array<int, 8> neighbors;
             neighbors.fill(-1);
             auto influences = [&](int direction) {
@@ -785,18 +793,6 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     }
 
     // --- objects -------------------------------------------------------
-    g_draws.clear();
-    for (const Object &o : objects_) {
-        float sx, sy;
-        toScreen(o.x, o.y, sx, sy);
-        sy -= elevationAt(o.x, o.y) * assets_.dat().terrainBlock.elevHeight;
-        sx -= ox;
-        sy -= oy;
-        if (sx < -400 || sx > viewW + 400 || sy < -100 || sy > viewH + 500) continue;
-        int gid = o.unit->standingGraphic[0];
-        if (o.state == State::Walk && o.unit->walkingGraphic >= 0) gid = o.unit->walkingGraphic;
-        drawGraphic(r, gid, sx, sy, o.facing, o.animTime, o.player, o.initialFrame, 0);
-    }
     std::stable_sort(g_draws.begin(), g_draws.end(),
                      [](const SpriteDraw &a, const SpriteDraw &b) { return a.key < b.key; });
     for (const SpriteDraw &d : g_draws) r.draw(d.tex, d.q);

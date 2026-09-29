@@ -62,6 +62,7 @@ private:
         float targetX = 0, targetY = 0;
         float homeX = 0, homeY = 0;
         bool wander = true;
+        bool drawShadows = true;
         uint16_t initialFrame = 0;
     };
 
@@ -76,7 +77,7 @@ private:
     float elevationAt(float x, float y) const;
 
     void drawGraphic(Renderer &r, int graphicId, float sx, float sy, float facing, float animTime, int player,
-                     int initialFrame, int depth);
+                     int initialFrame, int depth, bool drawShadows, float viewW, float viewH);
 
     Assets &assets_;
     std::mt19937 rng_;

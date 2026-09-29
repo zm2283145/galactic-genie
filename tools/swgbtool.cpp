@@ -411,10 +411,12 @@ static int cmdRenderScenario(const char *dataDir, const char *campaignPath, int 
     game.render(renderer, 960, 544);
     renderer.savePng(out);
     auto end = std::chrono::steady_clock::now();
-    printf("rendered %s (%ux%u) at %.1f,%.1f: %d tiles, %.1f MB textures, %.0f ms -> %s\n",
+    printf("rendered %s (%ux%u) at %.1f,%.1f: %d tiles, %d sprites, %d quads, "
+           "%.1f MB textures, %.0f ms -> %s\n",
            scenario.originalFilename.c_str(), scenario.map.width, scenario.map.height,
            x >= 0 ? x : scenario.map.width * 0.5f, y >= 0 ? y : scenario.map.height * 0.5f,
-           game.stats().tiles, assets.textureBytes() / 1048576.0,
+           game.stats().tiles, game.stats().sprites, renderer.drawCalls(),
+           assets.textureBytes() / 1048576.0,
            std::chrono::duration<double, std::milli>(end - start).count(), out);
     return 0;
 }
