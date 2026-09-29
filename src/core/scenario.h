@@ -88,6 +88,8 @@ struct Scenario {
     std::string scouts;
     float cameraX = -1;
     float cameraY = -1;
+    float mapCameraX = -1;
+    float mapCameraY = -1;
     std::array<uint32_t, 16> civilizations{};
     std::array<ScenarioPlayer, 16> players{};
     ScenarioMap map;

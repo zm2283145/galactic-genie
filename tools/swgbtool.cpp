@@ -122,10 +122,11 @@ static int cmdUnit(const char *dataDir, int id) {
             const auto &unit = units[(size_t)id];
             const int graphicId = unit.standingGraphic[0];
             const auto *graphic = assets.dat().graphic(graphicId);
-            printf("civ %zu %-24s unit '%s', type %u, graphic %d, slp %d, frames %d, angles %d, "
+            printf("civ %zu %-24s unit '%s', type %u, class %d, hidden %u, hero %u, graphic %d, slp %d, frames %d, angles %d, "
                    "duration %.3f, sequence 0x%02x, mirror %u, deltas %zu, special graphic %d, "
                    "special ability %u, adjacent mode %u, graphics angle %d\n", civ,
-                   assets.dat().civs[civ].name.c_str(), unit.name.c_str(), unit.type, graphicId,
+                   assets.dat().civs[civ].name.c_str(), unit.name.c_str(), unit.type, unit.cls,
+                   unit.hideInEditor, unit.heroMode, graphicId,
                    graphic ? graphic->slp : -1, graphic ? graphic->frameCount : 0,
                    graphic ? graphic->angleCount : 0, graphic ? graphic->frameDuration : 0,
                    graphic ? graphic->sequenceType : 0, graphic ? graphic->mirroringMode : 0,
@@ -230,13 +231,15 @@ static int cmdScenario(const char *path, int entryNumber) {
            scenario.originalFilename.c_str(), scenario.version.c_str(), scenario.playerDataVersion,
            scenario.map.width, scenario.map.height, scenario.enabledPlayerCount, scenario.units.size(),
            scenario.nextUnitId);
-    printf("camera %.1f,%.1f\n", scenario.cameraX, scenario.cameraY);
+    printf("camera player %.1f,%.1f, map %.1f,%.1f\n", scenario.cameraX, scenario.cameraY,
+           scenario.mapCameraX, scenario.mapCameraY);
     printf("instructions: %s\n", scenario.instructions.c_str());
     for (size_t i = 0; i < 8; i++) {
         const ScenarioPlayer &player = scenario.players[i];
-        printf("player %zu: active %d, human %d, civ %u, color %u, resources "
+        printf("player %zu: active %d, human %d, civ %u, color %u, camera %.1f,%.1f, resources "
                "%.0f/%.0f/%.0f/%.0f/%.0f, population %.0f, allied victory %d, name '%s', diplomacy",
                i + 1, player.active, player.human, player.civilization, player.color,
+               player.cameraX, player.cameraY,
                player.resources[0], player.resources[1], player.resources[2],
                player.resources[3], player.resources[4], player.populationLimit,
                player.alliedVictory, player.name.c_str());

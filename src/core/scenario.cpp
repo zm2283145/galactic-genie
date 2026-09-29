@@ -182,6 +182,8 @@ void skipPlayerData(ByteReader &reader, Scenario &scenario) {
     if (versionAbove(version, 1.18f)) {
         scenario.cameraX = (float)reader.i32();
         scenario.cameraY = (float)reader.i32();
+        scenario.mapCameraX = scenario.cameraX;
+        scenario.mapCameraY = scenario.cameraY;
     }
     if (versionAbove(version, 1.2f)) reader.i32();
     if (versionAbove(version, 1.23f)) reader.skip(kPlayers);

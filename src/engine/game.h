@@ -77,6 +77,7 @@ private:
         bool drawShadows = true;
         bool active = true;
         bool hidden = false;
+        bool draw = true;
         bool locked = false;
         bool triggerAddressable = true;
         float flashTime = 0;

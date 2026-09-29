@@ -313,10 +313,23 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
         }
     }
     rebuildAdjacency();
-    if (scenario.cameraX >= 0 && scenario.cameraY >= 0)
+    const Object *hero = nullptr;
+    size_t heroCount = 0;
+    for (const Object &object : objects_) {
+        if (!object.active || object.hidden || object.player != localPlayer_ ||
+            !object.triggerAddressable || !object.unit->heroMode)
+            continue;
+        hero = &object;
+        heroCount++;
+    }
+    if (heroCount == 1) {
+        lookAt(hero->x, hero->y);
+        log("camera focused on human player hero " + hero->unit->name);
+    } else if (scenario.cameraX >= 0 && scenario.cameraY >= 0) {
         lookAt(scenario.cameraY, mapSize_ - scenario.cameraX);
-    else
+    } else {
         lookAt(mapSize_ * 0.5f, mapSize_ * 0.5f);
+    }
     return true;
 }
 
@@ -416,6 +429,8 @@ Game::Object *Game::addObject(const dat::Unit *unit, int player, float x, float 
     object.spawnId = spawnId;
     object.initialFrame = initialFrame;
     object.hidden = hidden;
+    object.draw = unit->name.rfind("ENGINE-", 0) != 0 &&
+                  unit->name.rfind("OBJ-FLAG", 0) != 0;
     object.garrisonedInId = garrisonedInId;
     object.triggerAddressable = triggerAddressable;
     objects_.push_back(object);
@@ -801,7 +816,7 @@ bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed
         return triggerElapsed >= std::max(0, triggerField(condition.fields, 7));
     case 15: {
         const Object *object = findObject((uint32_t)unitObject);
-        if (!object || !object->active || object->hidden) return false;
+        if (!object || !object->active || object->hidden || !object->draw) return false;
         float sx, sy;
         toScreen(object->x, object->y, sx, sy);
         sy -= elevationAt(object->x, object->y) * assets_.dat().terrainBlock.elevHeight;
@@ -1332,7 +1347,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
 
     g_draws.clear();
     for (const Object &o : objects_) {
-        if (!o.active || o.hidden) continue;
+        if (!o.active || o.hidden || !o.draw) continue;
         if (lowDetail &&
             (o.unit->type == dat::UT_Trees || o.unit->type == dat::UT_AoeTrees)) {
             const uint32_t x = (uint32_t)std::lround(o.x * 2.0f);
@@ -1450,7 +1465,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     stats_.sprites = (int)g_draws.size();
 
     for (const Object &object : objects_) {
-        if (!object.active || object.hidden || object.flashTime <= 0) continue;
+        if (!object.active || object.hidden || !object.draw || object.flashTime <= 0) continue;
         float sx, sy;
         toScreen(object.x, object.y, sx, sy);
         sy -= elevationAt(object.x, object.y) * assets_.dat().terrainBlock.elevHeight;
