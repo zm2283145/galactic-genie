@@ -209,6 +209,10 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     // Two bases: Rebel Alliance (civ 3) vs Galactic Empire (civ 1).
     spawnBase(1, 3, 'R', mapSize * 0.30f, mapSize * 0.35f);
     spawnBase(2, 1, 'E', mapSize * 0.62f, mapSize * 0.60f);
+    // Keep the generated sandbox quiet until its opposing bases are engaged.
+    for (Object &object : objects_)
+        if (canAttack(object))
+            object.attackMode = AttackMode::Defensive;
 
     // Some wildlife for gaia.
     std::uniform_real_distribution<float> pos(4.0f, mapSize - 4.0f);
@@ -673,7 +677,7 @@ void Game::spawnBase(int player, int civ, char L, float cx, float cy) {
     spawn(civ, "BLDG-MAIN1", player, cx + 2.0f, cy + 2.0f, 0);
     spawn(civ, "BLDG-DWELLING1", player, cx - 3.0f, cy + 1.0f, 0);
     spawn(civ, "BLDG-DWELLING1", player, cx - 3.0f, cy + 4.0f, 0);
-    spawn(civ, "BLDG-TRAINFOOT1", player, cx + 5.5f, cy - 2.5f, 0);
+    spawn(civ, "BLDG-TRAINRANGE1", player, cx + 5.5f, cy - 2.5f, 0);
     spawn(civ, "BLDG-DEFENSEA1", player, cx + 6.0f, cy + 5.0f, 0);
 
     std::uniform_real_distribution<float> off(-3.0f, 3.0f);
@@ -929,7 +933,17 @@ MovementStats Game::movementStats() const {
                 continue;
             const float dx = object.x - other.x, dy = object.y - other.y;
             const float separation = collisionRadius(object) + collisionRadius(other) + 0.04f;
-            if (dx * dx + dy * dy < separation * separation) stats.overlappingPairs++;
+            if (dx * dx + dy * dy < separation * separation) {
+                if (stats.overlappingPairs == 0) {
+                    stats.firstOverlapObject = object.spawnId;
+                    stats.secondOverlapObject = other.spawnId;
+                    stats.firstOverlapUnit = object.unit->id;
+                    stats.secondOverlapUnit = other.unit->id;
+                    stats.firstOverlapSelected = object.selected;
+                    stats.secondOverlapSelected = other.selected;
+                }
+                stats.overlappingPairs++;
+            }
         }
     }
     return stats;
@@ -1495,6 +1509,23 @@ void Game::playUnitAcknowledgement(const Object &object, bool attack) {
     if (soundId >= 0) playUnitSound_(soundId, civilizationForPlayer(object.player));
 }
 
+bool Game::worldSoundAudible(float x, float y) const {
+    float screenX, screenY;
+    toScreen(x, y, screenX, screenY);
+    const float margin = 96.0f / zoom_;
+    const float halfWidth = 480.0f / zoom_ + margin;
+    const float halfHeight = 272.0f / zoom_ + margin;
+    return std::abs(screenX - camX_) <= halfWidth &&
+           std::abs(screenY - camY_) <= halfHeight;
+}
+
+void Game::playWorldUnitSound(const Object &object, int soundId) {
+    if (!playUnitSound_ || soundId < 0 ||
+        !worldSoundAudible(object.x, object.y))
+        return;
+    playUnitSound_(soundId, civilizationForPlayer(object.player));
+}
+
 void Game::cycleSelectedAttackMode() {
     bool changed = false;
     for (Object &object : objects_) {
@@ -1560,8 +1591,8 @@ float Game::automaticPursuitLeash(const Object &source) const {
         return 0;
     const float acquisition = automaticAcquisitionRadius(source);
     return source.attackMode == AttackMode::Aggressive
-               ? std::max(12.0f, acquisition * 2.0f)
-               : std::max(8.0f, acquisition + 3.0f);
+               ? std::numeric_limits<float>::max()
+               : std::max(6.0f, acquisition);
 }
 
 void Game::finishAttack(Object &source, bool returnToPost) {
@@ -1683,11 +1714,9 @@ void Game::killObject(Object &object) {
     }
     if (remains.dyingGraphic >= 0 || remains.deadUnit) remains_.push_back(remains);
 
-    if (playUnitSound_) {
-        int soundId = object.unit->dyingSound;
-        if (soundId < 0) soundId = graphicSound(object.unit->dyingGraphic);
-        if (soundId >= 0) playUnitSound_(soundId, civilizationForPlayer(object.player));
-    }
+    int soundId = object.unit->dyingSound;
+    if (soundId < 0) soundId = graphicSound(object.unit->dyingGraphic);
+    playWorldUnitSound(object, soundId);
     unitsKilled_++;
     if (wasStatic) rebuildAdjacency();
 }
@@ -1739,8 +1768,7 @@ void Game::damageObject(Object &object, int damage, uint32_t attackerId) {
         if (previousDamage < damageGraphic.damagePercent &&
             currentDamage >= damageGraphic.damagePercent)
             soundId = graphicSound(damageGraphic.graphicId);
-    if (playUnitSound_ && soundId >= 0)
-        playUnitSound_(soundId, civilizationForPlayer(object.player));
+    playWorldUnitSound(object, soundId);
 }
 
 void Game::launchProjectile(const Object &source, const Object &target, int damage) {
@@ -1748,8 +1776,7 @@ void Game::launchProjectile(const Object &source, const Object &target, int dama
         findUnit(civilizationForPlayer(source.player), source.unit->projectileUnitId);
     if (!projectileUnit || projectileUnit->standingGraphic[0] < 0) {
         const int soundId = graphicSound(source.unit->attackGraphic);
-        if (playUnitSound_ && soundId >= 0)
-            playUnitSound_(soundId, civilizationForPlayer(source.player));
+        playWorldUnitSound(source, soundId);
         if (Object *liveTarget = findObject(target.spawnId))
             damageObject(*liveTarget, damage, source.spawnId);
         return;
@@ -1776,8 +1803,7 @@ void Game::launchProjectile(const Object &source, const Object &target, int dama
 
     int soundId = graphicSound(projectileUnit->standingGraphic[0]);
     if (soundId < 0) soundId = graphicSound(source.unit->attackGraphic);
-    if (playUnitSound_ && soundId >= 0)
-        playUnitSound_(soundId, civilizationForPlayer(source.player));
+    playWorldUnitSound(source, soundId);
 }
 
 void Game::updateProjectiles(float dt) {
@@ -1838,7 +1864,9 @@ void Game::updateAttack(Object &source, float dt) {
 
     Object *target = findObject(source.attackTargetId);
     if (!target || !isEnemy(source, *target) || !canAttack(source)) {
-        const bool returnToPost = source.attackAutomatic;
+        const bool returnToPost =
+            source.attackAutomatic &&
+            source.attackMode == AttackMode::Defensive;
         finishAttack(source, returnToPost);
         return;
     }
@@ -1852,10 +1880,12 @@ void Game::updateAttack(Object &source, float dt) {
         const float targetHomeDx = target->x - source.homeX;
         const float targetHomeDy = target->y - source.homeY;
         if ((leash <= 0 && distance > range + 0.05f) ||
-            (leash > 0 &&
+            (leash < std::numeric_limits<float>::max() &&
              targetHomeDx * targetHomeDx + targetHomeDy * targetHomeDy >
                  leash * leash)) {
-            finishAttack(source, leash > 0);
+            finishAttack(
+                source,
+                source.attackMode == AttackMode::Defensive);
             return;
         }
     }
@@ -1872,14 +1902,15 @@ void Game::updateAttack(Object &source, float dt) {
                 launchProjectile(source, *target, damage);
             else {
                 const int soundId = graphicSound(source.unit->attackGraphic);
-                if (playUnitSound_ && soundId >= 0)
-                    playUnitSound_(soundId, civilizationForPlayer(source.player));
+                playWorldUnitSound(source, soundId);
                 damageObject(*target, damage, source.spawnId);
             }
             source.attackCooldown = std::max(0.1f, source.unit->reloadTime);
             source.animTime = 0;
             if (!target->active) {
-                const bool returnToPost = source.attackAutomatic;
+                const bool returnToPost =
+                    source.attackAutomatic &&
+                    source.attackMode == AttackMode::Defensive;
                 finishAttack(source, returnToPost);
             }
         }
@@ -1969,6 +2000,10 @@ bool Game::positionPassable(const Object &object, float x, float y, bool dynamic
                     const Object &other = objects_[(size_t)index];
                     if (&other == &object || !other.active || other.hidden ||
                         isAirUnit(other) != air)
+                        continue;
+                    if (object.moveGoalActive &&
+                        object.moveGroupId != 0 &&
+                        object.moveGroupId == other.moveGroupId)
                         continue;
                     const float dx = x - other.x, dy = y - other.y;
                     const float separation =
@@ -2238,15 +2273,77 @@ void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float ta
     struct ReservedDestination {
         float x, y, radius;
     };
+    auto movesIndependently = [](const Object &object) {
+        const int unitClass = object.unit->cls;
+        return unitClass == 14 || unitClass == 45 ||
+               unitClass == 58 ||
+               object.unit->name.find("WORKER") !=
+                   std::string::npos ||
+               object.unit->name2.find("WORKER") !=
+                   std::string::npos;
+    };
+    std::vector<Object *> formationTargets;
+    std::vector<Object *> independentTargets;
+    formationTargets.reserve(targets.size());
+    independentTargets.reserve(targets.size());
+    float candidateCentroidX = 0;
+    float candidateCentroidY = 0;
+    size_t candidateCount = 0;
+    for (Object *object : targets) {
+        if (object->hidden || object->unit->speed <= 0)
+            continue;
+        if (movesIndependently(*object)) {
+            independentTargets.push_back(object);
+            continue;
+        }
+        formationTargets.push_back(object);
+        candidateCentroidX += object->x;
+        candidateCentroidY += object->y;
+        candidateCount++;
+    }
+    if (candidateCount > 1) {
+        candidateCentroidX /= candidateCount;
+        candidateCentroidY /= candidateCount;
+        std::vector<Object *> cohesive;
+        cohesive.reserve(formationTargets.size());
+        for (Object *object : formationTargets) {
+            const float dx = object->x - candidateCentroidX;
+            const float dy = object->y - candidateCentroidY;
+            if (dx * dx + dy * dy > 100.0f)
+                independentTargets.push_back(object);
+            else
+                cohesive.push_back(object);
+        }
+        formationTargets = std::move(cohesive);
+    }
+    for (Object *object : independentTargets) {
+        object->attackTargetId = 0;
+        object->attackAutomatic = false;
+        object->moveGroupId = 0;
+        object->moveSpeedLimit = 0;
+        object->homeX = object->moveAnchorX = targetX;
+        object->homeY = object->moveAnchorY = targetY;
+        object->moveGoalActive = true;
+        object->moveRetryTime = 0;
+        object->moveStallTime = 0;
+        object->moveSpreadRetries = 0;
+        const float dx = targetX - object->x;
+        const float dy = targetY - object->y;
+        object->moveBestDistance = std::sqrt(dx * dx + dy * dy);
+        if (!issueMove(*object, targetX, targetY))
+            object->moveGoalActive = false;
+    }
+    if (formationTargets.empty()) return;
+
     std::vector<ReservedDestination> reserved;
-    reserved.reserve(targets.size());
+    reserved.reserve(formationTargets.size());
     const uint32_t moveGroupId = nextMoveGroupId_++;
     if (nextMoveGroupId_ == 0) nextMoveGroupId_ = 1;
     float slotSpacing = 0.75f;
     float groupSpeed = std::numeric_limits<float>::max();
     float centroidX = 0, centroidY = 0;
     size_t mobileCount = 0;
-    for (const Object *object : targets)
+    for (const Object *object : formationTargets)
         if (!object->hidden && object->unit->speed > 0) {
             slotSpacing =
                 std::max(slotSpacing, collisionRadius(*object) * 2.0f + 0.25f);
@@ -2269,7 +2366,7 @@ void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float ta
     const float rightX = -forwardY;
     const float rightY = forwardX;
     size_t slot = 0;
-    std::vector<Object *> remaining = targets;
+    std::vector<Object *> remaining = formationTargets;
     std::sort(remaining.begin(), remaining.end(),
               [&](const Object *a, const Object *b) {
                   const float aLateral =
@@ -2406,7 +2503,8 @@ void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float ta
             for (uint32_t index : mobileObjectIndices_) {
                 const Object &other = objects_[(size_t)index];
                 if (!other.active || other.hidden || &other == object ||
-                    std::find(targets.begin(), targets.end(), &other) != targets.end() ||
+                    std::find(formationTargets.begin(), formationTargets.end(),
+                              &other) != formationTargets.end() ||
                     isAirUnit(*object) != isAirUnit(other))
                     continue;
                 const float dx = x - other.x, dy = y - other.y;
@@ -2475,18 +2573,46 @@ void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float ta
                     offsetLongitudinal =
                         -((int)slot / 2) * slotSpacing;
                 }
+                float pathForwardX = forwardX;
+                float pathForwardY = forwardY;
+                if (!finalPoint) {
+                    const size_t previous =
+                        point > 0 ? point - 1 : point;
+                    const size_t next =
+                        std::min(point + 1,
+                                 macroPath.size() - 1);
+                    const float tangentX =
+                        macroPath[next][0] -
+                        (point > 0 ? macroPath[previous][0]
+                                   : centroidX);
+                    const float tangentY =
+                        macroPath[next][1] -
+                        (point > 0 ? macroPath[previous][1]
+                                   : centroidY);
+                    const float tangentLength =
+                        std::sqrt(tangentX * tangentX +
+                                  tangentY * tangentY);
+                    if (tangentLength > 0.001f) {
+                        pathForwardX =
+                            tangentX / tangentLength;
+                        pathForwardY =
+                            tangentY / tangentLength;
+                    }
+                }
+                const float pathRightX = -pathForwardY;
+                const float pathRightY = pathForwardX;
                 float pointX =
                     finalPoint
                         ? slotX
                         : macroPath[point][0] +
-                              rightX * offsetLateral +
-                              forwardX * offsetLongitudinal;
+                              pathRightX * offsetLateral +
+                              pathForwardX * offsetLongitudinal;
                 float pointY =
                     finalPoint
                         ? slotY
                         : macroPath[point][1] +
-                              rightY * offsetLateral +
-                              forwardY * offsetLongitudinal;
+                              pathRightY * offsetLateral +
+                              pathForwardY * offsetLongitudinal;
                 if (!finalPoint &&
                     !positionPassable(*object, pointX, pointY,
                                       false)) {
@@ -3114,6 +3240,25 @@ void Game::update(float dt, const InputState &in) {
                     originalY + std::sin(angle) * ring * searchStep;
                 if (!positionPassable(object, candidateX, candidateY, true))
                     continue;
+                bool formationSlotOpen = true;
+                if (object.moveGroupId != 0)
+                    for (const Object &other : objects_) {
+                        if (&other == &object || !other.active ||
+                            other.moveGroupId != object.moveGroupId ||
+                            isAirUnit(other) != isAirUnit(object))
+                            continue;
+                        const float dx = candidateX - other.targetX;
+                        const float dy = candidateY - other.targetY;
+                        const float separation =
+                            collisionRadius(object) +
+                            collisionRadius(other) + 0.08f;
+                        if (dx * dx + dy * dy <
+                            separation * separation) {
+                            formationSlotOpen = false;
+                            break;
+                        }
+                    }
+                if (!formationSlotOpen) continue;
                 object.targetX = object.homeX = candidateX;
                 object.targetY = object.homeY = candidateY;
                 object.moveStallTime = 0;
@@ -3130,7 +3275,7 @@ void Game::update(float dt, const InputState &in) {
     };
     auto cooperativeMove = [&](auto &&self, Object &object, float nextX,
                                float nextY, int depth) -> bool {
-        if (depth >= 12 || !positionPassable(object, nextX, nextY, false))
+        if (depth >= 48 || !positionPassable(object, nextX, nextY, false))
             return false;
         if (std::find(cooperativeChain.begin(), cooperativeChain.end(), &object) !=
             cooperativeChain.end())
@@ -3143,6 +3288,10 @@ void Game::update(float dt, const InputState &in) {
             Object &other = objects_[(size_t)index];
             if (&other == &object || !other.active || other.hidden ||
                 isAirUnit(other) != isAirUnit(object))
+                continue;
+            if (object.moveGoalActive &&
+                object.moveGroupId != 0 &&
+                object.moveGroupId == other.moveGroupId)
                 continue;
             const float otherDx = nextX - other.x;
             const float otherDy = nextY - other.y;
@@ -3166,7 +3315,8 @@ void Game::update(float dt, const InputState &in) {
         return true;
     };
     struct GroupCohesion {
-        float farthestRemaining = 0;
+        float nearestRemaining =
+            std::numeric_limits<float>::max();
         size_t movingMembers = 0;
     };
     std::unordered_map<uint32_t, GroupCohesion> groupCohesion;
@@ -3177,9 +3327,10 @@ void Game::update(float dt, const InputState &in) {
         const float dx = object.targetX - object.x;
         const float dy = object.targetY - object.y;
         GroupCohesion &cohesion = groupCohesion[object.moveGroupId];
-        cohesion.farthestRemaining =
-            std::max(cohesion.farthestRemaining,
-                     std::sqrt(dx * dx + dy * dy));
+        const float remaining =
+            std::sqrt(dx * dx + dy * dy);
+        cohesion.nearestRemaining =
+            std::min(cohesion.nearestRemaining, remaining);
         cohesion.movingMembers++;
     }
     for (Object &o : objects_) {
@@ -3224,9 +3375,13 @@ void Game::update(float dt, const InputState &in) {
                              collisionRadius(o) * 0.75f);
                 if (o.moveGroupId != 0 &&
                     o.pathIndex + 1 >= o.path.size())
-                    arrival = std::max(arrival, 2.25f);
+                    arrival = 0.10f;
                 if (goalDx * goalDx + goalDy * goalDy <=
                     arrival * arrival) {
+                    if (o.moveGroupId != 0) {
+                        o.x = o.targetX;
+                        o.y = o.targetY;
+                    }
                     o.moveGoalActive = false;
                     o.moveSpeedLimit = 0;
                     o.path.clear();
@@ -3268,11 +3423,16 @@ void Game::update(float dt, const InputState &in) {
                     const float goalDy = o.targetY - o.y;
                     const float remaining =
                         std::sqrt(goalDx * goalDx + goalDy * goalDy);
-                    const float lead =
-                        group->second.farthestRemaining - remaining;
-                    if (lead > 2.0f)
-                        moveSpeed *=
-                            std::max(0.15f, 1.0f - (lead - 2.0f) * 0.35f);
+                    const float lag =
+                        remaining -
+                        group->second.nearestRemaining;
+                    if (lag > 1.0f) {
+                        const float catchUp =
+                            1.0f +
+                            std::min(0.30f,
+                                     (lag - 1.0f) * 0.12f);
+                        moveSpeed *= catchUp;
+                    }
                 }
             }
             const float step = moveSpeed * dt;
@@ -3452,8 +3612,22 @@ static bool pickFrame(const dat::Graphic &g, size_t slpFrames, float facing, flo
 
 static std::vector<SpriteDraw> g_draws; // reused between frames
 
+int Game::graphicSortLayer(int graphicId, int depth) const {
+    if (depth >= 8) return 0;
+    const dat::Graphic *graphic =
+        assets_.dat().graphic(graphicId);
+    if (!graphic) return 0;
+    int layer = std::min<int>(graphic->layer, 20);
+    for (const dat::GraphicDelta &delta : graphic->deltas)
+        layer = std::max(
+            layer,
+            graphicSortLayer(delta.graphicId, depth + 1));
+    return layer;
+}
+
 void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float facing, float animTime, int player,
-                       int initialFrame, int depth, bool drawShadows, float viewW, float viewH) {
+                       int initialFrame, int depth, bool drawShadows, float viewW, float viewH,
+                       int sortLayerOverride, int sortBias) {
     const dat::Graphic *g = assets_.dat().graphic(graphicId);
     if (!g) return;
     if (!drawShadows && depth > 0 && g->layer == 5) return;
@@ -3471,10 +3645,19 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
                 float x = sx + d.offsetX - (flip ? f.w - f.hotX : f.hotX), y = sy + d.offsetY - f.hotY;
                 if (viewW > 0 && (x + f.w <= 0 || x >= viewW || y + f.h <= 0 || y >= viewH)) continue;
                 Quad q{x, y, (float)f.w, (float)f.h, flip ? f.u + f.w : f.u, f.v, flip ? f.u : f.u + f.w, f.v + f.h};
-                g_draws.push_back({(int64_t)std::min<int>(g->layer, 20) << 40 | (int64_t)(sy * 16 + 65536) << 8, f.tex, q});
+                const int sortLayer =
+                    sortLayerOverride >= 0
+                        ? sortLayerOverride
+                        : std::min<int>(g->layer, 20);
+                g_draws.push_back(
+                    {(int64_t)sortLayer << 40 |
+                         (int64_t)(sy * 16 + 65536) << 8 |
+                         ((sortBias + depth) & 0xFF),
+                     f.tex, q});
             } else {
                 drawGraphic(r, d.graphicId, sx + d.offsetX, sy + d.offsetY, facing, animTime, player,
-                            initialFrame, depth + 1, drawShadows, viewW, viewH);
+                            initialFrame, depth + 1, drawShadows, viewW, viewH,
+                            sortLayerOverride, sortBias);
             }
         }
         return;
@@ -3490,7 +3673,13 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
     if (viewW > 0 && (x + f.w <= 0 || x >= viewW || y + f.h <= 0 || y >= viewH)) return;
     Quad q{x, y, (float)f.w, (float)f.h, flip ? f.u + f.w : f.u, f.v, flip ? f.u : f.u + f.w, f.v + f.h};
     // Sort: graphic layer first (shadows/rubble under units), then screen y.
-    int64_t key = (int64_t)std::min<int>(g->layer, 20) << 40 | (int64_t)(sy * 16 + 65536) << 8 | (depth & 0xFF);
+    const int sortLayer =
+        sortLayerOverride >= 0
+            ? sortLayerOverride
+            : std::min<int>(g->layer, 20);
+    int64_t key = (int64_t)sortLayer << 40 |
+                  (int64_t)(sy * 16 + 65536) << 8 |
+                  ((sortBias + depth) & 0xFF);
     g_draws.push_back({key, f.tex, q});
 }
 
@@ -3543,7 +3732,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 ? assets_.dat().civs[(size_t)civilization].iconSet
                 : 1;
         const int iconSlpBase =
-            panelObject->unit->interfaceKind == 2
+            panelObject->unit->type == dat::UT_Building
                 ? kBuildingIconSlpBase
                 : kUnitIconSlpBase;
         const SpriteSheet *icons =
@@ -3691,6 +3880,10 @@ void Game::render(Renderer &r, int screenW, int screenH) {
 
         const float damagePercent =
             100.0f * (1.0f - o.hitPoints / std::max(1.0f, o.maxHitPoints));
+        const int damageSortLayer =
+            damagePercent > 0 && !o.unit->damageGraphics.empty()
+                ? graphicSortLayer(gid)
+                : 0;
         const dat::DamageGraphic *replacement = nullptr;
         for (const dat::DamageGraphic &damageGraphic : o.unit->damageGraphics) {
             if (damageGraphic.graphicId < 0 ||
@@ -3702,12 +3895,14 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                     replacement = &damageGraphic;
             } else {
                 drawGraphic(r, damageGraphic.graphicId, sx, sy, o.facing, o.animTime,
-                            o.player, 0, 0, false, viewW, viewH);
+                            o.player, 0, 0, false, viewW, viewH,
+                            damageSortLayer, 128);
             }
         }
         if (replacement)
             drawGraphic(r, replacement->graphicId, sx, sy, o.facing, o.animTime,
-                        o.player, 0, 0, false, viewW, viewH);
+                        o.player, 0, 0, false, viewW, viewH,
+                        damageSortLayer, 128);
     }
     for (const Remains &remains : remains_) {
         int graphicId = remains.dyingGraphic;
@@ -4084,7 +4279,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                               .iconSet
                         : 1;
                 const int iconSlpBase =
-                    object.unit->interfaceKind == 2
+                    object.unit->type == dat::UT_Building
                         ? kBuildingIconSlpBase
                         : kUnitIconSlpBase;
                 const SpriteSheet *icons = assets_.interfaceSheet(

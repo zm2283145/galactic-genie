@@ -33,15 +33,18 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 ## Milestone 3: simulation core
 - Fixed-timestep simulation separate from rendering. Deterministic, to leave room for multiplayer later.
 - Player-issued move and attack commands use cached terrain-restriction A* pathing, dynamic occupancy,
-  shared formation routes, slowest-member group speed, marching columns, destination formations,
-  and pursuit to weapon range. Broader task-list actions remain.
+  shared formation routes, route-tangent marching columns, slowest-member group speed with bounded
+  catch-up, collision-free movement within established formations, and precise destination formations.
+  Workers, traders, and distant stragglers move independently. Broader task-list actions remain.
 - Unit commands from the dat task lists (`UnitHeader.tasks`): move, attack, gather, build, repair, garrison.
 - The initial combat slice includes contextual hostile targeting, runtime hit points, DAT-driven
   attack/armor classes, range and minimum range, reload timing, attack animations and sounds,
   original projectile flight and weapon sounds, health-bar depletion, death sounds, and progressive
   building damage/fire graphics. Original death/destruction animations transition into unit remains
   or building rubble and decay over time. Units support aggressive, defensive, stand-ground, and
-  passive stances; eligible units and armed buildings acquire targets and retaliate automatically.
+  passive stances with original-style pursuit and return behavior; eligible units and armed buildings
+  acquire targets and retaliate automatically. Building damage overlays sort above their owning
+  building while preserving world depth.
   Accuracy, blast damage, and explicit guard/patrol commands remain.
 - Economy: the four SWGB resources and an initial resource-charging building training queue are visible.
   Gathering/drop sites, worker construction, research, and population limits (power cores and prefab
@@ -60,8 +63,8 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   armor, range, stance, multi-selection portraits with individual health, formation controls,
   Vita command hints, and a contextual building production menu. A persistent four-resource
   bar is shown at the top. Worker task buttons, research, minimap, and pause menu remain.
-- Audio: selection, move, and attack acknowledgements plus weapon-fire and death effects are
-  implemented. World ambience, volume controls, and music remain.
+- Audio: selection, move, and attack acknowledgements plus camera-relative weapon-fire, impact, and
+  death effects are implemented. World ambience, volume controls, and music remain.
 
 ## Milestone 5: AI and skirmish
 - A subset of the AI script interpreter (`.per` rules), checked against the original using Ghidra where needed.

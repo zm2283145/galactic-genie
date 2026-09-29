@@ -46,6 +46,12 @@ struct MovementStats {
     size_t pendingMoveGoals = 0;
     size_t selectedPendingMoveGoals = 0;
     size_t overlappingPairs = 0;
+    uint32_t firstOverlapObject = 0;
+    uint32_t secondOverlapObject = 0;
+    int firstOverlapUnit = -1;
+    int secondOverlapUnit = -1;
+    bool firstOverlapSelected = false;
+    bool secondOverlapSelected = false;
     size_t terrainViolations = 0;
     size_t staticObstructionViolations = 0;
 };
@@ -168,7 +174,7 @@ private:
         uint8_t moveSpreadRetries = 0;
         float homeX = 0, homeY = 0;
         float moveAnchorX = 0, moveAnchorY = 0;
-        AttackMode attackMode = AttackMode::Defensive;
+        AttackMode attackMode = AttackMode::Aggressive;
         bool attackAutomatic = false;
         bool moveGoalActive = false;
         bool wander = true;
@@ -303,6 +309,8 @@ private:
     void screenToWorld(float screenX, float screenY, int screenW, int screenH,
                        float &worldX, float &worldY) const;
     void playUnitAcknowledgement(const Object &object, bool attack);
+    void playWorldUnitSound(const Object &object, int soundId);
+    bool worldSoundAudible(float x, float y) const;
     void startInstruction(Instruction instruction);
     void queueInstruction(const std::string &text, float duration,
                           const std::string &sound = std::string());
@@ -312,7 +320,9 @@ private:
     float elevationAt(float x, float y) const;
 
     void drawGraphic(Renderer &r, int graphicId, float sx, float sy, float facing, float animTime, int player,
-                     int initialFrame, int depth, bool drawShadows, float viewW, float viewH);
+                     int initialFrame, int depth, bool drawShadows, float viewW, float viewH,
+                     int sortLayerOverride = -1, int sortBias = 0);
+    int graphicSortLayer(int graphicId, int depth = 0) const;
 
     Assets &assets_;
     std::mt19937 rng_;

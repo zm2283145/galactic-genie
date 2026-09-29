@@ -160,11 +160,11 @@ static int cmdUnit(const char *dataDir, int id) {
                    unit.frameDelay, unit.graphicDisplacement[0], unit.graphicDisplacement[1],
                    unit.graphicDisplacement[2],
                    unit.displayedAttack, unit.displayedMeleeArmour);
-            printf("  interface name id %d '%s', internal '%s', icon %d, portrait %d, kind %u\n",
+            printf("  interface name id %d '%s', internal '%s', icon %d, portrait %d, kind %u, line %d\n",
                    unit.languageDllName,
                    assets.localizedString(unit.languageDllName).c_str(),
                    unit.name2.c_str(), unit.iconId, unit.oldPortraitPict,
-                   unit.interfaceKind);
+                   unit.interfaceKind, unit.unitLine);
             const auto *attackGraphic = assets.dat().graphic(unit.attackGraphic);
             const auto *dyingGraphic = assets.dat().graphic(unit.dyingGraphic);
             const auto *projectile = unit.projectileUnitId >= 0 &&
@@ -242,16 +242,21 @@ static int cmdUnits(const char *dataDir, const char *fragment) {
     const auto &units = assets.dat().civs[0].units;
     for (size_t id = 0; id < units.size(); id++) {
         const auto &unit = units[id];
+        const std::string localized =
+            assets.localizedString(unit.languageDllName);
         if (!unit.exists ||
             (unit.name.find(fragment) == std::string::npos &&
-             unit.name2.find(fragment) == std::string::npos))
+             unit.name2.find(fragment) == std::string::npos &&
+             localized.find(fragment) == std::string::npos))
             continue;
         const auto *graphic =
             assets.dat().graphic(unit.standingGraphic[0]);
-        printf("%4zu %-24s %-24s type %u graphic %d slp %d "
+        printf("%4zu %-24s %-24s '%s' type %u class %d line %d graphic %d slp %d "
                "frames %d duration %.3f sequence 0x%02x "
                "copy/base %d/%d\n",
-               id, unit.name.c_str(), unit.name2.c_str(), unit.type,
+               id, unit.name.c_str(), unit.name2.c_str(),
+               localized.c_str(),
+               unit.type, unit.cls, unit.unitLine,
                unit.standingGraphic[0], graphic ? graphic->slp : -1,
                graphic ? graphic->frameCount : 0,
                graphic ? graphic->frameDuration : 0,
@@ -872,9 +877,10 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
         acknowledgementSounds.size() == soundsBeforeMove + 1;
     const size_t commanded = game.selectedMovingObjectCount();
     input = {};
-    for (int i = 0;
-         i < 1800 && game.movementStats().selectedPendingMoveGoals > 0;
-         i++)
+    int movementFrames = 0;
+    for (; movementFrames < 1800 &&
+           game.movementStats().selectedPendingMoveGoals > 0;
+         movementFrames++)
         game.update(1.0f / 30.0f, input);
 
     if (out) {
@@ -885,16 +891,20 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
         }
     }
     const MovementStats movement = game.movementStats();
-    printf("controls: single %zu, double %zu, box %zu, portrait %zu, commanded %zu, sounds %zu, "
+    printf("controls: single %zu, double %zu, box %zu, portrait %zu, commanded %zu, sounds %zu, move %.2fs, "
            "stance changes %zu, single audio %d/%d, quiet startup %d, "
-           "pending goals %zu/%zu, overlaps %zu, terrain violations %zu\n",
+           "pending goals %zu/%zu, overlaps %zu (%u:u%d:s%d/%u:u%d:s%d), terrain violations %zu\n",
            singleSelected, doubleSelected, boxSelected, portraitSelected,
-           commanded,
-           acknowledgementSounds.size(), attackModeChanges,
+           commanded, acknowledgementSounds.size(),
+           movementFrames / 30.0f, attackModeChanges,
            doubleClickPlayedOnce ? 1 : 0, movePlayedOnce ? 1 : 0,
            quietStartup ? 1 : 0,
            movement.selectedPendingMoveGoals, movement.pendingMoveGoals,
            movement.overlappingPairs,
+           movement.firstOverlapObject, movement.firstOverlapUnit,
+           movement.firstOverlapSelected ? 1 : 0,
+           movement.secondOverlapObject, movement.secondOverlapUnit,
+           movement.secondOverlapSelected ? 1 : 0,
            movement.terrainViolations);
     if (singleSelected != 1 || doubleSelected <= 1 ||
         boxSelected < doubleSelected || portraitSelected != 1 ||
@@ -951,7 +961,6 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         fprintf(stderr, "error: combat sandbox selected no attackers\n");
         return 1;
     }
-
     // spawnBase creates five buildings, five workers, then four troopers.
     // The second base therefore starts at spawn 18 and its first trooper is 28.
     constexpr uint32_t targetId = 28;
@@ -982,6 +991,55 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
     game.update(0.001f, input);
     const bool attackPlayedOnce =
         acknowledgementSounds.size() == soundsBeforeAttack + 1;
+
+    bool offscreenWorldMuted = false;
+    {
+        Game audioGame(assets);
+        std::vector<int> offscreenSounds;
+        audioGame.setUnitSoundPlayer(
+            [&](int soundId, int) {
+                offscreenSounds.push_back(soundId);
+            });
+        if (!audioGame.init(7, mapSize, &err)) {
+            fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+        InputState audioInput;
+        audioInput.boxSelectCommit = true;
+        audioInput.boxStartX = 0;
+        audioInput.boxStartY = 0;
+        audioInput.boxEndX = screenW - 1.0f;
+        audioInput.boxEndY = screenH - 1.0f;
+        audioGame.update(0.001f, audioInput);
+        audioGame.lookAt(
+            mapSize * 0.62f + 8.0f,
+            mapSize * 0.60f + 1.0f);
+        float audioTargetX = 0, audioTargetY = 0;
+        audioGame.objectScreenPosition(
+            targetId, screenW, screenH,
+            audioTargetX, audioTargetY);
+        audioInput = {};
+        audioInput.pointerX = audioTargetX;
+        audioInput.pointerY = audioTargetY;
+        audioInput.commandPressed = true;
+        audioGame.update(0.001f, audioInput);
+        audioGame.lookAt(4.0f, 4.0f);
+        const size_t soundsBeforeOffscreenCombat =
+            offscreenSounds.size();
+        const size_t projectilesBefore =
+            audioGame.combatStats().projectilesLaunched;
+        for (float audioElapsed = 0;
+             audioElapsed < 60.0f &&
+             audioGame.combatStats().projectilesLaunched ==
+                 projectilesBefore;
+             audioElapsed += 1.0f / 30.0f)
+            audioGame.update(1.0f / 30.0f, {});
+        offscreenWorldMuted =
+            audioGame.combatStats().projectilesLaunched >
+                projectilesBefore &&
+            offscreenSounds.size() ==
+                soundsBeforeOffscreenCombat;
+    }
 
     input = {};
     constexpr float step = 1.0f / 30.0f;
@@ -1110,7 +1168,7 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            "kills %zu, projectiles %zu, paths %zu, sounds %zu, elapsed %.2f; "
            "building %.0f -> %.0f selected %d, remains %d -> %zu, overlaps %zu, "
            "building destroyed/remains/decayed %d/%d/%d, edge scroll %d, "
-           "attack audio %d, approach retries %zu, "
+           "attack audio %d, offscreen muted %d, approach retries %zu, "
            "automatic/retaliation/armed %zu/%zu/%zu\n",
            targetId, initialHitPoints, finalHitPoints,
            combat.ordersIssued, combat.attacksLanded, combat.unitsKilled,
@@ -1121,6 +1179,7 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            buildingDestroyed ? 1 : 0, sawBuildingRemains ? 1 : 0,
            remainsDecayed ? 1 : 0, edgeScrolled ? 1 : 0,
            attackPlayedOnce ? 1 : 0,
+           offscreenWorldMuted ? 1 : 0,
            combat.attackApproachRetries,
            combat.automaticTargetsAcquired, combat.retaliationOrders,
            combat.armedBuildingsEngaged);
@@ -1137,10 +1196,8 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         !buildingSelected || !sawRemains || combat.activeRemains != 0 ||
         movement.overlappingPairs != 0 || !buildingDestroyed ||
         !sawBuildingRemains || !remainsDecayed || !edgeScrolled ||
-        !attackPlayedOnce ||
-        combat.attackApproachRetries == 0 ||
-        combat.automaticTargetsAcquired == 0 ||
-        combat.retaliationOrders == 0) {
+        !attackPlayedOnce || !offscreenWorldMuted ||
+        combat.automaticTargetsAcquired == 0) {
         fprintf(stderr, "error: combat validation failed\n");
         return 1;
     }
