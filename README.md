@@ -1,10 +1,10 @@
-# swgb-vita
+# Galactic Genie
 
-A from-scratch reimplementation of the Genie engine, as used by *Star Wars: Galactic Battlegrounds Saga*, for the PS Vita. It loads the original Clone Campaigns data files from your own copy of the game. No game assets are included in this repository.
+A from-scratch, portable reimplementation of the Genie engine, as used by *Star Wars: Galactic Battlegrounds Saga*. The current targets are PS Vita and PC. It loads the original Clone Campaigns data files from your own copy of the game; no game assets are included in this repository.
 
 It is written clean-room style: file formats come from public documentation (openage, genieutils). Game behaviour is to be matched by observation, and by using Ghidra only to answer "how does X work" questions. Decompiled code is never copied into the tree.
 
-## Status: milestone 2 (map and visual fidelity, in progress)
+## Status: milestone 3 (simulation core, in progress)
 
 | Area | State |
 |---|---|
@@ -18,7 +18,8 @@ It is written clean-room style: file formats come from public documentation (ope
 | CPX/SCX terrain, elevation, player state, triggers, saved camera, and initial object loading (“Breaking Bread”) | done |
 | Initial trigger runtime: timers, object/area/resource conditions, ordered effects, voiced dialogue, and collision-aware scripted movement | in progress |
 | Units: idle/walk animation, 8-way facing with mirroring, graphic deltas for buildings | done |
-| Vita: renderer, camera controls, original-style unit selection/status markers, formation movement commands, and debug minimap | done |
+| Combat: contextual attack orders, pursuit, DAT-driven range/reload/damage, health, and death | in progress |
+| Vita: renderer, camera controls, original cursors, unit selection/status markers, formation movement, and debug minimap | done |
 | PC `swgbtool`: data inspection, CPX/SCX listing, and procedural/scenario PNG rendering | done |
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for what comes next.
@@ -61,11 +62,18 @@ cmake -B build-pc && cmake --build build-pc
 5. The app writes a log to `ux0:data/swgb/swgb.log`. `tools\deploy_vita.ps1 -PullLog` fetches it.
 
 Controls: left stick, d-pad, or a touch drag scrolls; L/R zoom. The right stick moves the
-command cursor, X selects a friendly unit, and O orders selected units to move. A touch tap
-selects a friendly unit or issues a move order on empty ground. Double-tap a unit or press X
-twice to select every matching friendly unit in the viewport. Hold Square and move the right
-stick, or hold Square while touch-dragging, to box-select units. SELECT toggles the minimap
+command cursor and X selects a friendly unit. O over a hostile unit issues an attack order;
+O over terrain issues a move order. A touch tap uses the same contextual selection or command
+behavior. Double-tap a unit or press X twice to select every matching friendly unit in the
+viewport. Hold Square and move the right stick, or hold Square while touch-dragging, to
+box-select units. The normal, move, and attack cursors are loaded from the original
+`interfac.drs`, with a procedural fallback if they are unavailable. SELECT toggles the minimap
 overlay and START quits.
+
+Combat currently includes pursuit with collision-aware A* pathfinding, attack animations and
+acknowledgements, DAT attack/armor classes, reload timing, health-bar depletion, and unit death.
+Projectile travel, accuracy, blast damage, retaliation, death animations, and corpses remain to
+be implemented.
 
 ## License
 

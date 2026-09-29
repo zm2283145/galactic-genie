@@ -50,6 +50,7 @@ public:
     // Returns the atlas for an SLP tinted for one player (playerColorBase
     // from the dat's player colour table). Null if the SLP doesn't exist.
     const SpriteSheet *sheet(int32_t slpId, int playerColorBase = 16);
+    const SpriteSheet *interfaceSheet(int32_t slpId);
     const SpriteSheet *terrainSheet(int32_t slpId);
     const SpriteFrame *terrainSlopeFrame(int32_t slpId, int slope, size_t frame,
                                          const std::array<int8_t, 8> &neighbors);

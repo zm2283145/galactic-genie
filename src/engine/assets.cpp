@@ -423,6 +423,16 @@ const SpriteSheet *Assets::sheet(int32_t slpId, int playerColorBase) {
     return build(graphics_, slpId, playerColorBase, key);
 }
 
+const SpriteSheet *Assets::interfaceSheet(int32_t slpId) {
+    const uint64_t key = (1ull << 63) | ((uint64_t)(uint32_t)slpId << 16);
+    auto it = sheets_.find(key);
+    if (it != sheets_.end()) {
+        sheetUse_[key] = terrainGeneration_;
+        return it->second.get();
+    }
+    return build(interfac_, slpId, 16, key);
+}
+
 const SpriteSheet *Assets::terrainSheet(int32_t slpId) {
     uint64_t key = ((uint64_t)(uint32_t)slpId << 16) | 0xFFFF;
     auto it = sheets_.find(key);

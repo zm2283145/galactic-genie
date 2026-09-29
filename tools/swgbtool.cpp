@@ -33,6 +33,7 @@ static int usage() {
             "  swgbtool unit <DataDir> <unitId>\n"
             "  swgbtool sound <DataDir> <soundId>\n"
             "  swgbtool drs    <file.drs>\n"
+            "  swgbtool drs-slps <file.drs>\n"
             "  swgbtool slp    <DataDir> <slpId> <out.png> [playerBase]\n"
             "  swgbtool slopes <DataDir> <slpId> <out.png> [frame]\n"
             "  swgbtool render <DataDir> <out.png> [seed] [seconds] [zoom]\n"
@@ -43,6 +44,7 @@ static int usage() {
             "  swgbtool stress-scenario <DataDir> <file.cpx> <entry> [zoom]\n"
             "  swgbtool simulate-scenario <DataDir> <file.cpx> <entry> [seconds] [out.png]\n"
             "  swgbtool test-controls <DataDir> <file.cpx> <entry> [out.png]\n"
+            "  swgbtool test-combat <DataDir> [out.png]\n"
             "  swgbtool mp3 <file.mp3>\n");
     return 2;
 }
@@ -143,6 +145,18 @@ static int cmdUnit(const char *dataDir, int id) {
                    unit.collisionSize[0], unit.collisionSize[1],
                    unit.outlineSize[0], unit.outlineSize[1], unit.outlineSize[2],
                    unit.selectionSound, unit.moveSound, unit.attackSound);
+            printf("  combat hp %d base armor %d range %.2f..%.2f reload %.2f "
+                   "attack graphic %d projectile %d displayed attack/armor %d/%d\n",
+                   unit.hitPoints, unit.baseArmor, unit.minRange, unit.maxRange,
+                   unit.reloadTime, unit.attackGraphic, unit.projectileUnitId,
+                   unit.displayedAttack, unit.displayedMeleeArmour);
+            printf("  attacks:");
+            for (const auto &attack : unit.attacks)
+                printf(" %d=%d", attack.cls, attack.amount);
+            printf("; armours:");
+            for (const auto &armour : unit.armours)
+                printf(" %d=%d", armour.cls, armour.amount);
+            printf("\n");
             if (graphic)
                 for (const auto &delta : graphic->deltas)
                     if (const auto *child = assets.dat().graphic(delta.graphicId))
@@ -221,6 +235,34 @@ static int cmdDrs(const char *path) {
     for (auto &e : a->entries()) {
         const char *t = e.type == DrsType::Slp ? "slp" : e.type == DrsType::Wav ? "wav" : e.type == DrsType::Bina ? "bina" : "?";
         printf("%6d %-4s %10u %9u\n", e.id, t, e.offset, e.size);
+    }
+    return 0;
+}
+
+static int cmdDrsSlps(const char *path) {
+    std::string err;
+    auto archive = DrsArchive::open(path, &err);
+    if (!archive) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    for (const DrsEntry &entry : archive->entries()) {
+        if (entry.type != DrsType::Slp) continue;
+        std::vector<uint8_t> data;
+        Slp slp;
+        if (!archive->read(entry, data) || !slp.parse(std::move(data), &err)) {
+            fprintf(stderr, "warning: could not parse SLP %d: %s\n", entry.id, err.c_str());
+            continue;
+        }
+        int maxWidth = 0, maxHeight = 0;
+        for (size_t frame = 0; frame < slp.frameCount(); frame++) {
+            maxWidth = std::max(maxWidth, slp.frame(frame).width);
+            maxHeight = std::max(maxHeight, slp.frame(frame).height);
+        }
+        const SlpFrameInfo &first = slp.frame(0);
+        printf("%6d %4zu frames %4dx%-4d hotspot %4d,%4d %9u bytes\n",
+               entry.id, slp.frameCount(), maxWidth, maxHeight,
+               first.hotspotX, first.hotspotY, entry.size);
     }
     return 0;
 }
@@ -384,6 +426,7 @@ static int cmdSlp(const char *dataDir, int id, const char *out, int base) {
         return 1;
     }
     const SpriteSheet *sh = a.sheet(id, base);
+    if (!sh) sh = a.interfaceSheet(id);
     if (!sh) sh = a.terrainSheet(id);
     if (!sh) {
         fprintf(stderr, "slp %d not found\n", id);
@@ -704,6 +747,86 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     return 0;
 }
 
+static int cmdTestCombat(const char *dataDir, const char *out) {
+    std::string err;
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+
+    Game game(assets);
+    std::vector<int> acknowledgementSounds;
+    game.setUnitSoundPlayer([&](int soundId, int) {
+        acknowledgementSounds.push_back(soundId);
+    });
+    constexpr int mapSize = 96;
+    if (!game.init(7, mapSize, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+
+    constexpr int screenW = 960, screenH = 544;
+    InputState input;
+    input.boxSelectCommit = true;
+    input.boxStartX = 0;
+    input.boxStartY = 0;
+    input.boxEndX = screenW - 1.0f;
+    input.boxEndY = screenH - 1.0f;
+    game.update(0.001f, input);
+    if (game.selectedObjectCount() == 0) {
+        fprintf(stderr, "error: combat sandbox selected no attackers\n");
+        return 1;
+    }
+
+    // spawnBase creates five buildings, five workers, then four troopers.
+    // The second base therefore starts at spawn 18 and its first trooper is 28.
+    constexpr uint32_t targetId = 28;
+    game.lookAt(mapSize * 0.62f + 8.0f, mapSize * 0.60f + 1.0f);
+    float screenX = 0, screenY = 0;
+    if (!game.objectScreenPosition(targetId, screenW, screenH, screenX, screenY)) {
+        fprintf(stderr, "error: combat sandbox target %u is unavailable\n", targetId);
+        return 1;
+    }
+    const float initialHitPoints = game.objectHitPoints(targetId);
+    input = {};
+    input.pointerX = screenX;
+    input.pointerY = screenY;
+    input.commandPressed = true;
+    input.cursorVisible = true;
+    game.update(0.001f, input);
+    if (out) {
+        game.render(renderer, screenW, screenH);
+        if (!renderer.savePng(out)) {
+            fprintf(stderr, "error: could not write %s\n", out);
+            return 1;
+        }
+    }
+
+    input = {};
+    constexpr float step = 1.0f / 30.0f;
+    float elapsed = 0;
+    for (; elapsed < 120.0f; elapsed += step) {
+        game.update(step, input);
+        if (!game.objectActive(targetId)) break;
+    }
+    const CombatStats combat = game.combatStats();
+    const float finalHitPoints = game.objectHitPoints(targetId);
+    printf("combat: target %u hp %.0f -> %.0f, orders %zu, hits %zu, "
+           "kills %zu, sounds %zu, elapsed %.2f\n",
+           targetId, initialHitPoints, finalHitPoints,
+           combat.ordersIssued, combat.attacksLanded, combat.unitsKilled,
+           acknowledgementSounds.size(), elapsed);
+    if (combat.ordersIssued != 1 || combat.attacksLanded == 0 ||
+        game.objectActive(targetId) || combat.unitsKilled == 0 ||
+        acknowledgementSounds.empty()) {
+        fprintf(stderr, "error: combat validation failed\n");
+        return 1;
+    }
+    return 0;
+}
+
 // Renders one graphic at 8 world facings (0 = +x, then +45 deg steps) in a row.
 static int cmdAngles(const char *dataDir, int gid, const char *out) {
     SoftRenderer r;
@@ -738,6 +861,7 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "unit") && argc >= 4) return cmdUnit(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "sound") && argc >= 4) return cmdSound(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "drs")) return cmdDrs(argv[2]);
+    if (!strcmp(cmd, "drs-slps")) return cmdDrsSlps(argv[2]);
     if (!strcmp(cmd, "campaign")) return cmdCampaign(argv[2]);
     if (!strcmp(cmd, "scenario") && argc >= 4) return cmdScenario(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "scenario-units") && argc >= 5)
@@ -766,6 +890,8 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "test-controls") && argc >= 5)
         return cmdTestControls(argv[2], argv[3], atoi(argv[4]),
                                argc > 5 ? argv[5] : nullptr);
+    if (!strcmp(cmd, "test-combat"))
+        return cmdTestCombat(argv[2], argc > 3 ? argv[3] : nullptr);
     if (!strcmp(cmd, "mp3")) return cmdMp3(argv[2]);
     return usage();
 }

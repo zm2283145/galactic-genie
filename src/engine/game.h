@@ -46,6 +46,13 @@ struct MovementStats {
     size_t staticObstructionViolations = 0;
 };
 
+struct CombatStats {
+    size_t activeOrders = 0;
+    size_t ordersIssued = 0;
+    size_t attacksLanded = 0;
+    size_t unitsKilled = 0;
+};
+
 struct MovingObjectInfo {
     uint32_t spawnId = 0;
     int unitId = -1;
@@ -91,13 +98,18 @@ public:
     size_t selectedObjectCount() const;
     size_t selectedMovingObjectCount() const;
     MovementStats movementStats() const;
+    CombatStats combatStats() const;
+    float objectHitPoints(uint32_t spawnId) const;
+    bool objectScreenPosition(uint32_t spawnId, int screenW, int screenH,
+                              float &screenX, float &screenY) const;
     std::vector<MovingObjectInfo> movingObjects() const;
 
     static constexpr int kTileHalfW = 48;
     static constexpr int kTileHalfH = 24;
 
 private:
-    enum class State : uint8_t { Idle, Walk };
+    enum class State : uint8_t { Idle, Walk, Attack };
+    enum class CursorMode : uint8_t { Normal, Move, Attack };
 
     struct Object {
         const dat::Unit *unit = nullptr;
@@ -108,9 +120,13 @@ private:
         float animTime = 0;
         float stateTime = 0;
         float targetX = 0, targetY = 0;
+        float hitPoints = 1, maxHitPoints = 1;
         std::vector<std::array<float, 2>> path;
         size_t pathIndex = 0;
         float blockedTime = 0;
+        float attackCooldown = 0;
+        float attackRepathTime = 0;
+        uint32_t attackTargetId = 0;
         float homeX = 0, homeY = 0;
         bool wander = true;
         bool drawShadows = true;
@@ -166,14 +182,23 @@ private:
     bool positionPassable(const Object &object, float x, float y, bool dynamic) const;
     bool terrainPassable(const Object &object, float x, float y) const;
     bool isAirUnit(const Object &object) const;
+    bool isEnemy(const Object &source, const Object &target) const;
+    bool canAttack(const Object &object) const;
+    float attackRange(const Object &source, const Object &target) const;
+    int attackDamage(const Object &source, const Object &target) const;
     float collisionRadius(const Object &object) const;
     bool isSelectable(const Object &object) const;
+    bool hasSelectedAttacker() const;
     void clearSelection();
     Object *objectAtScreen(float screenX, float screenY, int screenW, int screenH);
+    Object *enemyAtScreen(float screenX, float screenY, int screenW, int screenH);
     void selectAtScreen(float screenX, float screenY, int screenW, int screenH);
     void selectBox(float startX, float startY, float endX, float endY,
                    int screenW, int screenH);
     void commandAtScreen(float screenX, float screenY, int screenW, int screenH);
+    void issueAttack(Object &source, Object &target);
+    void updateAttack(Object &source, float dt);
+    void killObject(Object &object);
     void objectScreenPosition(const Object &object, int screenW, int screenH,
                               float &screenX, float &screenY) const;
     void screenToWorld(float screenX, float screenY, int screenW, int screenH,
@@ -222,13 +247,18 @@ private:
     float cursorX_ = 0, cursorY_ = 0;
     float boxStartX_ = 0, boxStartY_ = 0, boxEndX_ = 0, boxEndY_ = 0;
     float commandMarkerX_ = 0, commandMarkerY_ = 0, commandMarkerTime_ = 0;
+    bool commandMarkerAttack_ = false;
     float selectionClickAge_ = 1000.0f;
     float lastSelectionX_ = 0, lastSelectionY_ = 0;
     int lastSelectionUnitId_ = -1;
     bool cursorVisible_ = false;
+    CursorMode cursorMode_ = CursorMode::Normal;
     bool boxSelectActive_ = false;
     bool debug_ = false;
     FrameStats stats_;
+    size_t attackOrdersIssued_ = 0;
+    size_t attacksLanded_ = 0;
+    size_t unitsKilled_ = 0;
     std::function<void(const std::string &)> log_;
     std::function<float(const std::string &)> playSound_;
     std::function<void(int, int)> playUnitSound_;
