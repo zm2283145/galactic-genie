@@ -150,7 +150,6 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     warnedEffects_.clear();
     warnedConditions_.clear();
     localPlayer_ = 0;
-    cameraMotionTime_ = 0;
     for (size_t i = 0; i < players_.size(); i++) players_[i].color = (uint32_t)i;
     mapSize_ = mapSize;
     generateTerrain(mapSize);
@@ -218,7 +217,6 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     warnedEffects_.clear();
     warnedConditions_.clear();
     localPlayer_ = 0;
-    cameraMotionTime_ = 0;
     for (size_t i = 0; i < players_.size(); i++) {
         if (players_[i].active && players_[i].human) {
             localPlayer_ = (int)i + 1;
@@ -278,7 +276,7 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     canonicalNeighbors.fill(0);
     for (const auto &entry : canonicalSlopes) {
         const SpriteSheet *sheet = assets_.terrainSheet(entry.first);
-        const size_t variants = sheet ? std::min<size_t>(4, sheet->frames.size()) : 0;
+        const size_t variants = sheet && !sheet->frames.empty() ? 1 : 0;
         for (size_t frame = 0; frame < variants; frame++)
             assets_.terrainSlopeFrame(entry.first, entry.second, frame, canonicalNeighbors);
     }
@@ -1091,11 +1089,6 @@ void Game::update(float dt, const InputState &in) {
     const float scrollSpeed = 900.0f / zoom_;
     camX_ += in.scrollX * scrollSpeed * dt - in.dragX / zoom_;
     camY_ += in.scrollY * scrollSpeed * dt - in.dragY / zoom_;
-    if (std::fabs(in.scrollX) > 0.01f || std::fabs(in.scrollY) > 0.01f ||
-        std::fabs(in.dragX) > 0.01f || std::fabs(in.dragY) > 0.01f)
-        cameraMotionTime_ = 0.35f;
-    else
-        cameraMotionTime_ = std::max(0.0f, cameraMotionTime_ - dt);
     // Clamp the camera to the map diamond's bounding box.
     float minX = -mapSize_ * kTileHalfW, maxX = mapSize_ * kTileHalfW;
     float maxY = 2.0f * mapSize_ * kTileHalfH;
@@ -1250,7 +1243,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     const float viewW = screenW / zoom_, viewH = screenH / zoom_;
     const float ox = camX_ - viewW / 2, oy = camY_ - viewH / 2; // world-pixel of screen top-left
     const bool overview = zoom_ < 0.6f;
-    const bool reducedTerrainLighting = cameraMotionTime_ > 0 || overview;
+    const bool reducedTerrainLighting = overview;
     // At overview zoom the blend overlays are sub-pixel detail but account for
     // hundreds of extra masked draws and slope-mask cache entries on Vita.
     const bool drawTerrainBlends = !overview && assets_.hasBlendMasks();
@@ -1277,8 +1270,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         uint32_t hash = (uint32_t)tx * 374761393u ^ (uint32_t)ty * 668265263u;
         hash = (hash ^ (hash >> 13)) * 1274126177u;
         hash ^= hash >> 16;
-        const size_t variants = slope ? std::min<size_t>(4, sheet->frames.size())
-                                      : sheet->frames.size();
+        const size_t variants = slope ? 1 : sheet->frames.size();
         return hash % variants;
     };
     static constexpr int neighborX[8] = {-1, 0, 1, 1, 1, 0, -1, -1};
