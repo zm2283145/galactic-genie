@@ -34,6 +34,11 @@ struct InputState {
     bool pointerTap = false;
     bool boxSelectActive = false;
     bool boxSelectCommit = false;
+    bool toggleCheatMenu = false;
+    bool menuUp = false;
+    bool menuDown = false;
+    bool menuActivate = false;
+    bool menuBack = false;
 };
 
 struct FrameStats {
@@ -126,6 +131,7 @@ public:
     int objectAttackDamage(uint32_t sourceId,
                            uint32_t targetId) const;
     bool objectSelected(uint32_t spawnId) const;
+    std::vector<uint32_t> selectedObjectIds() const;
     bool objectScreenPosition(uint32_t spawnId, int screenW, int screenH,
                               float &screenX, float &screenY) const;
     std::vector<MovingObjectInfo> movingObjects() const;
@@ -282,6 +288,9 @@ private:
     bool technologyCommandApplies(
         const dat::EffectCommand &command,
         const Object &object) const;
+    float modifiedUnitAttribute(const Object &object,
+                                int attribute,
+                                float baseValue) const;
     int graphicSound(int graphicId) const;
     float collisionRadius(const Object &object) const;
     bool isInspectable(const Object &object) const;
@@ -289,6 +298,9 @@ private:
     bool hasSelectedUnit() const;
     bool hasSelectedAttacker() const;
     void clearSelection();
+    void selectObject(Object &object, bool first = false);
+    void syncSelectionOrder();
+    std::vector<Object *> selectedObjectsInOrder(bool selectableOnly);
     Object *objectAtScreen(float screenX, float screenY, int screenW, int screenH);
     Object *enemyAtScreen(float screenX, float screenY, int screenW, int screenH);
     void selectAtScreen(float screenX, float screenY, int screenW, int screenH);
@@ -324,6 +336,10 @@ private:
     void playUnitAcknowledgement(const Object &object, bool attack);
     void playWorldUnitSound(const Object &object, int soundId);
     bool worldSoundAudible(float x, float y) const;
+    void activateCheat(size_t index, int screenW, int screenH);
+    bool spawnCheatUnit(int unitId, bool requireWater,
+                        int screenW, int screenH);
+    void defeatCheatPlayer(int player);
     void startInstruction(Instruction instruction);
     void queueInstruction(const std::string &text, float duration,
                           const std::string &sound = std::string());
@@ -387,11 +403,17 @@ private:
     float selectionClickAge_ = 1000.0f;
     float lastSelectionX_ = 0, lastSelectionY_ = 0;
     int lastSelectionUnitId_ = -1;
+    std::vector<uint32_t> selectionOrder_;
     bool cursorVisible_ = false;
     CursorMode cursorMode_ = CursorMode::Normal;
     FormationType selectedFormation_ = FormationType::Line;
     bool actionMenuOpen_ = false;
     uint32_t actionMenuObjectId_ = 0;
+    bool cheatMenuOpen_ = false;
+    size_t cheatMenuSelection_ = 0;
+    bool forceBuildCheat_ = false;
+    bool forceExploreCheat_ = false;
+    bool forceSightCheat_ = false;
     std::string statusMessage_;
     float statusTime_ = 0;
     bool boxSelectActive_ = false;

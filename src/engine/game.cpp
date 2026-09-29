@@ -41,6 +41,64 @@ constexpr float kActionMenuY = 64.0f;
 constexpr float kActionMenuWidth = 440.0f;
 constexpr float kActionMenuRowHeight = 42.0f;
 constexpr size_t kActionMenuMaxRows = 8;
+constexpr float kCheatMenuX = 170.0f;
+constexpr float kCheatMenuY = 58.0f;
+constexpr float kCheatMenuWidth = 620.0f;
+constexpr float kCheatMenuRowHeight = 34.0f;
+constexpr size_t kCheatMenuVisibleRows = 11;
+
+enum class CheatAction {
+    Food,
+    Carbon,
+    Nova,
+    Ore,
+    ForceBuild,
+    ForceSight,
+    ForceExplore,
+    Spawn,
+    Tarkin,
+    Skywalker,
+    Darkside,
+    Technology,
+};
+
+struct CheatEntry {
+    const char *code;
+    const char *effect;
+    CheatAction action;
+    int value;
+    bool requireWater;
+};
+
+constexpr CheatEntry kCheats[] = {
+    {"FORCEFOOD", "+1000 FOOD", CheatAction::Food, 0, false},
+    {"FORCECARBON", "+1000 CARBON", CheatAction::Carbon, 0, false},
+    {"FORCENOVA", "+1000 NOVA", CheatAction::Nova, 0, false},
+    {"FORCEORE", "+1000 ORE", CheatAction::Ore, 0, false},
+    {"FORCEBUILD", "INSTANT PRODUCTION", CheatAction::ForceBuild, 0, false},
+    {"FORCESIGHT", "REMOVE FOG OF WAR", CheatAction::ForceSight, 0, false},
+    {"FORCEEXPLORE", "EXPLORE THE MAP", CheatAction::ForceExplore, 0, false},
+    {"SIMONSAYS", "SPAWN KILLER EWOK", CheatAction::Spawn, 1204, false},
+    {"SCARYNEIGHBOR", "SPAWN BONGO MARAUDER", CheatAction::Spawn, 1314, true},
+    {"IMPERIAL ENTANGLEMENTS", "SPAWN STAR DESTROYER", CheatAction::Spawn, 1586, false},
+    {"THAT'S NO MOON", "SPAWN DEATH STAR", CheatAction::Spawn, 1587, false},
+    {"TANTIVE IV", "SPAWN BLOCKADE RUNNER", CheatAction::Spawn, 1580, false},
+    {"GALACTIC UPHEAVAL", "SPAWN DECIMATOR", CheatAction::Spawn, 545, false},
+    {"SUDDENLY SILENCED", "FASTER ATTACKS", CheatAction::Technology, 592, false},
+    {"THE FORCE IS STRONG WITH THIS ONE", "STRONGER JEDI", CheatAction::Technology, 588, false},
+    {"MOST POWERFUL JEDI", "IMPROVE JEDI", CheatAction::Technology, 591, false},
+    {"INTENSIFY FORWARD FIRE POWER", "IMPROVE DEFENSES", CheatAction::Technology, 590, false},
+    {"THE FIGHTERS ARE COMING IN TOO FAST", "FASTER AIRCRAFT", CheatAction::Technology, 589, false},
+    {"TARKIN", "DESTROY ALL ENEMIES", CheatAction::Tarkin, 0, false},
+    {"SKYWALKER", "WIN SCENARIO", CheatAction::Skywalker, 0, false},
+    {"DARKSIDE2", "DESTROY PLAYER 2", CheatAction::Darkside, 2, false},
+    {"DARKSIDE3", "DESTROY PLAYER 3", CheatAction::Darkside, 3, false},
+    {"DARKSIDE4", "DESTROY PLAYER 4", CheatAction::Darkside, 4, false},
+    {"DARKSIDE5", "DESTROY PLAYER 5", CheatAction::Darkside, 5, false},
+    {"DARKSIDE6", "DESTROY PLAYER 6", CheatAction::Darkside, 6, false},
+    {"DARKSIDE7", "DESTROY PLAYER 7", CheatAction::Darkside, 7, false},
+    {"DARKSIDE8", "DESTROY PLAYER 8", CheatAction::Darkside, 8, false},
+};
 
 // Terrain ids from genie_x1.dat's terrain table.
 enum : uint8_t {
@@ -179,8 +237,14 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     automaticTargetsAcquired_ = retaliationOrders_ = armedBuildingsEngaged_ = 0;
     attackModeChanges_ = 0;
     objects_.clear();
+    selectionOrder_.clear();
     actionMenuOpen_ = false;
     actionMenuObjectId_ = 0;
+    cheatMenuOpen_ = false;
+    cheatMenuSelection_ = 0;
+    forceBuildCheat_ = false;
+    forceExploreCheat_ = false;
+    forceSightCheat_ = false;
     statusMessage_.clear();
     statusTime_ = 0;
     objectIndices_.clear();
@@ -353,8 +417,14 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     }
 
     objects_.clear();
+    selectionOrder_.clear();
     actionMenuOpen_ = false;
     actionMenuObjectId_ = 0;
+    cheatMenuOpen_ = false;
+    cheatMenuSelection_ = 0;
+    forceBuildCheat_ = false;
+    forceExploreCheat_ = false;
+    forceSightCheat_ = false;
     statusMessage_.clear();
     statusTime_ = 0;
     objects_.reserve(scenario.units.size() * 2);
@@ -523,7 +593,9 @@ Game::Object *Game::addObject(const dat::Unit *unit, int player, float x, float 
     object.player = player;
     object.x = object.homeX = object.moveAnchorX = object.targetX = x;
     object.y = object.homeY = object.moveAnchorY = object.targetY = y;
-    object.hitPoints = object.maxHitPoints = std::max(1, (int)unit->hitPoints);
+    object.hitPoints = object.maxHitPoints = std::max(
+        1, (int)std::lround(modifiedUnitAttribute(
+               object, 0, unit->hitPoints)));
     object.facing = facing;
     object.spawnId = spawnId;
     object.autoAcquireTime = 0.1f + (spawnId % 8) * 0.05f;
@@ -1002,6 +1074,22 @@ bool Game::objectSelected(uint32_t spawnId) const {
     return object && object->active && object->selected;
 }
 
+std::vector<uint32_t> Game::selectedObjectIds() const {
+    std::vector<uint32_t> result;
+    result.reserve(selectionOrder_.size());
+    for (uint32_t spawnId : selectionOrder_) {
+        const Object *object = findObject(spawnId);
+        if (object && object->active && object->selected)
+            result.push_back(spawnId);
+    }
+    for (const Object &object : objects_)
+        if (object.active && object.selected &&
+            std::find(result.begin(), result.end(), object.spawnId) ==
+                result.end())
+            result.push_back(object.spawnId);
+    return result;
+}
+
 bool Game::objectScreenPosition(uint32_t spawnId, int screenW, int screenH,
                                 float &screenX, float &screenY) const {
     const Object *object = findObject(spawnId);
@@ -1114,6 +1202,42 @@ bool Game::technologyCommandApplies(
     const Object &object) const {
     return (command.a < 0 || command.a == object.unit->id) &&
            (command.b < 0 || command.b == object.unit->cls);
+}
+
+float Game::modifiedUnitAttribute(const Object &object,
+                                  int attribute,
+                                  float baseValue) const {
+    float value = baseValue;
+    if (object.player < 0 ||
+        (size_t)object.player >= researchedTechs_.size())
+        return value;
+    for (int technologyId :
+         researchedTechs_[(size_t)object.player]) {
+        if (technologyId < 0 ||
+            (size_t)technologyId >= assets_.dat().techs.size())
+            continue;
+        const dat::Tech &technology =
+            assets_.dat().techs[(size_t)technologyId];
+        if (technology.effectId < 0 ||
+            (size_t)technology.effectId >=
+                assets_.dat().effects.size())
+            continue;
+        for (const dat::EffectCommand &command :
+             assets_.dat()
+                 .effects[(size_t)technology.effectId]
+                 .commands) {
+            if (command.c != attribute ||
+                !technologyCommandApplies(command, object))
+                continue;
+            if (command.type == 0)
+                value = command.d;
+            else if (command.type == 4)
+                value += command.d;
+            else if (command.type == 5)
+                value *= command.d;
+        }
+    }
+    return value;
 }
 
 int Game::modifiedAttackAmount(
@@ -1277,6 +1401,51 @@ bool Game::hasSelectedAttacker() const {
 
 void Game::clearSelection() {
     for (Object &object : objects_) object.selected = false;
+    selectionOrder_.clear();
+}
+
+void Game::selectObject(Object &object, bool first) {
+    object.selected = true;
+    selectionOrder_.erase(
+        std::remove(selectionOrder_.begin(), selectionOrder_.end(),
+                    object.spawnId),
+        selectionOrder_.end());
+    if (first)
+        selectionOrder_.insert(selectionOrder_.begin(), object.spawnId);
+    else
+        selectionOrder_.push_back(object.spawnId);
+}
+
+void Game::syncSelectionOrder() {
+    selectionOrder_.erase(
+        std::remove_if(
+            selectionOrder_.begin(), selectionOrder_.end(),
+            [&](uint32_t spawnId) {
+                const Object *object = findObject(spawnId);
+                return !object || !object->active || !object->selected;
+            }),
+        selectionOrder_.end());
+    for (const Object &object : objects_)
+        if (object.active && object.selected &&
+            std::find(selectionOrder_.begin(), selectionOrder_.end(),
+                      object.spawnId) == selectionOrder_.end())
+            selectionOrder_.push_back(object.spawnId);
+}
+
+std::vector<Game::Object *> Game::selectedObjectsInOrder(
+    bool selectableOnly) {
+    syncSelectionOrder();
+    std::vector<Object *> selected;
+    selected.reserve(selectionOrder_.size());
+    for (uint32_t spawnId : selectionOrder_) {
+        Object *object = findObject(spawnId);
+        if (!object || !object->selected ||
+            (selectableOnly ? !isSelectable(*object)
+                            : !isInspectable(*object)))
+            continue;
+        selected.push_back(object);
+    }
+    return selected;
 }
 
 void Game::objectScreenPosition(const Object &object, int screenW, int screenH,
@@ -1329,9 +1498,9 @@ Game::Object *Game::objectAtScreen(float screenX, float screenY, int screenW, in
 
 Game::Object *Game::enemyAtScreen(float screenX, float screenY, int screenW, int screenH) {
     const Object *source = nullptr;
-    for (const Object &object : objects_)
-        if (object.selected && isSelectable(object) && canAttack(object)) {
-            source = &object;
+    for (Object *object : selectedObjectsInOrder(true))
+        if (canAttack(*object)) {
+            source = object;
             break;
         }
     if (!source) return nullptr;
@@ -1367,16 +1536,19 @@ void Game::selectAtScreen(float screenX, float screenY, int screenW, int screenH
         clickDx * clickDx + clickDy * clickDy <= 1600.0f;
     clearSelection();
     if (doubleClick) {
+        selectObject(*object);
         for (Object &candidate : objects_) {
-            if (!isSelectable(candidate) || candidate.unit->id != object->unit->id) continue;
+            if (&candidate == object || !isSelectable(candidate) ||
+                candidate.unit->id != object->unit->id)
+                continue;
             float candidateX, candidateY;
             objectScreenPosition(candidate, screenW, screenH, candidateX, candidateY);
             if (candidateX >= 0 && candidateY >= 0 &&
                 candidateX < screenW && candidateY < screenH)
-                candidate.selected = true;
+                selectObject(candidate);
         }
     } else if (object) {
-        object->selected = true;
+        selectObject(*object);
     }
     if (!doubleClick && object && isSelectable(*object) && playUnitSound_ &&
         object->unit->selectionSound >= 0)
@@ -1394,16 +1566,16 @@ void Game::selectBox(float startX, float startY, float endX, float endY,
     selectionClickAge_ = 1000.0f;
     lastSelectionUnitId_ = -1;
     clearSelection();
-    Object *acknowledgement = nullptr;
     for (Object &object : objects_) {
         if (!isSelectable(object)) continue;
         float objectX, objectY;
         objectScreenPosition(object, screenW, screenH, objectX, objectY);
         if (objectX >= minX && objectX <= maxX && objectY >= minY && objectY <= maxY) {
-            object.selected = true;
-            if (!acknowledgement) acknowledgement = &object;
+            selectObject(object);
         }
     }
+    Object *acknowledgement =
+        selectionOrder_.empty() ? nullptr : findObject(selectionOrder_.front());
     if (acknowledgement && playUnitSound_ && acknowledgement->unit->selectionSound >= 0)
         playUnitSound_(acknowledgement->unit->selectionSound,
                        civilizationForPlayer(acknowledgement->player));
@@ -1414,10 +1586,7 @@ bool Game::handleSelectionPanelClick(float screenX, float screenY,
     const float panelY = screenH - kSelectionPanelHeight;
     if (screenY < panelY) return false;
 
-    std::vector<Object *> selected;
-    for (Object &object : objects_)
-        if (object.selected && isInspectable(object))
-            selected.push_back(&object);
+    std::vector<Object *> selected = selectedObjectsInOrder(false);
     if (selected.empty()) return false;
     if (selected.size() == 1) return true;
 
@@ -1453,7 +1622,7 @@ bool Game::handleSelectionPanelClick(float screenX, float screenY,
             continue;
         Object *chosen = selected[index];
         clearSelection();
-        chosen->selected = true;
+        selectObject(*chosen);
         selectionClickAge_ = 1000.0f;
         lastSelectionUnitId_ = chosen->unit->id;
         if (playUnitSound_ && chosen->unit->selectionSound >= 0)
@@ -1569,9 +1738,7 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
 }
 
 void Game::commandAtScreen(float screenX, float screenY, int screenW, int screenH) {
-    std::vector<Object *> selected;
-    for (Object &object : objects_)
-        if (isSelectable(object) && object.selected) selected.push_back(&object);
+    std::vector<Object *> selected = selectedObjectsInOrder(true);
     if (selected.empty()) return;
 
     Object *enemy = enemyAtScreen(screenX, screenY, screenW, screenH);
@@ -1755,6 +1922,161 @@ void Game::playWorldUnitSound(const Object &object, int soundId) {
         !worldSoundAudible(object.x, object.y))
         return;
     playUnitSound_(soundId, civilizationForPlayer(object.player));
+}
+
+void Game::defeatCheatPlayer(int player) {
+    if (player <= 0 || player > 8) return;
+    for (Object &object : objects_) {
+        if (object.active && object.player == player)
+            object.active = false;
+    }
+    syncSelectionOrder();
+    rebuildAdjacency();
+    rebuildMobileOccupancy();
+}
+
+bool Game::spawnCheatUnit(int unitId, bool requireWater,
+                          int screenW, int screenH) {
+    const dat::Unit *unit =
+        findUnit(civilizationForPlayer(localPlayer_), unitId);
+    if (!unit) return false;
+
+    float cursorX = 0.0f, cursorY = 0.0f;
+    screenToWorld(cursorX_, cursorY_, screenW, screenH,
+                  cursorX, cursorY);
+    Object candidate;
+    candidate.unit = unit;
+    candidate.player = localPlayer_;
+    bool found = false;
+    float spawnX = cursorX, spawnY = cursorY;
+    for (int ring = 0; ring < 24 && !found; ring++) {
+        const int samples = ring == 0 ? 1 : 12 + ring * 4;
+        for (int sample = 0; sample < samples; sample++) {
+            const float angle =
+                sample * (2.0f * kPi / samples);
+            const float distance = ring * 0.5f;
+            candidate.x = cursorX + std::cos(angle) * distance;
+            candidate.y = cursorY + std::sin(angle) * distance;
+            if (!positionPassable(candidate, candidate.x,
+                                  candidate.y, true))
+                continue;
+            spawnX = candidate.x;
+            spawnY = candidate.y;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        statusMessage_ = requireWater
+            ? "PLACE CURSOR OVER OPEN WATER"
+            : "NO VALID SPAWN POSITION";
+        statusTime_ = 3.0f;
+        return false;
+    }
+
+    clearSelection();
+    Object *created = addObject(
+        unit, localPlayer_, spawnX, spawnY, -kPi * 0.5f,
+        nextSpawnId_++);
+    if (!created) return false;
+    created->wander = false;
+    created->stateTime = 1.0f;
+    selectObject(*created, true);
+    rebuildAdjacency();
+    rebuildMobileOccupancy();
+    return true;
+}
+
+void Game::activateCheat(size_t index, int screenW, int screenH) {
+    if (index >= std::size(kCheats)) return;
+    const CheatEntry &cheat = kCheats[index];
+    bool activated = true;
+    bool customStatus = false;
+    switch (cheat.action) {
+    case CheatAction::Food:
+        resources_[(size_t)localPlayer_][0] += 1000.0f;
+        break;
+    case CheatAction::Carbon:
+        resources_[(size_t)localPlayer_][1] += 1000.0f;
+        break;
+    case CheatAction::Nova:
+        resources_[(size_t)localPlayer_][3] += 1000.0f;
+        break;
+    case CheatAction::Ore:
+        resources_[(size_t)localPlayer_][2] += 1000.0f;
+        break;
+    case CheatAction::ForceBuild:
+        forceBuildCheat_ = !forceBuildCheat_;
+        for (Object &object : objects_) {
+            if (object.active && !object.productionQueue.empty())
+                object.productionRemaining = 0.0f;
+        }
+        statusMessage_ = forceBuildCheat_
+            ? "FORCEBUILD ENABLED" : "FORCEBUILD DISABLED";
+        customStatus = true;
+        break;
+    case CheatAction::ForceSight:
+        forceSightCheat_ = true;
+        statusMessage_ = "VISIBILITY IS ALREADY UNRESTRICTED";
+        customStatus = true;
+        break;
+    case CheatAction::ForceExplore:
+        forceExploreCheat_ = true;
+        statusMessage_ = "THE MAP IS ALREADY FULLY EXPLORED";
+        customStatus = true;
+        break;
+    case CheatAction::Spawn:
+        activated = spawnCheatUnit(
+            cheat.value, cheat.requireWater, screenW, screenH);
+        break;
+    case CheatAction::Tarkin:
+        for (int player = 1; player <= 8; player++) {
+            bool enemy = player != localPlayer_;
+            if (localPlayer_ > 0 &&
+                (size_t)localPlayer_ <= players_.size()) {
+                const auto &diplomacy =
+                    players_[(size_t)localPlayer_ - 1].diplomacy;
+                enemy = (size_t)player < diplomacy.size() &&
+                        diplomacy[(size_t)player] == 3;
+            }
+            if (enemy)
+                defeatCheatPlayer(player);
+        }
+        break;
+    case CheatAction::Skywalker:
+        victoryState_ = 1;
+        statusMessage_ = "SCENARIO WON";
+        customStatus = true;
+        break;
+    case CheatAction::Darkside:
+        defeatCheatPlayer(cheat.value);
+        break;
+    case CheatAction::Technology: {
+        std::vector<std::pair<Object *, float>> oldMaximums;
+        for (Object &object : objects_)
+            if (object.active &&
+                object.player == localPlayer_)
+                oldMaximums.push_back(
+                    {&object, object.maxHitPoints});
+        activated = researchTechnology(localPlayer_, cheat.value);
+        if (activated)
+            for (const auto &entry : oldMaximums) {
+                Object &object = *entry.first;
+                const float maximum = std::max(
+                    1.0f, modifiedUnitAttribute(
+                              object, 0,
+                              object.unit->hitPoints));
+                object.hitPoints = std::max(
+                    1.0f, object.hitPoints +
+                              maximum - entry.second);
+                object.maxHitPoints = maximum;
+            }
+        break;
+    }
+    }
+    if (activated && !customStatus)
+        statusMessage_ = std::string(cheat.code) + " ACTIVATED";
+    if (activated) statusTime_ = 3.0f;
 }
 
 void Game::cycleSelectedAttackMode() {
@@ -2174,7 +2496,10 @@ void Game::updateAttack(Object &source, float dt) {
                 playWorldUnitSound(source, soundId);
                 damageObject(*target, damage, source.spawnId);
             }
-            source.attackCooldown = std::max(0.1f, source.unit->reloadTime);
+            source.attackCooldown = std::max(
+                0.1f, modifiedUnitAttribute(
+                          source, 10,
+                          source.unit->reloadTime));
             source.animTime = 0;
             if (!target->active) {
                 const bool returnToPost =
@@ -2637,7 +2962,10 @@ void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float ta
         if (!object->hidden && object->unit->speed > 0) {
             slotSpacing =
                 std::max(slotSpacing, collisionRadius(*object) * 2.0f + 0.25f);
-            groupSpeed = std::min(groupSpeed, object->unit->speed);
+            groupSpeed = std::min(
+                groupSpeed,
+                modifiedUnitAttribute(
+                    *object, 5, object->unit->speed));
             centroidX += object->x;
             centroidY += object->y;
             mobileCount++;
@@ -3300,8 +3628,33 @@ void Game::update(float dt, const InputState &in) {
         }
     }
 
-    float scrollX = in.scrollX, scrollY = in.scrollY;
-    if (in.cursorVisible) {
+    if (in.toggleCheatMenu) {
+        cheatMenuOpen_ = !cheatMenuOpen_;
+        actionMenuOpen_ = false;
+        actionMenuObjectId_ = 0;
+    }
+    const bool consumeWorldInput = cheatMenuOpen_;
+    if (cheatMenuOpen_) {
+        if (in.menuUp)
+            cheatMenuSelection_ =
+                cheatMenuSelection_ == 0
+                    ? std::size(kCheats) - 1
+                    : cheatMenuSelection_ - 1;
+        if (in.menuDown)
+            cheatMenuSelection_ =
+                (cheatMenuSelection_ + 1) % std::size(kCheats);
+        if (in.menuActivate)
+            activateCheat(cheatMenuSelection_,
+                          in.screenW, in.screenH);
+        if (in.menuBack)
+            cheatMenuOpen_ = false;
+    }
+
+    float scrollX =
+        consumeWorldInput ? 0.0f : in.scrollX;
+    float scrollY =
+        consumeWorldInput ? 0.0f : in.scrollY;
+    if (in.cursorVisible && !consumeWorldInput) {
         constexpr float edge = 24.0f;
         if (in.pointerX <= edge)
             scrollX = std::min(scrollX, -(edge - in.pointerX) / edge);
@@ -3313,17 +3666,23 @@ void Game::update(float dt, const InputState &in) {
             scrollY = std::max(scrollY, (in.pointerY - (in.screenH - edge)) / edge);
     }
     const float scrollSpeed = 900.0f / zoom_;
-    camX_ += scrollX * scrollSpeed * dt - in.dragX / zoom_;
-    camY_ += scrollY * scrollSpeed * dt - in.dragY / zoom_;
+    camX_ += scrollX * scrollSpeed * dt -
+             (consumeWorldInput ? 0.0f : in.dragX / zoom_);
+    camY_ += scrollY * scrollSpeed * dt -
+             (consumeWorldInput ? 0.0f : in.dragY / zoom_);
     // Clamp the camera to the map diamond's bounding box.
     float minX = -mapSize_ * kTileHalfW, maxX = mapSize_ * kTileHalfW;
     float maxY = 2.0f * mapSize_ * kTileHalfH;
     camX_ = std::max(minX, std::min(maxX, camX_));
     camY_ = std::max(0.0f, std::min(maxY, camY_));
 
-    if (in.zoomStep > 0) zoom_ = std::min(1.0f, zoom_ * 1.25f);
-    if (in.zoomStep < 0) zoom_ = std::max(0.4f, zoom_ / 1.25f);
-    if (in.toggleDebug) debug_ = !debug_;
+    if (!consumeWorldInput) {
+        if (in.zoomStep > 0)
+            zoom_ = std::min(1.0f, zoom_ * 1.25f);
+        if (in.zoomStep < 0)
+            zoom_ = std::max(0.4f, zoom_ / 1.25f);
+        if (in.toggleDebug) debug_ = !debug_;
+    }
 
     updateTriggers(dt);
     struct ProductionSpawn {
@@ -3339,7 +3698,10 @@ void Game::update(float dt, const InputState &in) {
         if (!building.active ||
             building.productionQueue.empty())
             continue;
-        building.productionRemaining -= dt;
+        if (forceBuildCheat_ && building.player == localPlayer_)
+            building.productionRemaining = 0.0f;
+        else
+            building.productionRemaining -= dt;
         if (building.productionRemaining > 0) continue;
         const dat::Unit *unit =
             building.productionQueue.front();
@@ -3379,6 +3741,9 @@ void Game::update(float dt, const InputState &in) {
         building.productionRemaining =
             building.productionQueue.empty()
                 ? 0.0f
+                : forceBuildCheat_ &&
+                          building.player == localPlayer_
+                      ? 0.0f
                 : std::max(
                       0.1f,
                       (float)building.productionQueue.front()
@@ -3441,6 +3806,7 @@ void Game::update(float dt, const InputState &in) {
     selectionClickAge_ += dt;
     for (Object &object : objects_)
         if (object.selected && !isInspectable(object)) object.selected = false;
+    syncSelectionOrder();
 
     cursorVisible_ = in.cursorVisible;
     cursorX_ = in.pointerX;
@@ -3450,12 +3816,12 @@ void Game::update(float dt, const InputState &in) {
     boxStartY_ = in.boxStartY;
     boxEndX_ = in.boxEndX;
     boxEndY_ = in.boxEndY;
-    if (in.boxSelectCommit) {
+    if (!consumeWorldInput && in.boxSelectCommit) {
         actionMenuOpen_ = false;
         selectBox(in.boxStartX, in.boxStartY, in.boxEndX, in.boxEndY,
                   in.screenW, in.screenH);
     }
-    if (in.selectPressed) {
+    if (!consumeWorldInput && in.selectPressed) {
         if (actionMenuOpen_)
             handleActionMenuClick(
                 in.pointerX, in.pointerY, in.screenW, in.screenH);
@@ -3465,7 +3831,7 @@ void Game::update(float dt, const InputState &in) {
             selectAtScreen(in.pointerX, in.pointerY, in.screenW,
                            in.screenH);
     }
-    if (in.cycleAttackMode) {
+    if (!consumeWorldInput && in.cycleAttackMode) {
         if (actionMenuOpen_) {
             actionMenuOpen_ = false;
             actionMenuObjectId_ = 0;
@@ -3473,7 +3839,7 @@ void Game::update(float dt, const InputState &in) {
             cycleSelectedAttackMode();
         }
     }
-    if (in.commandPressed) {
+    if (!consumeWorldInput && in.commandPressed) {
         if (actionMenuOpen_) {
             actionMenuOpen_ = false;
             actionMenuObjectId_ = 0;
@@ -3482,7 +3848,7 @@ void Game::update(float dt, const InputState &in) {
                             in.screenW, in.screenH);
         }
     }
-    if (in.pointerTap) {
+    if (!consumeWorldInput && in.pointerTap) {
         if (actionMenuOpen_) {
             handleActionMenuClick(
                 in.pointerX, in.pointerY, in.screenW, in.screenH);
@@ -3499,7 +3865,8 @@ void Game::update(float dt, const InputState &in) {
             clearSelection();
     }
     cursorMode_ = CursorMode::Normal;
-    if (cursorVisible_ && !boxSelectActive_ && hasSelectedUnit())
+    if (!consumeWorldInput && cursorVisible_ &&
+        !boxSelectActive_ && hasSelectedUnit())
         cursorMode_ = enemyAtScreen(cursorX_, cursorY_, in.screenW, in.screenH)
                           ? CursorMode::Attack
                           : CursorMode::Move;
@@ -3715,10 +4082,12 @@ void Game::update(float dt, const InputState &in) {
             const auto &waypoint = o.path[o.pathIndex];
             float dx = waypoint[0] - o.x, dy = waypoint[1] - o.y;
             float dist = std::sqrt(dx * dx + dy * dy);
+            const float unitSpeed =
+                modifiedUnitAttribute(o, 5, o.unit->speed);
             float moveSpeed =
                 o.moveSpeedLimit > 0
-                    ? std::min(o.unit->speed, o.moveSpeedLimit)
-                    : o.unit->speed;
+                    ? std::min(unitSpeed, o.moveSpeedLimit)
+                    : unitSpeed;
             if (o.moveGroupId != 0 && o.moveGoalActive) {
                 const auto group = groupCohesion.find(o.moveGroupId);
                 if (group != groupCohesion.end() &&
@@ -4022,19 +4391,20 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     float panelHitPoints = 0, panelMaxHitPoints = 0;
     bool panelMixedUnits = false;
     bool mixedAttackModes = false;
-    for (const Object &object : objects_) {
-        if (!object.selected || !isInspectable(object)) continue;
+    const std::vector<Object *> panelSelection =
+        selectedObjectsInOrder(false);
+    for (const Object *object : panelSelection) {
         if (!panelObject)
-            panelObject = &object;
-        else if (panelObject->unit->id != object.unit->id)
+            panelObject = object;
+        else if (panelObject->unit->id != object->unit->id)
             panelMixedUnits = true;
         panelSelectionCount++;
-        panelHitPoints += object.hitPoints;
-        panelMaxHitPoints += object.maxHitPoints;
-        if (!canAttack(object)) continue;
+        panelHitPoints += object->hitPoints;
+        panelMaxHitPoints += object->maxHitPoints;
+        if (!canAttack(*object)) continue;
         if (!selectedAttacker)
-            selectedAttacker = &object;
-        else if (selectedAttacker->attackMode != object.attackMode)
+            selectedAttacker = object;
+        else if (selectedAttacker->attackMode != object->attackMode)
             mixedAttackModes = true;
     }
     const auto selectedStanceLabel = [&]() {
@@ -4576,8 +4946,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 1, (int)((commandsX - kGroupPortraitX - 8.0f) /
                          kGroupPortraitStepX));
             size_t iconIndex = 0;
-            for (const Object &object : objects_) {
-                if (!object.selected || !isInspectable(object)) continue;
+            for (const Object *object : panelSelection) {
                 const int column =
                     (int)(iconIndex % (size_t)columns);
                 const int row =
@@ -4599,7 +4968,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                            1.0f * invZoom, 107, 126, 140, 255);
 
                 const int civilization =
-                    civilizationForPlayer(object.player);
+                    civilizationForPlayer(object->player);
                 const int iconSet =
                     civilization >= 0 &&
                             (size_t)civilization <
@@ -4609,16 +4978,16 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                               .iconSet
                         : 1;
                 const int iconSlpBase =
-                    object.unit->type == dat::UT_Building
+                    object->unit->type == dat::UT_Building
                         ? kBuildingIconSlpBase
                         : kUnitIconSlpBase;
                 const SpriteSheet *icons = assets_.interfaceSheet(
                     iconSlpBase + std::max(1, iconSet) - 1);
                 const SpriteFrame *portrait =
-                    icons && object.unit->iconId >= 0 &&
-                            (size_t)object.unit->iconId <
+                    icons && object->unit->iconId >= 0 &&
+                            (size_t)object->unit->iconId <
                                 icons->frames.size()
-                        ? &icons->frames[(size_t)object.unit->iconId]
+                        ? &icons->frames[(size_t)object->unit->iconId]
                         : nullptr;
                 if (portrait && portrait->w > 0 &&
                     portrait->h > 0) {
@@ -4641,8 +5010,8 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 const float health = std::max(
                     0.0f,
                     std::min(1.0f,
-                             object.hitPoints /
-                                 std::max(1.0f, object.maxHitPoints)));
+                             object->hitPoints /
+                                 std::max(1.0f, object->maxHitPoints)));
                 const float barY = y + 32.0f * invZoom;
                 r.fillRect(x + 1.0f * invZoom, barY,
                            34.0f * invZoom, 4.0f * invZoom,
@@ -4991,7 +5360,80 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         }
     }
 
-    if (!currentInstruction_.empty()) {
+    if (cheatMenuOpen_) {
+        const float invZoom = 1.0f / zoom_;
+        const size_t cheatCount = std::size(kCheats);
+        const size_t rows =
+            std::min(cheatCount, kCheatMenuVisibleRows);
+        size_t first =
+            cheatMenuSelection_ >= rows
+                ? cheatMenuSelection_ - rows + 1
+                : 0;
+        if (first + rows > cheatCount)
+            first = cheatCount - rows;
+        const float height =
+            56.0f + rows * kCheatMenuRowHeight;
+        r.fillRect(
+            kCheatMenuX * invZoom, kCheatMenuY * invZoom,
+            kCheatMenuWidth * invZoom, height * invZoom,
+            4, 7, 14, 248);
+        r.fillRect(
+            kCheatMenuX * invZoom, kCheatMenuY * invZoom,
+            kCheatMenuWidth * invZoom, 3.0f * invZoom,
+            207, 190, 120, 255);
+        drawBitmapText(
+            r, {"GALACTIC BATTLEGROUNDS CHEATS"},
+            (kCheatMenuX + 12.0f) * invZoom,
+            (kCheatMenuY + 11.0f) * invZoom,
+            1.25f * invZoom, 238, 231, 190);
+        for (size_t row = 0; row < rows; row++) {
+            const size_t index = first + row;
+            const CheatEntry &cheat = kCheats[index];
+            const float y =
+                (kCheatMenuY + 38.0f +
+                 row * kCheatMenuRowHeight) *
+                invZoom;
+            const bool selected =
+                index == cheatMenuSelection_;
+            r.fillRect(
+                (kCheatMenuX + 6.0f) * invZoom, y,
+                (kCheatMenuWidth - 12.0f) * invZoom,
+                (kCheatMenuRowHeight - 3.0f) * invZoom,
+                selected ? 82 : 15,
+                selected ? 94 : 23,
+                selected ? 108 : 35, 255);
+            drawBitmapText(
+                r, {std::string(selected ? "> " : "  ") +
+                    cheat.code},
+                (kCheatMenuX + 12.0f) * invZoom,
+                y + 8.0f * invZoom,
+                0.95f * invZoom,
+                selected ? 255 : 220,
+                selected ? 238 : 226,
+                selected ? 174 : 230);
+            std::string effect = cheat.effect;
+            if (cheat.action == CheatAction::ForceBuild)
+                effect += forceBuildCheat_ ? " [ON]" : " [OFF]";
+            else if (cheat.action == CheatAction::ForceSight)
+                effect += forceSightCheat_ ? " [ON]" : " [OFF]";
+            else if (cheat.action == CheatAction::ForceExplore)
+                effect += forceExploreCheat_ ? " [ON]" : " [OFF]";
+            drawBitmapText(
+                r, {effect},
+                (kCheatMenuX + 355.0f) * invZoom,
+                y + 8.0f * invZoom,
+                0.85f * invZoom, 164, 205, 219);
+        }
+        drawBitmapText(
+            r, {"UP/DOWN: SELECT   X: ACTIVATE   O: CLOSE"},
+            (kCheatMenuX + 12.0f) * invZoom,
+            (kCheatMenuY + 43.0f +
+             rows * kCheatMenuRowHeight) *
+                invZoom,
+            0.95f * invZoom, 194, 202, 210);
+    }
+
+    if (!currentInstruction_.empty() && !cheatMenuOpen_) {
         const float boxWidthPixels = std::min(720.0f, screenW - 32.0f);
         const int textColumns = std::max(20, (int)((boxWidthPixels - 24.0f) / 12.0f));
         const std::vector<std::string> lines = wrapText(currentInstruction_, textColumns);

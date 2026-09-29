@@ -34,6 +34,7 @@ static int usage() {
             "  swgbtool unit <DataDir> <unitId>\n"
             "  swgbtool units <DataDir> <name-fragment>\n"
             "  swgbtool tech <DataDir> <techId>\n"
+            "  swgbtool techs <DataDir> <name-fragment>\n"
             "  swgbtool sound <DataDir> <soundId>\n"
             "  swgbtool drs    <file.drs>\n"
             "  swgbtool drs-slps <file.drs>\n"
@@ -166,6 +167,25 @@ static int cmdUnit(const char *dataDir, int id) {
                    assets.localizedString(unit.languageDllName).c_str(),
                    unit.name2.c_str(), unit.iconId, unit.oldPortraitPict,
                    unit.interfaceKind, unit.unitLine);
+            printf("  creation location %d button %u time %d costs",
+                   unit.trainLocationId, unit.buttonId, unit.trainTime);
+            for (const auto &cost : unit.costs)
+                if (cost.flag && cost.type >= 0)
+                    printf(" %d=%d", cost.type, cost.amount);
+            printf("; default task header %d\n", unit.defaultTaskId);
+            if ((size_t)unit.id <
+                assets.dat().unitHeaders.size()) {
+                for (const auto &task :
+                     assets.dat()
+                         .unitHeaders[(size_t)unit.id]
+                         .tasks)
+                    printf("    task %d type %d action %d class %d unit %d "
+                           "terrain %d default %u target %u build %u\n",
+                           task.id, task.taskType, task.actionType,
+                           task.classId, task.unitId, task.terrainId,
+                           task.isDefault, task.enableTargeting,
+                           task.pickForConstruction);
+            }
             const auto *attackGraphic = assets.dat().graphic(unit.attackGraphic);
             const auto *dyingGraphic = assets.dat().graphic(unit.dyingGraphic);
             const auto *projectile = unit.projectileUnitId >= 0 &&
@@ -294,6 +314,31 @@ static int cmdTech(const char *dataDir, int id) {
             printf("    type %u a %d b %d c %d d %.3f\n",
                    command.type, command.a, command.b,
                    command.c, command.d);
+    }
+    return 0;
+}
+
+static int cmdTechs(const char *dataDir, const char *fragment) {
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    std::string err;
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    for (size_t id = 0; id < assets.dat().techs.size(); id++) {
+        const dat::Tech &tech = assets.dat().techs[id];
+        const std::string localized =
+            assets.localizedString(tech.languageDllName);
+        if (tech.name.find(fragment) == std::string::npos &&
+            tech.name2.find(fragment) == std::string::npos &&
+            localized.find(fragment) == std::string::npos)
+            continue;
+        printf("%4zu location %d effect %d time %d civ %d button %u "
+               "'%s' '%s' '%s'\n",
+               id, tech.locationId, tech.effectId, tech.researchTime,
+               tech.civ, tech.buttonId, tech.name.c_str(),
+               tech.name2.c_str(), localized.c_str());
     }
     return 0;
 }
@@ -860,6 +905,8 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     input.pointerY = 195;
     input.selectPressed = true;
     game.update(0.001f, input);
+    const std::vector<uint32_t> firstClickOrder =
+        game.selectedObjectIds();
     const size_t soundsBeforeDoubleClick = acknowledgementSounds.size();
     input = {};
     input.pointerX = 340;
@@ -867,6 +914,11 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     input.selectPressed = true;
     game.update(0.001f, input);
     const size_t doubleSelected = game.selectedObjectCount();
+    const std::vector<uint32_t> doubleClickOrder =
+        game.selectedObjectIds();
+    const bool clickedUnitLeadsDoubleSelection =
+        !firstClickOrder.empty() && !doubleClickOrder.empty() &&
+        doubleClickOrder.front() == firstClickOrder.front();
     const bool doubleClickPlayedOnce =
         acknowledgementSounds.size() == soundsBeforeDoubleClick;
 
@@ -878,6 +930,8 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     input.boxEndY = 543;
     game.update(0.001f, input);
     const size_t boxSelected = game.selectedObjectCount();
+    const std::vector<uint32_t> boxSelectionOrder =
+        game.selectedObjectIds();
 
     input = {};
     input.pointerX = 118;
@@ -885,6 +939,12 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     input.selectPressed = true;
     game.update(0.001f, input);
     const size_t portraitSelected = game.selectedObjectCount();
+    const std::vector<uint32_t> portraitSelectionOrder =
+        game.selectedObjectIds();
+    const bool firstPortraitSelectedLeader =
+        !boxSelectionOrder.empty() &&
+        portraitSelectionOrder.size() == 1 &&
+        portraitSelectionOrder.front() == boxSelectionOrder.front();
 
     input = {};
     input.boxSelectCommit = true;
@@ -915,6 +975,21 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
          movementFrames++)
         game.update(1.0f / 30.0f, input);
 
+    const float foodBeforeCheat = game.resource(1, 0);
+    input = {};
+    input.toggleCheatMenu = true;
+    game.update(0.001f, input);
+    input = {};
+    input.menuActivate = true;
+    game.update(0.001f, input);
+    const float foodAfterCheat = game.resource(1, 0);
+    const bool forceFoodGranted =
+        std::abs(foodAfterCheat - foodBeforeCheat - 1000.0f) <
+        0.01f;
+    input = {};
+    input.menuBack = true;
+    game.update(0.001f, input);
+
     if (out) {
         game.render(renderer, 960, 544);
         if (!renderer.savePng(out)) {
@@ -924,13 +999,17 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     }
     const MovementStats movement = game.movementStats();
     printf("controls: single %zu, double %zu, box %zu, portrait %zu, commanded %zu, sounds %zu, move %.2fs, "
-           "stance changes %zu, single audio %d/%d, quiet startup %d, "
+           "leader double/portrait %d/%d, stance changes %zu, single audio %d/%d, quiet startup %d, cheat %d, "
            "pending goals %zu/%zu, overlaps %zu (%u:u%d:s%d/%u:u%d:s%d), terrain violations %zu\n",
            singleSelected, doubleSelected, boxSelected, portraitSelected,
            commanded, acknowledgementSounds.size(),
-           movementFrames / 30.0f, attackModeChanges,
+           movementFrames / 30.0f,
+           clickedUnitLeadsDoubleSelection ? 1 : 0,
+           firstPortraitSelectedLeader ? 1 : 0,
+           attackModeChanges,
            doubleClickPlayedOnce ? 1 : 0, movePlayedOnce ? 1 : 0,
            quietStartup ? 1 : 0,
+           forceFoodGranted ? 1 : 0,
            movement.selectedPendingMoveGoals, movement.pendingMoveGoals,
            movement.overlappingPairs,
            movement.firstOverlapObject, movement.firstOverlapUnit,
@@ -941,9 +1020,11 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     if (singleSelected != 1 || doubleSelected <= 1 ||
         boxSelected < doubleSelected || portraitSelected != 1 ||
         commanded == 0 || acknowledgementSounds.size() < 4 ||
+        !clickedUnitLeadsDoubleSelection ||
+        !firstPortraitSelectedLeader ||
         attackModeChanges != 1 ||
         !doubleClickPlayedOnce || !movePlayedOnce ||
-        !quietStartup ||
+        !quietStartup || !forceFoodGranted ||
         movement.selectedPendingMoveGoals != 0 ||
         movement.overlappingPairs != 0 ||
         movement.terrainViolations != 0) {
@@ -1289,6 +1370,7 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "unit") && argc >= 4) return cmdUnit(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "units") && argc >= 4) return cmdUnits(argv[2], argv[3]);
     if (!strcmp(cmd, "tech") && argc >= 4) return cmdTech(argv[2], atoi(argv[3]));
+    if (!strcmp(cmd, "techs") && argc >= 4) return cmdTechs(argv[2], argv[3]);
     if (!strcmp(cmd, "sound") && argc >= 4) return cmdSound(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "drs")) return cmdDrs(argv[2]);
     if (!strcmp(cmd, "drs-slps")) return cmdDrsSlps(argv[2]);

@@ -158,6 +158,7 @@ int main() {
         float touchStartX = 0, touchStartY = 0, lastTx = 0, lastTy = 0;
         float stickBoxStartX = 0, stickBoxStartY = 0;
         float cursorX = kScreenW * 0.5f, cursorY = kScreenH * 0.5f;
+        int menuStickY = 0;
         uint64_t last = sceKernelGetProcessTimeWide();
         uint64_t statT = last;
         int frames = 0;
@@ -177,6 +178,22 @@ int main() {
             swgb::InputState in;
             in.screenW = kScreenW;
             in.screenH = kScreenH;
+            const bool cheatChord =
+                (pressed & SCE_CTRL_SELECT) &&
+                (pad.buttons & SCE_CTRL_LTRIGGER) &&
+                (pad.buttons & SCE_CTRL_RTRIGGER);
+            in.toggleCheatMenu = cheatChord;
+            in.menuUp = (pressed & SCE_CTRL_UP) != 0;
+            in.menuDown = (pressed & SCE_CTRL_DOWN) != 0;
+            in.menuActivate = (pressed & SCE_CTRL_CROSS) != 0;
+            in.menuBack = (pressed & SCE_CTRL_CIRCLE) != 0;
+            const int currentMenuStickY =
+                pad.ly < 64 ? -1 : pad.ly > 192 ? 1 : 0;
+            if (currentMenuStickY < 0 && menuStickY >= 0)
+                in.menuUp = true;
+            if (currentMenuStickY > 0 && menuStickY <= 0)
+                in.menuDown = true;
+            menuStickY = currentMenuStickY;
             in.scrollX = axis(pad.lx);
             in.scrollY = axis(pad.ly);
             if (pad.buttons & SCE_CTRL_LEFT) in.scrollX = -1;
@@ -185,7 +202,8 @@ int main() {
             if (pad.buttons & SCE_CTRL_DOWN) in.scrollY = 1;
             if (pressed & SCE_CTRL_RTRIGGER) in.zoomStep = 1;
             if (pressed & SCE_CTRL_LTRIGGER) in.zoomStep = -1;
-            if (pressed & SCE_CTRL_SELECT) in.toggleDebug = true;
+            if ((pressed & SCE_CTRL_SELECT) && !cheatChord)
+                in.toggleDebug = true;
 
             if (pressed & SCE_CTRL_SQUARE) {
                 stickBoxArmed = true;
