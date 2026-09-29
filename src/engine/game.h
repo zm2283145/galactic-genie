@@ -43,6 +43,8 @@ struct FrameStats {
 
 struct MovementStats {
     size_t pathingObjects = 0;
+    size_t pendingMoveGoals = 0;
+    size_t selectedPendingMoveGoals = 0;
     size_t overlappingPairs = 0;
     size_t terrainViolations = 0;
     size_t staticObstructionViolations = 0;
@@ -71,6 +73,8 @@ struct MovingObjectInfo {
     float targetX = 0, targetY = 0;
     float waypointX = 0, waypointY = 0;
     float blockedTime = 0;
+    bool moveGoalActive = false;
+    bool selected = false;
 };
 
 class Game {
@@ -142,14 +146,22 @@ private:
         std::vector<std::array<float, 2>> path;
         size_t pathIndex = 0;
         float blockedTime = 0;
+        float moveRetryTime = 0;
+        float moveStallTime = 0;
+        float moveBestDistance = 0;
         float attackCooldown = 0;
         float attackRepathTime = 0;
         float attackApproachAngle = 0;
         float autoAcquireTime = 0;
         uint32_t attackTargetId = 0;
+        uint32_t moveGroupId = 0;
+        uint8_t attackSlotRetries = 0;
+        uint8_t moveSpreadRetries = 0;
         float homeX = 0, homeY = 0;
+        float moveAnchorX = 0, moveAnchorY = 0;
         AttackMode attackMode = AttackMode::Defensive;
         bool attackAutomatic = false;
+        bool moveGoalActive = false;
         bool wander = true;
         bool drawShadows = true;
         bool active = true;
@@ -305,6 +317,7 @@ private:
     std::string currentInstruction_;
     float instructionTime_ = 0;
     uint32_t nextSpawnId_ = 1;
+    uint32_t nextMoveGroupId_ = 1;
     int difficulty_ = 2;
     int victoryState_ = -1;
     std::set<int> warnedEffects_;

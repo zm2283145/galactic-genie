@@ -744,13 +744,16 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     input.pointerX = 340;
     input.pointerY = 195;
     input.selectPressed = true;
-    game.update(0.1f, input);
+    game.update(0.001f, input);
+    const size_t soundsBeforeDoubleClick = acknowledgementSounds.size();
     input = {};
     input.pointerX = 340;
     input.pointerY = 195;
     input.selectPressed = true;
-    game.update(0.1f, input);
+    game.update(0.001f, input);
     const size_t doubleSelected = game.selectedObjectCount();
+    const bool doubleClickPlayedOnce =
+        acknowledgementSounds.size() == soundsBeforeDoubleClick;
 
     input = {};
     input.boxSelectCommit = true;
@@ -770,10 +773,16 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     input.pointerX = 620;
     input.pointerY = 360;
     input.commandPressed = true;
+    const size_t soundsBeforeMove = acknowledgementSounds.size();
     game.update(0.001f, input);
+    const bool movePlayedOnce =
+        acknowledgementSounds.size() == soundsBeforeMove + 1;
     const size_t commanded = game.selectedMovingObjectCount();
     input = {};
-    for (int i = 0; i < 30; i++) game.update(1.0f / 30.0f, input);
+    for (int i = 0;
+         i < 1800 && game.movementStats().selectedPendingMoveGoals > 0;
+         i++)
+        game.update(1.0f / 30.0f, input);
 
     if (out) {
         game.render(renderer, 960, 544);
@@ -784,15 +793,29 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     }
     const MovementStats movement = game.movementStats();
     printf("controls: single %zu, double %zu, box %zu, commanded %zu, sounds %zu, "
-           "stance changes %zu, overlaps %zu, terrain violations %zu\n",
+           "stance changes %zu, single audio %d/%d, pending goals %zu/%zu, overlaps %zu, "
+           "terrain violations %zu\n",
            singleSelected, doubleSelected, boxSelected, commanded,
-           acknowledgementSounds.size(), attackModeChanges, movement.overlappingPairs,
+           acknowledgementSounds.size(), attackModeChanges,
+           doubleClickPlayedOnce ? 1 : 0, movePlayedOnce ? 1 : 0,
+           movement.selectedPendingMoveGoals, movement.pendingMoveGoals,
+           movement.overlappingPairs,
            movement.terrainViolations);
     if (singleSelected != 1 || doubleSelected <= 1 || boxSelected < doubleSelected ||
         commanded == 0 || acknowledgementSounds.size() < 5 ||
         attackModeChanges != 1 ||
+        !doubleClickPlayedOnce || !movePlayedOnce ||
+        movement.selectedPendingMoveGoals != 0 ||
         movement.overlappingPairs != 0 ||
         movement.terrainViolations != 0) {
+        for (const MovingObjectInfo &object : game.movingObjects())
+            if (object.selected && object.moveGoalActive)
+                fprintf(stderr,
+                        "  pending object %u unit %d at %.2f,%.2f -> %.2f,%.2f "
+                        "via %.2f,%.2f blocked %.2f\n",
+                        object.spawnId, object.unitId, object.x, object.y,
+                        object.targetX, object.targetY, object.waypointX,
+                        object.waypointY, object.blockedTime);
         fprintf(stderr, "error: control validation failed\n");
         return 1;
     }
@@ -858,7 +881,10 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
     input.pointerY = screenY;
     input.commandPressed = true;
     input.cursorVisible = true;
+    const size_t soundsBeforeAttack = acknowledgementSounds.size();
     game.update(0.001f, input);
+    const bool attackPlayedOnce =
+        acknowledgementSounds.size() == soundsBeforeAttack + 1;
 
     input = {};
     constexpr float step = 1.0f / 30.0f;
@@ -987,7 +1013,7 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            "kills %zu, projectiles %zu, paths %zu, sounds %zu, elapsed %.2f; "
            "building %.0f -> %.0f selected %d, remains %d -> %zu, overlaps %zu, "
            "building destroyed/remains/decayed %d/%d/%d, edge scroll %d, "
-           "automatic/retaliation/armed %zu/%zu/%zu\n",
+           "attack audio %d, automatic/retaliation/armed %zu/%zu/%zu\n",
            targetId, initialHitPoints, finalHitPoints,
            combat.ordersIssued, combat.attacksLanded, combat.unitsKilled,
            combat.projectilesLaunched, combat.attackPathsComputed,
@@ -996,6 +1022,7 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            sawRemains ? 1 : 0, combat.activeRemains, movement.overlappingPairs,
            buildingDestroyed ? 1 : 0, sawBuildingRemains ? 1 : 0,
            remainsDecayed ? 1 : 0, edgeScrolled ? 1 : 0,
+           attackPlayedOnce ? 1 : 0,
            combat.automaticTargetsAcquired, combat.retaliationOrders,
            combat.armedBuildingsEngaged);
     const bool heardBlaster =
@@ -1011,6 +1038,7 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         !buildingSelected || !sawRemains || combat.activeRemains != 0 ||
         movement.overlappingPairs != 0 || !buildingDestroyed ||
         !sawBuildingRemains || !remainsDecayed || !edgeScrolled ||
+        !attackPlayedOnce ||
         combat.automaticTargetsAcquired == 0 ||
         combat.retaliationOrders == 0) {
         fprintf(stderr, "error: combat validation failed\n");

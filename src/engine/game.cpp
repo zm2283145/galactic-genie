@@ -474,8 +474,8 @@ Game::Object *Game::addObject(const dat::Unit *unit, int player, float x, float 
     Object object;
     object.unit = unit;
     object.player = player;
-    object.x = object.homeX = object.targetX = x;
-    object.y = object.homeY = object.targetY = y;
+    object.x = object.homeX = object.moveAnchorX = object.targetX = x;
+    object.y = object.homeY = object.moveAnchorY = object.targetY = y;
     object.hitPoints = object.maxHitPoints = std::max(1, (int)unit->hitPoints);
     object.facing = facing;
     object.spawnId = spawnId;
@@ -837,6 +837,10 @@ MovementStats Game::movementStats() const {
             object.unit->type == dat::UT_Building)
             continue;
         if (object.state == State::Walk) stats.pathingObjects++;
+        if (object.moveGoalActive) {
+            stats.pendingMoveGoals++;
+            if (object.selected) stats.selectedPendingMoveGoals++;
+        }
         if (!terrainPassable(object, object.x, object.y)) stats.terrainViolations++;
         else if (!positionPassable(object, object.x, object.y, false))
             stats.staticObstructionViolations++;
@@ -898,7 +902,9 @@ bool Game::objectScreenPosition(uint32_t spawnId, int screenW, int screenH,
 std::vector<MovingObjectInfo> Game::movingObjects() const {
     std::vector<MovingObjectInfo> result;
     for (const Object &object : objects_) {
-        if (!object.active || object.hidden || object.state != State::Walk) continue;
+        if (!object.active || object.hidden ||
+            (object.state != State::Walk && !object.moveGoalActive))
+            continue;
         MovingObjectInfo info{object.spawnId, object.unit->id, object.player, object.x, object.y,
                               object.targetX, object.targetY};
         if (object.pathIndex < object.path.size()) {
@@ -906,6 +912,8 @@ std::vector<MovingObjectInfo> Game::movingObjects() const {
             info.waypointY = object.path[object.pathIndex][1];
         }
         info.blockedTime = object.blockedTime;
+        info.moveGoalActive = object.moveGoalActive;
+        info.selected = object.selected;
         result.push_back(info);
     }
     return result;
@@ -1144,7 +1152,8 @@ void Game::selectAtScreen(float screenX, float screenY, int screenW, int screenH
     } else if (object) {
         object->selected = true;
     }
-    if (object && isSelectable(*object) && playUnitSound_ && object->unit->selectionSound >= 0)
+    if (!doubleClick && object && isSelectable(*object) && playUnitSound_ &&
+        object->unit->selectionSound >= 0)
         playUnitSound_(object->unit->selectionSound, civilizationForPlayer(object->player));
     lastSelectionUnitId_ = object ? object->unit->id : -1;
     lastSelectionX_ = screenX;
@@ -1188,13 +1197,36 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
             if (!canAttack(*source) || !isEnemy(*source, *enemy)) continue;
             else
                 attackers.push_back(source);
+        float centroidX = 0, centroidY = 0;
+        float approachSpacing = 0.18f;
+        for (const Object *source : attackers) {
+            centroidX += source->x;
+            centroidY += source->y;
+            const float contact =
+                collisionRadius(*source) + collisionRadius(*enemy) + 0.08f;
+            float approachDistance =
+                std::max(contact, attackRange(*source, *enemy) * 0.8f);
+            if (source->unit->minRange > 0)
+                approachDistance =
+                    std::max(approachDistance, source->unit->minRange + 0.2f);
+            const float separation = collisionRadius(*source) * 2.0f + 0.12f;
+            const float ratio =
+                std::min(0.95f, separation / std::max(0.1f, approachDistance * 2.0f));
+            approachSpacing =
+                std::max(approachSpacing, 2.0f * std::asin(ratio));
+        }
+        approachSpacing = std::min(0.8f, approachSpacing);
+        const float baseAngle =
+            attackers.empty()
+                ? 0
+                : std::atan2(centroidY / attackers.size() - enemy->y,
+                             centroidX / attackers.size() - enemy->x);
         for (size_t i = 0; i < attackers.size(); i++) {
             Object *source = attackers[i];
-            const float naturalAngle =
-                std::atan2(source->y - enemy->y, source->x - enemy->x);
             const float offset =
-                ((float)i - ((float)attackers.size() - 1.0f) * 0.5f) * 0.18f;
-            issueAttack(*source, *enemy, naturalAngle + offset);
+                ((float)i - ((float)attackers.size() - 1.0f) * 0.5f) *
+                approachSpacing;
+            issueAttack(*source, *enemy, baseAngle + offset);
             if (!acknowledgement) acknowledgement = source;
         }
         if (!acknowledgement) return;
@@ -1258,6 +1290,9 @@ void Game::issueAttack(Object &source, Object &target, float approachAngle,
     source.attackTargetId = target.spawnId;
     source.attackRepathTime = 0;
     source.attackApproachAngle = approachAngle;
+    source.attackSlotRetries = 0;
+    source.moveGoalActive = false;
+    source.moveGroupId = 0;
     source.attackAutomatic = automatic;
     source.path.clear();
     source.pathIndex = 0;
@@ -1302,12 +1337,20 @@ void Game::finishAttack(Object &source, bool returnToPost) {
         return;
     const float dx = source.homeX - source.x;
     const float dy = source.homeY - source.y;
-    if (dx * dx + dy * dy > 0.04f) issueMove(source, source.homeX, source.homeY);
+    if (dx * dx + dy * dy > 0.04f) {
+        source.moveGoalActive = true;
+        source.moveRetryTime = 0;
+        source.moveAnchorX = source.homeX;
+        source.moveAnchorY = source.homeY;
+        source.moveBestDistance = std::sqrt(dx * dx + dy * dy);
+        issueMove(source, source.homeX, source.homeY);
+    }
 }
 
 void Game::acquireAutomaticTarget(Object &source) {
     if (!canAttack(source) || source.attackTargetId ||
         source.attackMode == AttackMode::Passive || source.state != State::Idle ||
+        source.moveGoalActive ||
         mobileObjectGridWidth_ <= 0 ||
         combatObjectCells_.size() !=
             (size_t)mobileObjectGridWidth_ * mobileObjectGridWidth_)
@@ -1340,8 +1383,10 @@ void Game::acquireAutomaticTarget(Object &source) {
                 bestDistanceSquared = distanceSquared;
             }
     if (!best) return;
+    const float jitter =
+        ((float)((source.spawnId * 2654435761u) >> 29) - 3.5f) * 0.10f;
     const float approachAngle =
-        std::atan2(source.y - best->y, source.x - best->x);
+        std::atan2(source.y - best->y, source.x - best->x) + jitter;
     issueAttack(source, *best, approachAngle, true);
     automaticTargetsAcquired_++;
     if (source.unit->type == dat::UT_Building) armedBuildingsEngaged_++;
@@ -1845,6 +1890,7 @@ bool Game::issueMove(Object &object, float targetX, float targetY) {
     if (dx * dx + dy * dy < 0.01f) {
         object.path.clear();
         object.state = State::Idle;
+        object.moveGoalActive = false;
         return true;
     }
     bool direct = true;
@@ -1872,15 +1918,31 @@ bool Game::issueMove(Object &object, float targetX, float targetY) {
 }
 
 void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float targetY) {
-    float slotSpacing = 0.6f;
+    struct ReservedDestination {
+        float x, y, radius;
+    };
+    std::vector<ReservedDestination> reserved;
+    reserved.reserve(targets.size());
+    const uint32_t moveGroupId = nextMoveGroupId_++;
+    if (nextMoveGroupId_ == 0) nextMoveGroupId_ = 1;
+    float slotSpacing = 0.75f;
     for (const Object *object : targets)
         if (!object->hidden && object->unit->speed > 0)
-            slotSpacing = std::max(slotSpacing, collisionRadius(*object) * 2.0f + 0.1f);
+            slotSpacing =
+                std::max(slotSpacing, collisionRadius(*object) * 2.0f + 0.25f);
     size_t slot = 0;
-    for (Object *object : targets) {
+    std::vector<Object *> remaining = targets;
+    std::sort(remaining.begin(), remaining.end(),
+              [&](const Object *a, const Object *b) {
+                  const float adx = a->x - targetX, ady = a->y - targetY;
+                  const float bdx = b->x - targetX, bdy = b->y - targetY;
+                  return adx * adx + ady * ady < bdx * bdx + bdy * bdy;
+              });
+    for (Object *object : remaining) {
         if (object->hidden || object->unit->speed <= 0) continue;
         object->attackTargetId = 0;
         object->attackAutomatic = false;
+        object->moveGroupId = moveGroupId;
         float slotX = targetX, slotY = targetY;
         if (slot > 0) {
             const int ring =
@@ -1902,9 +1964,71 @@ void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float ta
             slotX += sx * slotSpacing;
             slotY += sy * slotSpacing;
         }
-        object->homeX = slotX;
-        object->homeY = slotY;
-        issueMove(*object, slotX, slotY);
+        const float radius = collisionRadius(*object);
+        auto destinationOpen = [&](float x, float y) {
+            if (!positionPassable(*object, x, y, false)) return false;
+            for (const ReservedDestination &other : reserved) {
+                const float dx = x - other.x, dy = y - other.y;
+                const float separation = radius + other.radius + 0.08f;
+                if (dx * dx + dy * dy < separation * separation) return false;
+            }
+            for (uint32_t index : mobileObjectIndices_) {
+                const Object &other = objects_[(size_t)index];
+                if (!other.active || other.hidden || &other == object ||
+                    std::find(targets.begin(), targets.end(), &other) != targets.end() ||
+                    isAirUnit(*object) != isAirUnit(other))
+                    continue;
+                const float dx = x - other.x, dy = y - other.y;
+                const float separation =
+                    radius + collisionRadius(other) + 0.08f;
+                if (dx * dx + dy * dy < separation * separation) return false;
+            }
+            return true;
+        };
+        if (!destinationOpen(slotX, slotY)) {
+            bool found = false;
+            constexpr float searchStep = 0.35f;
+            for (int ring = 1; ring <= 24 && !found; ring++) {
+                const int samples = std::max(8, ring * 8);
+                const float startAngle =
+                    (object->spawnId % 16) * (2.0f * kPi / 16.0f);
+                for (int sample = 0; sample < samples; sample++) {
+                    const float angle =
+                        startAngle + sample * (2.0f * kPi / samples);
+                    const float candidateX =
+                        slotX + std::cos(angle) * ring * searchStep;
+                    const float candidateY =
+                        slotY + std::sin(angle) * ring * searchStep;
+                    if (!destinationOpen(candidateX, candidateY)) continue;
+                    slotX = candidateX;
+                    slotY = candidateY;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                object->moveGoalActive = false;
+                object->moveGroupId = 0;
+                object->state = State::Idle;
+                slot++;
+                continue;
+            }
+        }
+        reserved.push_back({slotX, slotY, radius});
+        object->homeX = object->moveAnchorX = slotX;
+        object->homeY = object->moveAnchorY = slotY;
+        object->moveGoalActive = true;
+        object->moveRetryTime = 0;
+        object->moveStallTime = 0;
+        object->moveSpreadRetries = 0;
+        const float goalDx = slotX - object->x;
+        const float goalDy = slotY - object->y;
+        object->moveBestDistance =
+            std::sqrt(goalDx * goalDx + goalDy * goalDy);
+        if (!issueMove(*object, slotX, slotY)) {
+            reserved.pop_back();
+            object->moveGoalActive = false;
+        }
         slot++;
     }
 }
@@ -2334,6 +2458,82 @@ void Game::update(float dt, const InputState &in) {
                           : CursorMode::Move;
 
     std::uniform_real_distribution<float> r01(0, 1);
+    struct CooperativeMove {
+        size_t index;
+        float x, y;
+    };
+    std::vector<CooperativeMove> cooperativeMoves;
+    std::vector<Object *> cooperativeChain;
+    auto spreadBlockedMoveGoal = [&](Object &object) {
+        const float originalX = object.moveAnchorX;
+        const float originalY = object.moveAnchorY;
+        constexpr float searchStep = 0.35f;
+        const uint8_t retry = object.moveSpreadRetries++;
+        for (int ring = 1; ring <= 8; ring++) {
+            const int samples = ring * 8;
+            const float startAngle =
+                (object.spawnId % 16) * (2.0f * kPi / 16.0f) +
+                retry * 2.39996323f;
+            for (int sample = 0; sample < samples; sample++) {
+                const float angle =
+                    startAngle + sample * (2.0f * kPi / samples);
+                const float candidateX =
+                    originalX + std::cos(angle) * ring * searchStep;
+                const float candidateY =
+                    originalY + std::sin(angle) * ring * searchStep;
+                if (!positionPassable(object, candidateX, candidateY, true))
+                    continue;
+                object.targetX = object.homeX = candidateX;
+                object.targetY = object.homeY = candidateY;
+                object.moveStallTime = 0;
+                const float dx = candidateX - object.x;
+                const float dy = candidateY - object.y;
+                object.moveBestDistance = std::sqrt(dx * dx + dy * dy);
+                issueMove(object, candidateX, candidateY);
+                object.moveGoalActive = true;
+                return true;
+            }
+        }
+        object.moveStallTime = 0;
+        return false;
+    };
+    auto cooperativeMove = [&](auto &&self, Object &object, float nextX,
+                               float nextY, int depth) -> bool {
+        if (depth >= 12 || !positionPassable(object, nextX, nextY, false))
+            return false;
+        if (std::find(cooperativeChain.begin(), cooperativeChain.end(), &object) !=
+            cooperativeChain.end())
+            return false;
+        cooperativeChain.push_back(&object);
+        const size_t objectIndex = (size_t)(&object - objects_.data());
+        const float dx = nextX - object.x, dy = nextY - object.y;
+        const float radius = collisionRadius(object);
+        for (uint32_t index : mobileObjectIndices_) {
+            Object &other = objects_[(size_t)index];
+            if (&other == &object || !other.active || other.hidden ||
+                isAirUnit(other) != isAirUnit(object))
+                continue;
+            const float otherDx = nextX - other.x;
+            const float otherDy = nextY - other.y;
+            const float separation =
+                radius + collisionRadius(other) + 0.04f;
+            if (otherDx * otherDx + otherDy * otherDy >=
+                separation * separation)
+                continue;
+            if (object.moveGroupId == 0 ||
+                other.moveGroupId != object.moveGroupId ||
+                other.attackTargetId ||
+                !self(self, other, other.x + dx, other.y + dy, depth + 1)) {
+                cooperativeChain.pop_back();
+                return false;
+            }
+        }
+        cooperativeMoves.push_back({objectIndex, object.x, object.y});
+        object.x = nextX;
+        object.y = nextY;
+        cooperativeChain.pop_back();
+        return true;
+    };
     for (Object &o : objects_) {
         if (!o.active) continue;
         o.animTime += dt;
@@ -2346,6 +2546,15 @@ void Game::update(float dt, const InputState &in) {
         o.stateTime -= dt;
         if (o.state == State::Attack) continue;
         if (o.state == State::Idle) {
+            if (o.moveGoalActive) {
+                o.moveRetryTime -= dt;
+                if (o.moveRetryTime <= 0) {
+                    o.moveRetryTime =
+                        0.35f + (o.spawnId % 5) * 0.04f;
+                    issueMove(o, o.targetX, o.targetY);
+                }
+                continue;
+            }
             if (!o.wander) continue;
             if (o.stateTime <= 0) {
                 // Wander to a nearby point around home.
@@ -2354,6 +2563,7 @@ void Game::update(float dt, const InputState &in) {
                     std::max(1.0f, std::min(mapSize_ - 2.0f, o.homeX + std::cos(a) * d));
                 const float targetY =
                     std::max(1.0f, std::min(mapSize_ - 2.0f, o.homeY + std::sin(a) * d));
+                o.moveGroupId = 0;
                 issueMove(o, targetX, targetY);
                 o.wander = true;
             }
@@ -2362,15 +2572,37 @@ void Game::update(float dt, const InputState &in) {
                 o.state = State::Idle;
                 o.stateTime = 1.5f + r01(rng_) * 5.0f;
                 o.animTime = 0;
+                const float goalDx = o.targetX - o.x;
+                const float goalDy = o.targetY - o.y;
+                const float arrival =
+                    std::max(0.20f, collisionRadius(o) * 0.75f);
+                if (o.moveGoalActive &&
+                    goalDx * goalDx + goalDy * goalDy <= arrival * arrival)
+                    o.moveGoalActive = false;
                 continue;
             }
             const auto &waypoint = o.path[o.pathIndex];
             float dx = waypoint[0] - o.x, dy = waypoint[1] - o.y;
             float dist = std::sqrt(dx * dx + dy * dy);
-            float step = o.unit->speed * dt;
+            const float step = o.unit->speed * dt;
             const float scale = dist <= step || dist <= 0.0001f ? 1.0f : step / dist;
             float nextX = o.x + dx * scale, nextY = o.y + dy * scale;
             bool moved = positionPassable(o, nextX, nextY, true);
+            bool movedCooperatively = false;
+            if (!moved) {
+                cooperativeMoves.clear();
+                cooperativeChain.clear();
+                movedCooperatively =
+                    cooperativeMove(cooperativeMove, o, nextX, nextY, 0);
+                moved = movedCooperatively;
+                if (!movedCooperatively)
+                    for (auto it = cooperativeMoves.rbegin();
+                         it != cooperativeMoves.rend(); ++it) {
+                        Object &rollback = objects_[it->index];
+                        rollback.x = it->x;
+                        rollback.y = it->y;
+                    }
+            }
             if (!moved && std::abs(dx) > 0.0001f)
                 moved = positionPassable(o, nextX, o.y, true), nextY = o.y;
             if (!moved && std::abs(dy) > 0.0001f) {
@@ -2381,8 +2613,9 @@ void Game::update(float dt, const InputState &in) {
             if (!moved && dist > 0.0001f) {
                 const float directionX = dx / dist, directionY = dy / dist;
                 const float handedness = (o.spawnId & 1u) ? 1.0f : -1.0f;
-                static constexpr float turns[4] = {
-                    0.78539816f, -0.78539816f, 1.57079633f, -1.57079633f};
+                static constexpr float turns[8] = {
+                    0.39269908f, -0.39269908f, 0.78539816f, -0.78539816f,
+                    1.17809725f, -1.17809725f, 1.57079633f, -1.57079633f};
                 for (float turn : turns) {
                     const float angle = turn * handedness;
                     const float sidestepX =
@@ -2398,29 +2631,85 @@ void Game::update(float dt, const InputState &in) {
                 }
             }
             if (moved) {
-                o.x = nextX;
-                o.y = nextY;
+                if (!movedCooperatively) {
+                    o.x = nextX;
+                    o.y = nextY;
+                }
                 o.facing = std::atan2(dy, dx);
-                o.blockedTime = 0;
+                const float newGoalDx = o.targetX - o.x;
+                const float newGoalDy = o.targetY - o.y;
+                const float newGoalDistance =
+                    std::sqrt(newGoalDx * newGoalDx + newGoalDy * newGoalDy);
+                if (newGoalDistance + 0.05f < o.moveBestDistance) {
+                    o.moveBestDistance = newGoalDistance;
+                    o.blockedTime = 0;
+                    o.moveStallTime = 0;
+                } else {
+                    o.moveStallTime += dt;
+                }
+                if (o.moveGoalActive && !o.attackTargetId &&
+                    o.moveStallTime >= 1.25f) {
+                    spreadBlockedMoveGoal(o);
+                    continue;
+                }
                 if (dist <= step || dist <= 0.0001f) {
                     o.pathIndex++;
                     if (o.pathIndex >= o.path.size()) {
                         o.state = State::Idle;
                         o.stateTime = 1.5f + r01(rng_) * 5.0f;
                         o.animTime = 0;
+                        const float goalDx = o.targetX - o.x;
+                        const float goalDy = o.targetY - o.y;
+                        const float arrival =
+                            std::max(0.20f, collisionRadius(o) * 0.75f);
+                        if (o.moveGoalActive &&
+                            goalDx * goalDx + goalDy * goalDy <= arrival * arrival)
+                            o.moveGoalActive = false;
                     }
                 }
             } else {
                 o.blockedTime += dt;
+                if (o.moveGoalActive && !o.attackTargetId)
+                    o.moveStallTime += dt;
                 const float targetDx = o.targetX - o.x, targetDy = o.targetY - o.y;
+                const float arrival =
+                    std::max(0.20f, collisionRadius(o) * 0.75f);
+                const bool reachedMoveGoal =
+                    o.moveGoalActive &&
+                    targetDx * targetDx + targetDy * targetDy <=
+                        arrival * arrival;
+                const bool reachedLooseGoal =
+                    !o.moveGoalActive && !o.attackTargetId &&
+                    targetDx * targetDx + targetDy * targetDy <= 2.25f;
                 if (o.blockedTime >= 0.5f &&
-                    targetDx * targetDx + targetDy * targetDy <= 2.25f) {
+                    (reachedMoveGoal || reachedLooseGoal)) {
                     o.state = State::Idle;
                     o.stateTime = 1.5f + r01(rng_) * 5.0f;
                     o.animTime = 0;
+                    if (reachedMoveGoal) o.moveGoalActive = false;
                     continue;
                 }
                 if (o.blockedTime >= 1.0f) {
+                    if (o.attackTargetId) {
+                        o.attackSlotRetries++;
+                        const float handedness =
+                            (o.spawnId & 1u) ? 1.0f : -1.0f;
+                        const float direction =
+                            (o.attackSlotRetries & 1u) ? 1.0f : -1.0f;
+                        const float magnitude =
+                            0.28f * (1.0f + o.attackSlotRetries / 2u);
+                        o.attackApproachAngle +=
+                            handedness * direction * magnitude;
+                        o.path.clear();
+                        o.pathIndex = 0;
+                        o.state = State::Idle;
+                        o.blockedTime = 0;
+                        o.attackRepathTime = 0;
+                        continue;
+                    }
+                    if (o.moveGoalActive &&
+                        spreadBlockedMoveGoal(o))
+                        continue;
                     const bool wander = o.wander;
                     issueMove(o, o.targetX, o.targetY);
                     o.wander = wander;
