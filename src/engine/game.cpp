@@ -25,6 +25,22 @@ constexpr size_t kCursorAttack = 4;
 constexpr size_t kCursorMove = 11;
 constexpr int kBuildingIconSlpBase = 53241;
 constexpr int kUnitIconSlpBase = 53251;
+constexpr float kSelectionPanelHeight = 112.0f;
+constexpr float kFormationButtonX = 14.0f;
+constexpr float kFormationButtonY = 12.0f;
+constexpr float kFormationButtonSize = 34.0f;
+constexpr float kFormationButtonStepX = 40.0f;
+constexpr float kFormationButtonStepY = 44.0f;
+constexpr float kGroupPortraitX = 100.0f;
+constexpr float kGroupPortraitY = 10.0f;
+constexpr float kGroupPortraitSize = 36.0f;
+constexpr float kGroupPortraitStepX = 41.0f;
+constexpr float kGroupPortraitStepY = 46.0f;
+constexpr float kActionMenuX = 500.0f;
+constexpr float kActionMenuY = 64.0f;
+constexpr float kActionMenuWidth = 440.0f;
+constexpr float kActionMenuRowHeight = 42.0f;
+constexpr size_t kActionMenuMaxRows = 8;
 
 // Terrain ids from genie_x1.dat's terrain table.
 enum : uint8_t {
@@ -163,6 +179,10 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     automaticTargetsAcquired_ = retaliationOrders_ = armedBuildingsEngaged_ = 0;
     attackModeChanges_ = 0;
     objects_.clear();
+    actionMenuOpen_ = false;
+    actionMenuObjectId_ = 0;
+    statusMessage_.clear();
+    statusTime_ = 0;
     objectIndices_.clear();
     projectiles_.clear();
     remains_.clear();
@@ -329,6 +349,10 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     }
 
     objects_.clear();
+    actionMenuOpen_ = false;
+    actionMenuObjectId_ = 0;
+    statusMessage_.clear();
+    statusTime_ = 0;
     objects_.reserve(scenario.units.size() * 2);
     for (const ScenarioUnit &source : scenario.units) {
         const int civilization = civilizationFor(source.player);
@@ -365,7 +389,23 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
         for (const ScenarioEffect &effect : trigger.effects)
             if (effect.type == 6 || effect.type == 7)
                 for (uint32_t spawnId : effect.selectedUnitIds)
-                    if (Object *object = findObject(spawnId)) object->gate = true;
+                    if (Object *object = findObject(spawnId)) {
+                        object->gate = true;
+                        const std::string &name = object->unit->name;
+                        const size_t closed = name.rfind("CLOS");
+                        if (closed != std::string::npos &&
+                            closed + 4 == name.size()) {
+                            const std::string prefix =
+                                name.substr(0, closed);
+                            const int civilization =
+                                civilizationForPlayer(object->player);
+                            object->gateClosedUnit = object->unit;
+                            object->gateOpenUnit =
+                                findUnit(civilization, prefix + "OPEN");
+                            object->gateEndUnit =
+                                findUnit(civilization, prefix + "END");
+                        }
+                    }
     rebuildAdjacency();
     const Object *hero = nullptr;
     size_t heroCount = 0;
@@ -530,6 +570,7 @@ int Game::civilizationForPlayer(int player) const {
 }
 
 void Game::rebuildAdjacency() {
+    pathGridCache_.clear();
     std::vector<Object *> adjacentObjects, adjacentWalls;
     for (Object &object : objects_) {
         if (!object.active || object.hidden || !object.unit->adjacentMode) continue;
@@ -1220,6 +1261,165 @@ void Game::selectBox(float startX, float startY, float endX, float endY,
                        civilizationForPlayer(acknowledgement->player));
 }
 
+bool Game::handleSelectionPanelClick(float screenX, float screenY,
+                                     int screenW, int screenH) {
+    const float panelY = screenH - kSelectionPanelHeight;
+    if (screenY < panelY) return false;
+
+    std::vector<Object *> selected;
+    for (Object &object : objects_)
+        if (object.selected && isInspectable(object))
+            selected.push_back(&object);
+    if (selected.empty()) return false;
+    if (selected.size() == 1) return true;
+
+    const float localY = screenY - panelY;
+    static constexpr FormationType formations[] = {
+        FormationType::Line, FormationType::Box,
+        FormationType::Staggered, FormationType::Flank,
+    };
+    for (size_t index = 0; index < std::size(formations); index++) {
+        const float x =
+            kFormationButtonX + (index % 2) * kFormationButtonStepX;
+        const float y =
+            kFormationButtonY + (index / 2) * kFormationButtonStepY;
+        if (screenX < x || screenX >= x + kFormationButtonSize ||
+            localY < y || localY >= y + kFormationButtonSize)
+            continue;
+        selectedFormation_ = formations[index];
+        return true;
+    }
+
+    const float commandsX = std::max(500.0f, screenW - 300.0f);
+    const int columns = std::max(
+        1, (int)((commandsX - kGroupPortraitX - 8.0f) /
+                 kGroupPortraitStepX));
+    for (size_t index = 0; index < selected.size(); index++) {
+        const int column = (int)(index % (size_t)columns);
+        const int row = (int)(index / (size_t)columns);
+        if (row >= 2) break;
+        const float x = kGroupPortraitX + column * kGroupPortraitStepX;
+        const float y = kGroupPortraitY + row * kGroupPortraitStepY;
+        if (screenX < x || screenX >= x + kGroupPortraitSize ||
+            localY < y || localY >= y + kGroupPortraitStepY)
+            continue;
+        Object *chosen = selected[index];
+        clearSelection();
+        chosen->selected = true;
+        selectionClickAge_ = 1000.0f;
+        lastSelectionUnitId_ = chosen->unit->id;
+        if (playUnitSound_ && chosen->unit->selectionSound >= 0)
+            playUnitSound_(chosen->unit->selectionSound,
+                           civilizationForPlayer(chosen->player));
+        return true;
+    }
+    return true;
+}
+
+std::vector<const dat::Unit *> Game::productionOptions(
+    const Object &building) const {
+    std::vector<const dat::Unit *> options;
+    const int civilization =
+        civilizationForPlayer(building.player);
+    const auto &civs = assets_.dat().civs;
+    if (civilization < 0 ||
+        (size_t)civilization >= civs.size())
+        return options;
+    for (const dat::Unit &unit :
+         civs[(size_t)civilization].units) {
+        if (!unit.exists || unit.disabled ||
+            unit.trainLocationId != building.unit->id ||
+            unit.type < dat::UT_Creatable)
+            continue;
+        options.push_back(&unit);
+    }
+    std::stable_sort(
+        options.begin(), options.end(),
+        [](const dat::Unit *a, const dat::Unit *b) {
+            if (a->buttonId != b->buttonId)
+                return a->buttonId < b->buttonId;
+            return a->id < b->id;
+        });
+    return options;
+}
+
+bool Game::openSelectedActionMenu() {
+    Object *building = nullptr;
+    for (Object &object : objects_) {
+        if (!object.selected || !isInspectable(object)) continue;
+        if (building) return false;
+        building = &object;
+    }
+    if (!building || building->player != localPlayer_ ||
+        building->unit->type != dat::UT_Building)
+        return false;
+    if (productionOptions(*building).empty()) {
+        statusMessage_ = "NO PRODUCTION AVAILABLE";
+        statusTime_ = 3.0f;
+        return true;
+    }
+    actionMenuOpen_ = true;
+    actionMenuObjectId_ = building->spawnId;
+    return true;
+}
+
+bool Game::handleActionMenuClick(float screenX, float screenY,
+                                 int screenW, int screenH) {
+    if (!actionMenuOpen_) return false;
+    Object *building = findObject(actionMenuObjectId_);
+    if (!building || !building->active ||
+        building->player != localPlayer_) {
+        actionMenuOpen_ = false;
+        actionMenuObjectId_ = 0;
+        return true;
+    }
+    const std::vector<const dat::Unit *> options =
+        productionOptions(*building);
+    if (screenX < kActionMenuX ||
+        screenX >= std::min((float)screenW,
+                            kActionMenuX + kActionMenuWidth) ||
+        screenY < kActionMenuY)
+        return true;
+    const int row =
+        (int)((screenY - kActionMenuY) /
+              kActionMenuRowHeight);
+    if (row < 0 || (size_t)row >= options.size() ||
+        (size_t)row >= kActionMenuMaxRows)
+        return true;
+    if (building->productionQueue.size() >= 5) {
+        statusMessage_ = "PRODUCTION QUEUE FULL";
+        statusTime_ = 3.0f;
+        return true;
+    }
+    const dat::Unit *unit = options[(size_t)row];
+    for (const dat::ResourceCost &cost : unit->costs) {
+        if (!cost.flag || cost.type < 0 || cost.amount <= 0)
+            continue;
+        const auto found =
+            resources_[(size_t)localPlayer_].find(cost.type);
+        const float available =
+            found == resources_[(size_t)localPlayer_].end()
+                ? 0.0f
+                : found->second;
+        if (available + 0.001f < cost.amount) {
+            statusMessage_ = "NOT ENOUGH RESOURCES";
+            statusTime_ = 3.0f;
+            return true;
+        }
+    }
+    for (const dat::ResourceCost &cost : unit->costs)
+        if (cost.flag && cost.type >= 0 && cost.amount > 0)
+            resources_[(size_t)localPlayer_][cost.type] -=
+                cost.amount;
+    building->productionQueue.push_back(unit);
+    if (building->productionQueue.size() == 1)
+        building->productionRemaining =
+            std::max(0.1f, (float)unit->trainTime);
+    statusMessage_ = "UNIT QUEUED";
+    statusTime_ = 2.0f;
+    return true;
+}
+
 void Game::commandAtScreen(float screenX, float screenY, int screenW, int screenH) {
     std::vector<Object *> selected;
     for (Object &object : objects_)
@@ -1282,7 +1482,7 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
         object->attackAutomatic = false;
     }
     playUnitAcknowledgement(*selected.front(), false);
-    issueGroupMove(std::move(selected), targetX, targetY);
+    issueGroupMove(std::move(selected), targetX, targetY, selectedFormation_);
     commandMarkerX_ = targetX;
     commandMarkerY_ = targetY;
     commandMarkerTime_ = 0.65f;
@@ -1332,6 +1532,7 @@ void Game::issueAttack(Object &source, Object &target, float approachAngle,
     source.attackBestDistance = std::numeric_limits<float>::max();
     source.moveGoalActive = false;
     source.moveGroupId = 0;
+    source.moveSpeedLimit = 0;
     source.attackAutomatic = automatic;
     source.path.clear();
     source.pathIndex = 0;
@@ -1820,79 +2021,105 @@ bool Game::findPath(const Object &object, float targetX, float targetY,
     };
     auto indexOf = [width](int x, int y) { return y * width + x; };
 
-    std::vector<uint8_t> passable((size_t)nodeCount, 0);
     const float radius = collisionRadius(object);
-    for (int y = 0; y < width; y++)
-        for (int x = 0; x < width; x++) {
-            const float worldX = nodeX(x), worldY = nodeY(y);
-            passable[(size_t)indexOf(x, y)] =
-                worldX >= radius && worldY >= radius &&
-                worldX < mapSize_ - radius && worldY < mapSize_ - radius &&
-                terrainPassable(object, worldX, worldY);
-        }
-    if (!isAirUnit(object)) {
-        for (uint32_t index : staticObstructionIndices_) {
-            const Object &other = objects_[(size_t)index];
-            if (!other.active || other.hidden) continue;
-            const float halfX = std::max(0.05f, other.unit->collisionSize[0]);
-            const float halfY = std::max(0.05f, other.unit->collisionSize[1]);
-            const int minX = std::max(0, (int)std::floor(
-                (other.x - halfX - radius) * kNodesPerTile) - 1);
-            const int maxX = std::min(width - 1, (int)std::ceil(
-                (other.x + halfX + radius) * kNodesPerTile));
-            const int minY = std::max(0, (int)std::floor(
-                (other.y - halfY - radius) * kNodesPerTile) - 1);
-            const int maxY = std::min(width - 1, (int)std::ceil(
-                (other.y + halfY + radius) * kNodesPerTile));
-            for (int y = minY; y <= maxY; y++)
-                for (int x = minX; x <= maxX; x++)
-                    if (std::abs(nodeX(x) - other.x) < halfX + radius &&
-                        std::abs(nodeY(y) - other.y) < halfY + radius)
-                        passable[(size_t)indexOf(x, y)] = 0;
-        }
-    }
-    for (uint32_t index : mobileObjectIndices_) {
-        const Object &other = objects_[(size_t)index];
-        if (&other == &object || !other.active || other.hidden ||
-            isAirUnit(other) != isAirUnit(object))
-            continue;
-        const float separation = radius + collisionRadius(other) + 0.04f;
-        const int minX = std::max(0, (int)std::floor(
-            (other.x - separation) * kNodesPerTile) - 1);
-        const int maxX = std::min(width - 1, (int)std::ceil(
-            (other.x + separation) * kNodesPerTile));
-        const int minY = std::max(0, (int)std::floor(
-            (other.y - separation) * kNodesPerTile) - 1);
-        const int maxY = std::min(width - 1, (int)std::ceil(
-            (other.y + separation) * kNodesPerTile));
-        for (int y = minY; y <= maxY; y++)
-            for (int x = minX; x <= maxX; x++) {
-                const float dx = nodeX(x) - other.x, dy = nodeY(y) - other.y;
-                if (dx * dx + dy * dy < separation * separation)
-                    passable[(size_t)indexOf(x, y)] = 0;
+    const bool air = isAirUnit(object);
+    const int radiusHundredths =
+        std::max(0, (int)std::ceil(radius * 100.0f));
+    auto cache = std::find_if(
+        pathGridCache_.begin(), pathGridCache_.end(),
+        [&](const PathGridCache &entry) {
+            return entry.terrainRestriction == object.unit->terrainRestriction &&
+                   entry.radiusHundredths == radiusHundredths &&
+                   entry.air == air;
+        });
+    if (cache == pathGridCache_.end()) {
+        PathGridCache entry;
+        entry.terrainRestriction = object.unit->terrainRestriction;
+        entry.radiusHundredths = radiusHundredths;
+        entry.air = air;
+        entry.passable.assign((size_t)nodeCount, 0);
+        for (int y = 0; y < width; y++)
+            for (int x = 0; x < width; x++) {
+                const float worldX = nodeX(x), worldY = nodeY(y);
+                entry.passable[(size_t)indexOf(x, y)] =
+                    worldX >= radius && worldY >= radius &&
+                    worldX < mapSize_ - radius &&
+                    worldY < mapSize_ - radius &&
+                    terrainPassable(object, worldX, worldY);
             }
+        if (!air) {
+            for (uint32_t index : staticObstructionIndices_) {
+                const Object &other = objects_[(size_t)index];
+                if (!other.active || other.hidden) continue;
+                const float halfX =
+                    std::max(0.05f, other.unit->collisionSize[0]);
+                const float halfY =
+                    std::max(0.05f, other.unit->collisionSize[1]);
+                const int minX = std::max(
+                    0, (int)std::floor(
+                           (other.x - halfX - radius) * kNodesPerTile) -
+                           1);
+                const int maxX = std::min(
+                    width - 1,
+                    (int)std::ceil(
+                        (other.x + halfX + radius) * kNodesPerTile));
+                const int minY = std::max(
+                    0, (int)std::floor(
+                           (other.y - halfY - radius) * kNodesPerTile) -
+                           1);
+                const int maxY = std::min(
+                    width - 1,
+                    (int)std::ceil(
+                        (other.y + halfY + radius) * kNodesPerTile));
+                for (int y = minY; y <= maxY; y++)
+                    for (int x = minX; x <= maxX; x++)
+                        if (std::abs(nodeX(x) - other.x) < halfX + radius &&
+                            std::abs(nodeY(y) - other.y) < halfY + radius)
+                            entry.passable[(size_t)indexOf(x, y)] = 0;
+            }
+        }
+        pathGridCache_.push_back(std::move(entry));
+        cache = pathGridCache_.end() - 1;
     }
+    const std::vector<uint8_t> &passable = cache->passable;
 
     const int startX = clampNode(object.x), startY = clampNode(object.y);
     const int desiredX = clampNode(targetX), desiredY = clampNode(targetY);
     const int start = indexOf(startX, startY);
-    passable[(size_t)start] = 1;
-
     struct OpenNode {
         int score;
         int index;
         bool operator<(const OpenNode &other) const { return score > other.score; }
     };
     const int infinity = std::numeric_limits<int>::max();
-    std::vector<int> cost((size_t)nodeCount, infinity);
-    std::vector<int> parent((size_t)nodeCount, -1);
+    if (pathCostScratch_.size() != (size_t)nodeCount) {
+        pathCostScratch_.resize((size_t)nodeCount);
+        pathParentScratch_.resize((size_t)nodeCount);
+        pathSearchStamp_.assign((size_t)nodeCount, 0);
+        pathSearchGeneration_ = 0;
+    }
+    if (++pathSearchGeneration_ == 0) {
+        std::fill(pathSearchStamp_.begin(), pathSearchStamp_.end(), 0);
+        pathSearchGeneration_ = 1;
+    }
+    const uint32_t generation = pathSearchGeneration_;
+    auto nodeCost = [&](int index) {
+        return pathSearchStamp_[(size_t)index] == generation
+                   ? pathCostScratch_[(size_t)index]
+                   : infinity;
+    };
+    auto setNode = [&](int index, int cost, int parent) {
+        pathSearchStamp_[(size_t)index] = generation;
+        pathCostScratch_[(size_t)index] = cost;
+        pathParentScratch_[(size_t)index] = parent;
+    };
     std::priority_queue<OpenNode> open;
     auto heuristic = [desiredX, desiredY](int x, int y) {
         const int dx = std::abs(x - desiredX), dy = std::abs(y - desiredY);
         return kDiagonalCost * std::min(dx, dy) +
                kStraightCost * (std::max(dx, dy) - std::min(dx, dy));
     };
-    cost[(size_t)start] = 0;
+    setNode(start, 0, -1);
     open.push({heuristic(startX, startY), start});
     int closest = start;
     int closestDistance = heuristic(startX, startY);
@@ -1905,7 +2132,10 @@ bool Game::findPath(const Object &object, float targetX, float targetY,
         const OpenNode current = open.top();
         open.pop();
         const int cx = current.index % width, cy = current.index / width;
-        if (current.score != cost[(size_t)current.index] + heuristic(cx, cy)) continue;
+        const int currentCost = nodeCost(current.index);
+        if (currentCost == infinity ||
+            current.score != currentCost + heuristic(cx, cy))
+            continue;
         const int distance = heuristic(cx, cy);
         if (distance < closestDistance) {
             closestDistance = distance;
@@ -1919,26 +2149,30 @@ bool Game::findPath(const Object &object, float targetX, float targetY,
             const int nx = cx + direction[0], ny = cy + direction[1];
             if (nx < 0 || ny < 0 || nx >= width || ny >= width) continue;
             const int next = indexOf(nx, ny);
-            if (!passable[(size_t)next]) continue;
+            if (next != start && !passable[(size_t)next]) continue;
             const bool diagonal = direction[0] != 0 && direction[1] != 0;
             if (diagonal &&
-                (!passable[(size_t)indexOf(cx + direction[0], cy)] ||
-                 !passable[(size_t)indexOf(cx, cy + direction[1])]))
+                ((indexOf(cx + direction[0], cy) != start &&
+                  !passable[(size_t)indexOf(cx + direction[0], cy)]) ||
+                 (indexOf(cx, cy + direction[1]) != start &&
+                  !passable[(size_t)indexOf(cx, cy + direction[1])])))
                 continue;
-            const int nextCost = cost[(size_t)current.index] +
+            const int nextCost = currentCost +
                                  (diagonal ? kDiagonalCost : kStraightCost);
-            if (nextCost >= cost[(size_t)next]) continue;
-            cost[(size_t)next] = nextCost;
-            parent[(size_t)next] = current.index;
+            if (nextCost >= nodeCost(next)) continue;
+            setNode(next, nextCost, current.index);
             open.push({nextCost + heuristic(nx, ny), next});
         }
     }
 
     if (closest == start) return closestDistance == 0;
     std::vector<int> reverse;
-    for (int node = closest; node != start && node >= 0; node = parent[(size_t)node])
+    for (int node = closest; node != start && node >= 0;
+         node = pathParentScratch_[(size_t)node])
         reverse.push_back(node);
-    if (reverse.empty() || parent[(size_t)reverse.back()] < 0) return false;
+    if (reverse.empty() ||
+        pathParentScratch_[(size_t)reverse.back()] < 0)
+        return false;
     std::reverse(reverse.begin(), reverse.end());
 
     path.clear();
@@ -1999,7 +2233,8 @@ bool Game::issueMove(Object &object, float targetX, float targetY) {
     return true;
 }
 
-void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float targetY) {
+void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float targetY,
+                          FormationType formation) {
     struct ReservedDestination {
         float x, y, radius;
     };
@@ -2008,44 +2243,158 @@ void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float ta
     const uint32_t moveGroupId = nextMoveGroupId_++;
     if (nextMoveGroupId_ == 0) nextMoveGroupId_ = 1;
     float slotSpacing = 0.75f;
+    float groupSpeed = std::numeric_limits<float>::max();
+    float centroidX = 0, centroidY = 0;
+    size_t mobileCount = 0;
     for (const Object *object : targets)
-        if (!object->hidden && object->unit->speed > 0)
+        if (!object->hidden && object->unit->speed > 0) {
             slotSpacing =
                 std::max(slotSpacing, collisionRadius(*object) * 2.0f + 0.25f);
+            groupSpeed = std::min(groupSpeed, object->unit->speed);
+            centroidX += object->x;
+            centroidY += object->y;
+            mobileCount++;
+        }
+    if (mobileCount == 0) return;
+    centroidX /= mobileCount;
+    centroidY /= mobileCount;
+    const float travelX = targetX - centroidX;
+    const float travelY = targetY - centroidY;
+    const float travelDistance =
+        std::sqrt(travelX * travelX + travelY * travelY);
+    const float forwardX =
+        travelDistance > 0.001f ? travelX / travelDistance : 0;
+    const float forwardY =
+        travelDistance > 0.001f ? travelY / travelDistance : 1;
+    const float rightX = -forwardY;
+    const float rightY = forwardX;
     size_t slot = 0;
     std::vector<Object *> remaining = targets;
     std::sort(remaining.begin(), remaining.end(),
               [&](const Object *a, const Object *b) {
-                  const float adx = a->x - targetX, ady = a->y - targetY;
-                  const float bdx = b->x - targetX, bdy = b->y - targetY;
-                  return adx * adx + ady * ady < bdx * bdx + bdy * bdy;
+                  const float aLateral =
+                      (a->x - centroidX) * rightX +
+                      (a->y - centroidY) * rightY;
+                  const float bLateral =
+                      (b->x - centroidX) * rightX +
+                      (b->y - centroidY) * rightY;
+                  if (std::abs(aLateral - bLateral) > 0.1f)
+                      return aLateral < bLateral;
+                  const float aForward =
+                      (a->x - centroidX) * forwardX +
+                      (a->y - centroidY) * forwardY;
+                  const float bForward =
+                      (b->x - centroidX) * forwardX +
+                      (b->y - centroidY) * forwardY;
+                  return aForward < bForward;
               });
+    auto formationRank = [](const Object *object) {
+        if (object->unit->minRange > 0.1f ||
+            object->unit->speed < 0.7f)
+            return 2;
+        if (object->unit->maxRange > 1.5f)
+            return 1;
+        return 0;
+    };
+    if (formation == FormationType::Box) {
+        std::stable_sort(
+            remaining.begin(), remaining.end(),
+            [](const Object *a, const Object *b) {
+                const float aStrength =
+                    a->maxHitPoints +
+                    std::max<int16_t>(
+                        0, a->unit->displayedAttack) *
+                        4.0f;
+                const float bStrength =
+                    b->maxHitPoints +
+                    std::max<int16_t>(
+                        0, b->unit->displayedAttack) *
+                        4.0f;
+                return aStrength > bStrength;
+            });
+    } else {
+        std::stable_sort(
+            remaining.begin(), remaining.end(),
+            [&](const Object *a, const Object *b) {
+                return formationRank(a) < formationRank(b);
+            });
+    }
+    std::vector<std::pair<float, float>> formationOffsets;
+    formationOffsets.reserve(mobileCount);
+    if (formation == FormationType::Box) {
+        const int side =
+            std::max(2, (int)std::ceil(std::sqrt((float)mobileCount)));
+        for (int row = 0; row < side; row++)
+            for (int column = 0; column < side; column++) {
+                if (row != 0 && column != 0 &&
+                    row != side - 1 && column != side - 1)
+                    continue;
+                formationOffsets.push_back({
+                    (column - (side - 1) * 0.5f) * slotSpacing,
+                    (row - (side - 1) * 0.5f) * slotSpacing});
+            }
+        for (int row = 1; row < side - 1; row++)
+            for (int column = 1; column < side - 1; column++)
+                formationOffsets.push_back({
+                    (column - (side - 1) * 0.5f) * slotSpacing,
+                    (row - (side - 1) * 0.5f) * slotSpacing});
+    } else {
+        const int columns =
+            formation == FormationType::Line
+                ? std::min<int>(8, (int)mobileCount)
+                : std::max(
+                      2, (int)std::ceil(
+                             std::sqrt((float)mobileCount)));
+        const int rows =
+            ((int)mobileCount + columns - 1) / columns;
+        const float spacing =
+            formation == FormationType::Staggered
+                ? slotSpacing * 2.0f
+                : slotSpacing;
+        for (size_t index = 0; index < mobileCount; index++) {
+            const int row = (int)index / columns;
+            const int column = (int)index % columns;
+            const int entriesInRow =
+                std::min(columns,
+                         (int)mobileCount - row * columns);
+            float lateral =
+                (column - (entriesInRow - 1) * 0.5f) * spacing;
+            if (formation == FormationType::Flank) {
+                const float split = slotSpacing * 2.25f;
+                lateral += lateral < 0 ? -split : split;
+            }
+            formationOffsets.push_back(
+                {lateral,
+                 (row - (rows - 1) * 0.5f) * spacing});
+        }
+    }
+    Object *pathAnchor = nullptr;
+    float anchorDistance = std::numeric_limits<float>::max();
+    for (Object *object : remaining) {
+        if (object->hidden || object->unit->speed <= 0) continue;
+        const float dx = object->x - centroidX;
+        const float dy = object->y - centroidY;
+        if (dx * dx + dy * dy < anchorDistance) {
+            anchorDistance = dx * dx + dy * dy;
+            pathAnchor = object;
+        }
+    }
+    std::vector<std::array<float, 2>> macroPath;
+    const bool hasMacroPath =
+        pathAnchor &&
+        findPath(*pathAnchor, targetX, targetY, macroPath);
     for (Object *object : remaining) {
         if (object->hidden || object->unit->speed <= 0) continue;
         object->attackTargetId = 0;
         object->attackAutomatic = false;
         object->moveGroupId = moveGroupId;
-        float slotX = targetX, slotY = targetY;
-        if (slot > 0) {
-            const int ring =
-                (int)std::ceil((std::sqrt((float)slot + 1.0f) - 1.0f) * 0.5f);
-            const int side = ring * 2;
-            const int first = (ring * 2 - 1) * (ring * 2 - 1);
-            const int offset = (int)slot - first;
-            int sx = ring, sy = ring;
-            if (offset < side) sx -= offset;
-            else if (offset < side * 2) {
-                sx = -ring;
-                sy -= offset - side;
-            } else if (offset < side * 3) {
-                sx = -ring + offset - side * 2;
-                sy = -ring;
-            } else {
-                sy = -ring + offset - side * 3;
-            }
-            slotX += sx * slotSpacing;
-            slotY += sy * slotSpacing;
-        }
+        object->moveSpeedLimit = groupSpeed;
+        const float lateral = formationOffsets[slot].first;
+        const float longitudinal = formationOffsets[slot].second;
+        float slotX =
+            targetX + rightX * lateral + forwardX * longitudinal;
+        float slotY =
+            targetY + rightY * lateral + forwardY * longitudinal;
         const float radius = collisionRadius(*object);
         auto destinationOpen = [&](float x, float y) {
             if (!positionPassable(*object, x, y, false)) return false;
@@ -2107,7 +2456,62 @@ void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float ta
         const float goalDy = slotY - object->y;
         object->moveBestDistance =
             std::sqrt(goalDx * goalDx + goalDy * goalDy);
-        if (!issueMove(*object, slotX, slotY)) {
+        bool moveIssued = false;
+        if (hasMacroPath) {
+            object->targetX = slotX;
+            object->targetY = slotY;
+            object->path.clear();
+            object->path.reserve(macroPath.size());
+            for (size_t point = 0; point < macroPath.size();
+                 point++) {
+                const bool finalPoint =
+                    point + 1 == macroPath.size();
+                float offsetLateral = lateral;
+                float offsetLongitudinal = longitudinal;
+                if (!finalPoint && travelDistance > 10.0f) {
+                    offsetLateral =
+                        ((slot & 1u) ? 0.5f : -0.5f) *
+                        slotSpacing;
+                    offsetLongitudinal =
+                        -((int)slot / 2) * slotSpacing;
+                }
+                float pointX =
+                    finalPoint
+                        ? slotX
+                        : macroPath[point][0] +
+                              rightX * offsetLateral +
+                              forwardX * offsetLongitudinal;
+                float pointY =
+                    finalPoint
+                        ? slotY
+                        : macroPath[point][1] +
+                              rightY * offsetLateral +
+                              forwardY * offsetLongitudinal;
+                if (!finalPoint &&
+                    !positionPassable(*object, pointX, pointY,
+                                      false)) {
+                    pointX = macroPath[point][0];
+                    pointY = macroPath[point][1];
+                }
+                if (object->path.empty() ||
+                    std::abs(object->path.back()[0] - pointX) >
+                        0.05f ||
+                    std::abs(object->path.back()[1] - pointY) >
+                        0.05f)
+                    object->path.push_back({pointX, pointY});
+            }
+            if (!object->path.empty()) {
+                object->pathIndex = 0;
+                object->blockedTime = 0;
+                object->state = State::Walk;
+                object->wander = false;
+                object->animTime = 0;
+                moveIssued = true;
+            }
+        }
+        if (!moveIssued)
+            moveIssued = issueMove(*object, slotX, slotY);
+        if (!moveIssued) {
             reserved.pop_back();
             object->moveGoalActive = false;
         }
@@ -2267,6 +2671,10 @@ void Game::executeEffect(const ScenarioEffect &effect) {
         for (Object *object : effectTargets(effect)) {
             object->gate = true;
             object->locked = effect.type == 7;
+            if (object->locked && object->gateClosedUnit) {
+                object->unit = object->gateClosedUnit;
+                object->gateOpenAmount = 0;
+            }
         }
         rebuildAdjacency();
         break;
@@ -2462,6 +2870,8 @@ int Game::playerColorBase(int player) const {
 void Game::lookAt(float tx, float ty) { toScreen(tx, ty, camX_, camY_); }
 
 void Game::update(float dt, const InputState &in) {
+    statusTime_ = std::max(0.0f, statusTime_ - dt);
+    if (statusTime_ <= 0) statusMessage_.clear();
     if (!currentInstruction_.empty()) {
         instructionTime_ -= dt;
         if (instructionTime_ <= 0) {
@@ -2500,7 +2910,117 @@ void Game::update(float dt, const InputState &in) {
     if (in.toggleDebug) debug_ = !debug_;
 
     updateTriggers(dt);
+    struct ProductionSpawn {
+        const dat::Unit *unit;
+        int player;
+        float x, y;
+    };
+    std::vector<ProductionSpawn> productionSpawns;
+    const size_t productionObjectCount = objects_.size();
+    for (size_t index = 0; index < productionObjectCount;
+         index++) {
+        Object &building = objects_[index];
+        if (!building.active ||
+            building.productionQueue.empty())
+            continue;
+        building.productionRemaining -= dt;
+        if (building.productionRemaining > 0) continue;
+        const dat::Unit *unit =
+            building.productionQueue.front();
+        Object candidate;
+        candidate.unit = unit;
+        candidate.player = building.player;
+        bool foundExit = false;
+        const float startDistance =
+            collisionRadius(building) +
+            collisionRadius(candidate) + 0.25f;
+        for (int ring = 0; ring < 12 && !foundExit; ring++) {
+            const int samples = 12 + ring * 4;
+            const float distance =
+                startDistance + ring * 0.35f;
+            for (int sample = 0; sample < samples; sample++) {
+                const float angle =
+                    sample * (2.0f * kPi / samples);
+                const float x =
+                    building.x + std::cos(angle) * distance;
+                const float y =
+                    building.y + std::sin(angle) * distance;
+                candidate.x = x;
+                candidate.y = y;
+                if (!positionPassable(candidate, x, y, true))
+                    continue;
+                productionSpawns.push_back(
+                    {unit, building.player, x, y});
+                foundExit = true;
+                break;
+            }
+        }
+        if (!foundExit) {
+            building.productionRemaining = 0;
+            continue;
+        }
+        building.productionQueue.pop_front();
+        building.productionRemaining =
+            building.productionQueue.empty()
+                ? 0.0f
+                : std::max(
+                      0.1f,
+                      (float)building.productionQueue.front()
+                          ->trainTime);
+    }
+    for (const ProductionSpawn &spawned : productionSpawns) {
+        Object *created = addObject(
+            spawned.unit, spawned.player, spawned.x, spawned.y,
+            -kPi * 0.5f, nextSpawnId_++);
+        if (created) {
+            created->wander = false;
+            created->stateTime = 1.0f;
+        }
+    }
     rebuildMobileOccupancy();
+    for (Object &gate : objects_) {
+        if (!gate.active || !gate.gate || !gate.gateClosedUnit ||
+            !gate.gateOpenUnit || !gate.gateEndUnit)
+            continue;
+        bool unitApproaching = false;
+        if (!gate.locked) {
+            const float triggerRadius =
+                std::max(gate.gateClosedUnit->collisionSize[0],
+                         gate.gateClosedUnit->collisionSize[1]) +
+                2.25f;
+            for (uint32_t index : mobileObjectIndices_) {
+                const Object &unit = objects_[(size_t)index];
+                if (!unit.active || unit.hidden ||
+                    isAirUnit(unit) ||
+                    (unit.player != gate.player &&
+                     isEnemy(gate, unit)))
+                    continue;
+                const float dx = unit.x - gate.x;
+                const float dy = unit.y - gate.y;
+                if (dx * dx + dy * dy <=
+                    triggerRadius * triggerRadius) {
+                    unitApproaching = true;
+                    break;
+                }
+            }
+        }
+        const float target = unitApproaching ? 1.0f : 0.0f;
+        const float animationStep = dt / 0.8f;
+        if (gate.gateOpenAmount < target)
+            gate.gateOpenAmount =
+                std::min(target,
+                         gate.gateOpenAmount + animationStep);
+        else if (gate.gateOpenAmount > target)
+            gate.gateOpenAmount =
+                std::max(target,
+                         gate.gateOpenAmount - animationStep);
+        if (gate.gateOpenAmount < 0.28f)
+            gate.unit = gate.gateClosedUnit;
+        else if (gate.gateOpenAmount < 0.72f)
+            gate.unit = gate.gateEndUnit;
+        else
+            gate.unit = gate.gateOpenUnit;
+    }
     commandMarkerTime_ = std::max(0.0f, commandMarkerTime_ - dt);
     selectionClickAge_ += dt;
     for (Object &object : objects_)
@@ -2514,16 +3034,45 @@ void Game::update(float dt, const InputState &in) {
     boxStartY_ = in.boxStartY;
     boxEndX_ = in.boxEndX;
     boxEndY_ = in.boxEndY;
-    if (in.boxSelectCommit)
+    if (in.boxSelectCommit) {
+        actionMenuOpen_ = false;
         selectBox(in.boxStartX, in.boxStartY, in.boxEndX, in.boxEndY,
                   in.screenW, in.screenH);
-    if (in.selectPressed)
-        selectAtScreen(in.pointerX, in.pointerY, in.screenW, in.screenH);
-    if (in.cycleAttackMode) cycleSelectedAttackMode();
-    if (in.commandPressed)
-        commandAtScreen(in.pointerX, in.pointerY, in.screenW, in.screenH);
+    }
+    if (in.selectPressed) {
+        if (actionMenuOpen_)
+            handleActionMenuClick(
+                in.pointerX, in.pointerY, in.screenW, in.screenH);
+        else if (!handleSelectionPanelClick(
+                     in.pointerX, in.pointerY, in.screenW,
+                     in.screenH))
+            selectAtScreen(in.pointerX, in.pointerY, in.screenW,
+                           in.screenH);
+    }
+    if (in.cycleAttackMode) {
+        if (actionMenuOpen_) {
+            actionMenuOpen_ = false;
+            actionMenuObjectId_ = 0;
+        } else if (!openSelectedActionMenu()) {
+            cycleSelectedAttackMode();
+        }
+    }
+    if (in.commandPressed) {
+        if (actionMenuOpen_) {
+            actionMenuOpen_ = false;
+            actionMenuObjectId_ = 0;
+        } else {
+            commandAtScreen(in.pointerX, in.pointerY,
+                            in.screenW, in.screenH);
+        }
+    }
     if (in.pointerTap) {
-        if (hasSelectedAttacker() &&
+        if (actionMenuOpen_) {
+            handleActionMenuClick(
+                in.pointerX, in.pointerY, in.screenW, in.screenH);
+        } else if (handleSelectionPanelClick(
+                in.pointerX, in.pointerY, in.screenW, in.screenH)) {
+        } else if (hasSelectedAttacker() &&
             enemyAtScreen(in.pointerX, in.pointerY, in.screenW, in.screenH))
             commandAtScreen(in.pointerX, in.pointerY, in.screenW, in.screenH);
         else if (objectAtScreen(in.pointerX, in.pointerY, in.screenW, in.screenH))
@@ -2616,6 +3165,23 @@ void Game::update(float dt, const InputState &in) {
         cooperativeChain.pop_back();
         return true;
     };
+    struct GroupCohesion {
+        float farthestRemaining = 0;
+        size_t movingMembers = 0;
+    };
+    std::unordered_map<uint32_t, GroupCohesion> groupCohesion;
+    for (const Object &object : objects_) {
+        if (!object.active || !object.moveGoalActive ||
+            object.moveGroupId == 0)
+            continue;
+        const float dx = object.targetX - object.x;
+        const float dy = object.targetY - object.y;
+        GroupCohesion &cohesion = groupCohesion[object.moveGroupId];
+        cohesion.farthestRemaining =
+            std::max(cohesion.farthestRemaining,
+                     std::sqrt(dx * dx + dy * dy));
+        cohesion.movingMembers++;
+    }
     for (Object &o : objects_) {
         if (!o.active) continue;
         o.animTime += dt;
@@ -2650,6 +3216,28 @@ void Game::update(float dt, const InputState &in) {
                 o.wander = true;
             }
         } else {
+            if (o.moveGoalActive && !o.attackTargetId) {
+                const float goalDx = o.targetX - o.x;
+                const float goalDy = o.targetY - o.y;
+                float arrival =
+                    std::max(0.20f,
+                             collisionRadius(o) * 0.75f);
+                if (o.moveGroupId != 0 &&
+                    o.pathIndex + 1 >= o.path.size())
+                    arrival = std::max(arrival, 2.25f);
+                if (goalDx * goalDx + goalDy * goalDy <=
+                    arrival * arrival) {
+                    o.moveGoalActive = false;
+                    o.moveSpeedLimit = 0;
+                    o.path.clear();
+                    o.pathIndex = 0;
+                    o.state = State::Idle;
+                    o.stateTime =
+                        1.5f + r01(rng_) * 5.0f;
+                    o.animTime = 0;
+                    continue;
+                }
+            }
             if (o.pathIndex >= o.path.size()) {
                 o.state = State::Idle;
                 o.stateTime = 1.5f + r01(rng_) * 5.0f;
@@ -2659,14 +3247,35 @@ void Game::update(float dt, const InputState &in) {
                 const float arrival =
                     std::max(0.20f, collisionRadius(o) * 0.75f);
                 if (o.moveGoalActive &&
-                    goalDx * goalDx + goalDy * goalDy <= arrival * arrival)
+                    goalDx * goalDx + goalDy * goalDy <= arrival * arrival) {
                     o.moveGoalActive = false;
+                    o.moveSpeedLimit = 0;
+                }
                 continue;
             }
             const auto &waypoint = o.path[o.pathIndex];
             float dx = waypoint[0] - o.x, dy = waypoint[1] - o.y;
             float dist = std::sqrt(dx * dx + dy * dy);
-            const float step = o.unit->speed * dt;
+            float moveSpeed =
+                o.moveSpeedLimit > 0
+                    ? std::min(o.unit->speed, o.moveSpeedLimit)
+                    : o.unit->speed;
+            if (o.moveGroupId != 0 && o.moveGoalActive) {
+                const auto group = groupCohesion.find(o.moveGroupId);
+                if (group != groupCohesion.end() &&
+                    group->second.movingMembers > 1) {
+                    const float goalDx = o.targetX - o.x;
+                    const float goalDy = o.targetY - o.y;
+                    const float remaining =
+                        std::sqrt(goalDx * goalDx + goalDy * goalDy);
+                    const float lead =
+                        group->second.farthestRemaining - remaining;
+                    if (lead > 2.0f)
+                        moveSpeed *=
+                            std::max(0.15f, 1.0f - (lead - 2.0f) * 0.35f);
+                }
+            }
+            const float step = moveSpeed * dt;
             const float scale = dist <= step || dist <= 0.0001f ? 1.0f : step / dist;
             float nextX = o.x + dx * scale, nextY = o.y + dy * scale;
             bool moved = positionPassable(o, nextX, nextY, true);
@@ -2745,8 +3354,11 @@ void Game::update(float dt, const InputState &in) {
                         const float arrival =
                             std::max(0.20f, collisionRadius(o) * 0.75f);
                         if (o.moveGoalActive &&
-                            goalDx * goalDx + goalDy * goalDy <= arrival * arrival)
+                            goalDx * goalDx + goalDy * goalDy <=
+                                arrival * arrival) {
                             o.moveGoalActive = false;
+                            o.moveSpeedLimit = 0;
+                        }
                     }
                 }
             } else {
@@ -2768,7 +3380,10 @@ void Game::update(float dt, const InputState &in) {
                     o.state = State::Idle;
                     o.stateTime = 1.5f + r01(rng_) * 5.0f;
                     o.animTime = 0;
-                    if (reachedMoveGoal) o.moveGoalActive = false;
+                    if (reachedMoveGoal) {
+                        o.moveGoalActive = false;
+                        o.moveSpeedLimit = 0;
+                    }
                     continue;
                 }
                 if (o.blockedTime >= 1.0f) {
@@ -3395,6 +4010,124 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                    5, 8, 16, 238);
         r.fillRect(panelX, panelY, panelW, 3.0f * invZoom,
                    196, 188, 145, 255);
+        if (panelSelectionCount > 1) {
+            static constexpr FormationType formations[] = {
+                FormationType::Line, FormationType::Box,
+                FormationType::Staggered, FormationType::Flank,
+            };
+            static constexpr const char *formationLabels[] = {
+                "LINE", "BOX", "STAG", "FLANK",
+            };
+            for (size_t index = 0; index < std::size(formations); index++) {
+                const float x =
+                    (kFormationButtonX +
+                     (index % 2) * kFormationButtonStepX) *
+                    invZoom;
+                const float y =
+                    panelY +
+                    (kFormationButtonY +
+                     (index / 2) * kFormationButtonStepY) *
+                        invZoom;
+                const bool active = selectedFormation_ == formations[index];
+                r.fillRect(x, y, kFormationButtonSize * invZoom,
+                           kFormationButtonSize * invZoom,
+                           active ? 38 : 16, active ? 76 : 27,
+                           active ? 104 : 40, 255);
+                r.fillRect(x, y, kFormationButtonSize * invZoom,
+                           2.0f * invZoom,
+                           active ? 130 : 74, active ? 220 : 91,
+                           active ? 255 : 105, 255);
+                drawBitmapText(
+                    r, {formationLabels[index]},
+                    x + 3.0f * invZoom, y + 12.0f * invZoom,
+                    0.72f * invZoom,
+                    active ? 225 : 160, active ? 245 : 180,
+                    active ? 255 : 190);
+            }
+
+            const float commandsX =
+                std::max(500.0f, screenW - 300.0f);
+            const int columns = std::max(
+                1, (int)((commandsX - kGroupPortraitX - 8.0f) /
+                         kGroupPortraitStepX));
+            size_t iconIndex = 0;
+            for (const Object &object : objects_) {
+                if (!object.selected || !isInspectable(object)) continue;
+                const int column =
+                    (int)(iconIndex % (size_t)columns);
+                const int row =
+                    (int)(iconIndex / (size_t)columns);
+                if (row >= 2) break;
+                const float x =
+                    (kGroupPortraitX +
+                     column * kGroupPortraitStepX) *
+                    invZoom;
+                const float y =
+                    panelY +
+                    (kGroupPortraitY +
+                     row * kGroupPortraitStepY) *
+                        invZoom;
+                r.fillRect(x, y, kGroupPortraitSize * invZoom,
+                           kGroupPortraitSize * invZoom,
+                           17, 23, 34, 255);
+                r.fillRect(x, y, kGroupPortraitSize * invZoom,
+                           1.0f * invZoom, 107, 126, 140, 255);
+
+                const int civilization =
+                    civilizationForPlayer(object.player);
+                const int iconSet =
+                    civilization >= 0 &&
+                            (size_t)civilization <
+                                assets_.dat().civs.size()
+                        ? assets_.dat()
+                              .civs[(size_t)civilization]
+                              .iconSet
+                        : 1;
+                const int iconSlpBase =
+                    object.unit->interfaceKind == 2
+                        ? kBuildingIconSlpBase
+                        : kUnitIconSlpBase;
+                const SpriteSheet *icons = assets_.interfaceSheet(
+                    iconSlpBase + std::max(1, iconSet) - 1);
+                const SpriteFrame *portrait =
+                    icons && object.unit->iconId >= 0 &&
+                            (size_t)object.unit->iconId <
+                                icons->frames.size()
+                        ? &icons->frames[(size_t)object.unit->iconId]
+                        : nullptr;
+                if (portrait && portrait->w > 0 &&
+                    portrait->h > 0) {
+                    const float maxSize = 31.0f * invZoom;
+                    const float scale =
+                        std::min(maxSize / portrait->w,
+                                 maxSize / portrait->h);
+                    const float width = portrait->w * scale;
+                    const float height = portrait->h * scale;
+                    r.draw(
+                        portrait->tex,
+                        {x + (kGroupPortraitSize * invZoom - width) *
+                                 0.5f,
+                         y + (33.0f * invZoom - height) * 0.5f,
+                         width, height,
+                         portrait->u, portrait->v,
+                         portrait->u + portrait->w,
+                         portrait->v + portrait->h});
+                }
+                const float health = std::max(
+                    0.0f,
+                    std::min(1.0f,
+                             object.hitPoints /
+                                 std::max(1.0f, object.maxHitPoints)));
+                const float barY = y + 32.0f * invZoom;
+                r.fillRect(x + 1.0f * invZoom, barY,
+                           34.0f * invZoom, 4.0f * invZoom,
+                           150, 24, 24, 255);
+                r.fillRect(x + 1.0f * invZoom, barY,
+                           34.0f * health * invZoom,
+                           4.0f * invZoom, 22, 210, 55, 255);
+                iconIndex++;
+            }
+        } else {
         r.fillRect(portraitX, portraitY, portraitW, portraitH,
                    18, 25, 38, 255);
         r.fillRect(portraitX, portraitY, portraitW, 2.0f * invZoom,
@@ -3503,22 +4236,37 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                                  : "ENEMY";
         drawBitmapText(r, {status}, infoX, panelY + 89.0f * invZoom,
                        1.25f * invZoom, 120, 220, 255);
+        }
 
         const float commandsX = std::max(500.0f, screenW - 300.0f) * invZoom;
         r.fillRect(commandsX, panelY + 12.0f * invZoom,
                    (screenW * invZoom - commandsX - 14.0f * invZoom),
                    86.0f * invZoom, 14, 20, 31, 245);
         if (panelObject->player == localPlayer_) {
-            drawBitmapText(r, {"O: MOVE / ATTACK"},
-                           commandsX + 12.0f * invZoom,
-                           panelY + 24.0f * invZoom, 1.35f * invZoom);
-            drawBitmapText(r, {"TRIANGLE: CHANGE STANCE"},
-                           commandsX + 12.0f * invZoom,
-                           panelY + 48.0f * invZoom, 1.2f * invZoom);
-            drawBitmapText(r, {"X: SELECT   SQUARE: BOX"},
-                           commandsX + 12.0f * invZoom,
-                           panelY + 71.0f * invZoom, 1.15f * invZoom,
-                           175, 190, 205);
+            if (panelObject->unit->type == dat::UT_Building) {
+                drawBitmapText(r, {"TRIANGLE: PRODUCTION"},
+                               commandsX + 12.0f * invZoom,
+                               panelY + 24.0f * invZoom,
+                               1.25f * invZoom);
+                drawBitmapText(r, {"X: SELECT"},
+                               commandsX + 12.0f * invZoom,
+                               panelY + 50.0f * invZoom,
+                               1.2f * invZoom);
+            } else {
+                drawBitmapText(r, {"O: MOVE / ATTACK"},
+                               commandsX + 12.0f * invZoom,
+                               panelY + 24.0f * invZoom,
+                               1.35f * invZoom);
+                drawBitmapText(r, {"TRIANGLE: CHANGE STANCE"},
+                               commandsX + 12.0f * invZoom,
+                               panelY + 48.0f * invZoom,
+                               1.2f * invZoom);
+                drawBitmapText(r, {"X: SELECT   SQUARE: BOX"},
+                               commandsX + 12.0f * invZoom,
+                               panelY + 71.0f * invZoom,
+                               1.15f * invZoom,
+                               175, 190, 205);
+            }
         } else {
             drawBitmapText(r, {"ENEMY UNIT / BUILDING"},
                            commandsX + 12.0f * invZoom,
@@ -3531,6 +4279,182 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         }
     }
 
+    if (localPlayer_ > 0) {
+        static constexpr int resourceIds[] = {0, 1, 3, 2};
+        static constexpr size_t resourceFrames[] = {2, 0, 1, 3};
+        const SpriteSheet *resourceIcons =
+            assets_.interfaceSheet(50732);
+        const float invZoom = 1.0f / zoom_;
+        const float fieldW = 94.0f * invZoom;
+        const float fieldH = 32.0f * invZoom;
+        const float startX =
+            (screenW - 8.0f - std::size(resourceIds) * 94.0f) *
+            invZoom;
+        const float y = 6.0f * invZoom;
+        for (size_t index = 0; index < std::size(resourceIds); index++) {
+            const float x = startX + index * fieldW;
+            r.fillRect(x, y, fieldW - 3.0f * invZoom, fieldH,
+                       5, 8, 16, 225);
+            r.fillRect(x, y, fieldW - 3.0f * invZoom,
+                       2.0f * invZoom, 110, 122, 130, 255);
+            if (resourceIcons &&
+                resourceFrames[index] <
+                    resourceIcons->frames.size()) {
+                const SpriteFrame &icon =
+                    resourceIcons->frames[resourceFrames[index]];
+                const float iconScale =
+                    std::min(26.0f / std::max(1, icon.w),
+                             24.0f / std::max(1, icon.h)) *
+                    invZoom;
+                r.draw(icon.tex,
+                       {x + 4.0f * invZoom,
+                        y + 4.0f * invZoom,
+                        icon.w * iconScale,
+                        icon.h * iconScale,
+                        icon.u, icon.v,
+                        icon.u + icon.w,
+                        icon.v + icon.h});
+            }
+            const int amount = (int)std::floor(
+                std::max(
+                    0.0f,
+                    resource(localPlayer_, resourceIds[index])));
+            drawBitmapText(
+                r, {std::to_string(amount)},
+                x + 35.0f * invZoom, y + 8.0f * invZoom,
+                1.35f * invZoom, 238, 231, 190);
+        }
+    }
+
+    if (actionMenuOpen_) {
+        Object *building = findObject(actionMenuObjectId_);
+        if (building && building->active) {
+            const float invZoom = 1.0f / zoom_;
+            const std::vector<const dat::Unit *> options =
+                productionOptions(*building);
+            const size_t rows =
+                std::min(options.size(), kActionMenuMaxRows);
+            const float height =
+                42.0f + rows * kActionMenuRowHeight;
+            r.fillRect(kActionMenuX * invZoom,
+                       28.0f * invZoom,
+                       kActionMenuWidth * invZoom,
+                       height * invZoom, 5, 8, 16, 246);
+            r.fillRect(kActionMenuX * invZoom,
+                       28.0f * invZoom,
+                       kActionMenuWidth * invZoom,
+                       3.0f * invZoom,
+                       196, 188, 145, 255);
+            drawBitmapText(
+                r, {"PRODUCTION   X: QUEUE   O: CLOSE"},
+                (kActionMenuX + 12.0f) * invZoom,
+                39.0f * invZoom, 1.15f * invZoom,
+                220, 226, 230);
+            for (size_t index = 0; index < rows; index++) {
+                const dat::Unit *unit = options[index];
+                const float y =
+                    (kActionMenuY +
+                     index * kActionMenuRowHeight) *
+                    invZoom;
+                r.fillRect(
+                    (kActionMenuX + 6.0f) * invZoom, y,
+                    (kActionMenuWidth - 12.0f) * invZoom,
+                    (kActionMenuRowHeight - 3.0f) * invZoom,
+                    15, 23, 35, 255);
+                const int civilization =
+                    civilizationForPlayer(building->player);
+                const int iconSet =
+                    civilization >= 0 &&
+                            (size_t)civilization <
+                                assets_.dat().civs.size()
+                        ? assets_.dat()
+                              .civs[(size_t)civilization]
+                              .iconSet
+                        : 1;
+                const SpriteSheet *icons =
+                    assets_.interfaceSheet(
+                        kUnitIconSlpBase +
+                        std::max(1, iconSet) - 1);
+                const SpriteFrame *icon =
+                    icons && unit->iconId >= 0 &&
+                            (size_t)unit->iconId <
+                                icons->frames.size()
+                        ? &icons->frames[
+                              (size_t)unit->iconId]
+                        : nullptr;
+                if (icon) {
+                    const float scale =
+                        std::min(32.0f / icon->w,
+                                 32.0f / icon->h) *
+                        invZoom;
+                    r.draw(
+                        icon->tex,
+                        {(kActionMenuX + 10.0f) *
+                             invZoom,
+                         y + 3.0f * invZoom,
+                         icon->w * scale,
+                         icon->h * scale,
+                         icon->u, icon->v,
+                         icon->u + icon->w,
+                         icon->v + icon->h});
+                }
+                std::string name = unit->name;
+                const size_t separator =
+                    name.find_last_of('-');
+                if (separator != std::string::npos &&
+                    separator + 1 < name.size())
+                    name = name.substr(separator + 1);
+                if (name.size() > 20) name.resize(20);
+                drawBitmapText(
+                    r, {name},
+                    (kActionMenuX + 50.0f) * invZoom,
+                    y + 8.0f * invZoom,
+                    1.15f * invZoom, 225, 230, 235);
+                std::string costs;
+                static constexpr const char *labels[] = {
+                    "F", "C", "O", "N"};
+                for (const dat::ResourceCost &cost :
+                     unit->costs) {
+                    if (!cost.flag || cost.type < 0 ||
+                        cost.amount <= 0)
+                        continue;
+                    if (!costs.empty()) costs += "  ";
+                    costs +=
+                        cost.type < 4
+                            ? labels[(size_t)cost.type]
+                            : "R";
+                    costs += std::to_string(cost.amount);
+                }
+                drawBitmapText(
+                    r, {costs},
+                    (kActionMenuX + 260.0f) * invZoom,
+                    y + 8.0f * invZoom,
+                    1.05f * invZoom, 177, 208, 218);
+                drawBitmapText(
+                    r,
+                    {std::to_string(
+                         std::max<int16_t>(
+                             0, unit->trainTime)) +
+                     "S"},
+                    (kActionMenuX + 390.0f) * invZoom,
+                    y + 8.0f * invZoom,
+                    1.0f * invZoom, 160, 175, 188);
+            }
+            if (!building->productionQueue.empty())
+                drawBitmapText(
+                    r,
+                    {"QUEUE " +
+                     std::to_string(
+                         building->productionQueue.size()) +
+                     "/5"},
+                    (kActionMenuX + 12.0f) * invZoom,
+                    (kActionMenuY +
+                     rows * kActionMenuRowHeight + 5.0f) *
+                        invZoom,
+                    1.0f * invZoom, 120, 220, 255);
+        }
+    }
+
     if (!currentInstruction_.empty()) {
         const float boxWidthPixels = std::min(720.0f, screenW - 32.0f);
         const int textColumns = std::max(20, (int)((boxWidthPixels - 24.0f) / 12.0f));
@@ -3538,7 +4462,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         const float invZoom = 1.0f / zoom_;
         const float boxHeightPixels = 24.0f + lines.size() * 18.0f;
         const float boxX = 16.0f * invZoom;
-        const float boxY = 16.0f * invZoom;
+        const float boxY = 44.0f * invZoom;
         r.fillRect(boxX, boxY, boxWidthPixels * invZoom, boxHeightPixels * invZoom,
                    5, 8, 16, 220);
         r.fillRect(boxX, boxY, boxWidthPixels * invZoom, 2.0f * invZoom,
@@ -3559,6 +4483,21 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         r.fillRect(x, y + h - line, w, line, 80, 210, 255, 230);
         r.fillRect(x, y, line, h, 80, 210, 255, 230);
         r.fillRect(x + w - line, y, line, h, 80, 210, 255, 230);
+    }
+
+    if (!statusMessage_.empty()) {
+        const float invZoom = 1.0f / zoom_;
+        const float width =
+            statusMessage_.size() * 10.0f + 24.0f;
+        const float x =
+            (screenW - width) * 0.5f * invZoom;
+        const float y = 104.0f * invZoom;
+        r.fillRect(x, y, width * invZoom,
+                   28.0f * invZoom, 38, 12, 12, 235);
+        drawBitmapText(
+            r, {statusMessage_},
+            x + 12.0f * invZoom, y + 8.0f * invZoom,
+            1.05f * invZoom, 255, 220, 180);
     }
 
     if (cursorVisible_) {

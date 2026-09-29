@@ -32,8 +32,9 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 
 ## Milestone 3: simulation core
 - Fixed-timestep simulation separate from rendering. Deterministic, to leave room for multiplayer later.
-- Player-issued move and attack commands use terrain-restriction A* pathing, dynamic occupancy,
-  destination formations, and pursuit to weapon range. Broader task-list actions remain.
+- Player-issued move and attack commands use cached terrain-restriction A* pathing, dynamic occupancy,
+  shared formation routes, slowest-member group speed, marching columns, destination formations,
+  and pursuit to weapon range. Broader task-list actions remain.
 - Unit commands from the dat task lists (`UnitHeader.tasks`): move, attack, gather, build, repair, garrison.
 - The initial combat slice includes contextual hostile targeting, runtime hit points, DAT-driven
   attack/armor classes, range and minimum range, reload timing, attack animations and sounds,
@@ -42,7 +43,9 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   or building rubble and decay over time. Units support aggressive, defensive, stand-ground, and
   passive stances; eligible units and armed buildings acquire targets and retaliate automatically.
   Accuracy, blast damage, and explicit guard/patrol commands remain.
-- Economy: the four SWGB resources, drop sites, training queues, population (power cores and prefab shelters).
+- Economy: the four SWGB resources and an initial resource-charging building training queue are visible.
+  Gathering/drop sites, worker construction, research, and population limits (power cores and prefab
+  shelters) remain.
 - Tech effects (`Effect`/`EffectCommand`) and ages, which SWGB calls tech levels.
 - SWGB-specific mechanics: shields, air units, power cores, Jedi/Sith conversion, holocrons.
 
@@ -53,9 +56,10 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 - Single, box, and visible-type selection, selection sounds, and contextual original normal/move/attack
   cursors are implemented. The command cursor scrolls the camera at screen edges. Unit panels and
   control groups remain.
-- The first command/info panel shows the selected unit or building portrait, live health,
-  attack, armor, range, stance, and Vita command hints. Full task buttons, minimap,
-  resource bar, and pause menu remain.
+- The command/info panel shows the selected unit or building portrait, live health, attack,
+  armor, range, stance, multi-selection portraits with individual health, formation controls,
+  Vita command hints, and a contextual building production menu. A persistent four-resource
+  bar is shown at the top. Worker task buttons, research, minimap, and pause menu remain.
 - Audio: selection, move, and attack acknowledgements plus weapon-fire and death effects are
   implemented. World ambience, volume controls, and music remain.
 

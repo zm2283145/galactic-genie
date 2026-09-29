@@ -127,6 +127,7 @@ public:
 private:
     enum class State : uint8_t { Idle, Walk, Attack };
     enum class CursorMode : uint8_t { Normal, Move, Attack };
+    enum class FormationType : uint8_t { Line, Box, Staggered, Flank };
     enum class AttackMode : uint8_t {
         Aggressive,
         Defensive,
@@ -136,6 +137,10 @@ private:
 
     struct Object {
         const dat::Unit *unit = nullptr;
+        const dat::Unit *gateClosedUnit = nullptr;
+        const dat::Unit *gateOpenUnit = nullptr;
+        const dat::Unit *gateEndUnit = nullptr;
+        std::deque<const dat::Unit *> productionQueue;
         int player = 0; // 0 = gaia
         float x = 0, y = 0;
         float facing = 0; // radians, 0 = +x world axis
@@ -150,6 +155,7 @@ private:
         float moveRetryTime = 0;
         float moveStallTime = 0;
         float moveBestDistance = 0;
+        float moveSpeedLimit = 0;
         float attackCooldown = 0;
         float attackRepathTime = 0;
         float attackApproachAngle = 0;
@@ -175,6 +181,8 @@ private:
         bool selected = false;
         bool triggerAddressable = true;
         float flashTime = 0;
+        float gateOpenAmount = 0;
+        float productionRemaining = 0;
         uint32_t spawnId = 0;
         int32_t garrisonedInId = -1;
         uint16_t initialFrame = 0;
@@ -210,6 +218,13 @@ private:
         float elapsed = 0;
     };
 
+    struct PathGridCache {
+        int terrainRestriction = -1;
+        int radiusHundredths = 0;
+        bool air = false;
+        std::vector<uint8_t> passable;
+    };
+
     struct Instruction {
         std::string text;
         std::string sound;
@@ -238,7 +253,8 @@ private:
     bool objectMatches(const Object &object, int unitId, int player, int group, int type) const;
     bool inSourceArea(const Object &object, int x1, int y1, int x2, int y2) const;
     bool issueMove(Object &object, float targetX, float targetY);
-    void issueGroupMove(std::vector<Object *> targets, float targetX, float targetY);
+    void issueGroupMove(std::vector<Object *> targets, float targetX, float targetY,
+                        FormationType formation = FormationType::Line);
     bool findPath(const Object &object, float targetX, float targetY,
                   std::vector<std::array<float, 2>> &path) const;
     bool positionPassable(const Object &object, float x, float y, bool dynamic) const;
@@ -260,6 +276,13 @@ private:
     void selectAtScreen(float screenX, float screenY, int screenW, int screenH);
     void selectBox(float startX, float startY, float endX, float endY,
                    int screenW, int screenH);
+    bool handleSelectionPanelClick(float screenX, float screenY,
+                                   int screenW, int screenH);
+    bool handleActionMenuClick(float screenX, float screenY,
+                               int screenW, int screenH);
+    bool openSelectedActionMenu();
+    std::vector<const dat::Unit *> productionOptions(
+        const Object &building) const;
     void commandAtScreen(float screenX, float screenY, int screenW, int screenH);
     void cycleSelectedAttackMode();
     void issueAttack(Object &source, Object &target, float approachAngle,
@@ -310,6 +333,11 @@ private:
     float maxMobileCollisionRadius_ = 0;
     std::vector<uint32_t> staticObstructionIndices_;
     std::vector<std::vector<uint32_t>> staticObstructionCells_;
+    mutable std::vector<PathGridCache> pathGridCache_;
+    mutable std::vector<int> pathCostScratch_;
+    mutable std::vector<int> pathParentScratch_;
+    mutable std::vector<uint32_t> pathSearchStamp_;
+    mutable uint32_t pathSearchGeneration_ = 0;
     std::array<ScenarioPlayer, 16> players_{};
     std::array<std::map<int, float>, 17> resources_{};
     std::array<std::set<int>, 17> researchedTechs_{};
@@ -337,6 +365,11 @@ private:
     int lastSelectionUnitId_ = -1;
     bool cursorVisible_ = false;
     CursorMode cursorMode_ = CursorMode::Normal;
+    FormationType selectedFormation_ = FormationType::Line;
+    bool actionMenuOpen_ = false;
+    uint32_t actionMenuObjectId_ = 0;
+    std::string statusMessage_;
+    float statusTime_ = 0;
     bool boxSelectActive_ = false;
     bool debug_ = false;
     FrameStats stats_;

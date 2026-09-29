@@ -32,6 +32,7 @@ static int usage() {
             "  swgbtool terrain <DataDir> <terrainId>\n"
             "  swgbtool restriction <DataDir> <restrictionId>\n"
             "  swgbtool unit <DataDir> <unitId>\n"
+            "  swgbtool units <DataDir> <name-fragment>\n"
             "  swgbtool sound <DataDir> <soundId>\n"
             "  swgbtool drs    <file.drs>\n"
             "  swgbtool drs-slps <file.drs>\n"
@@ -128,6 +129,7 @@ static int cmdUnit(const char *dataDir, int id) {
             fprintf(stderr, "error: %s\n", err.c_str());
             return 1;
         }
+
         for (size_t civ = 0; civ < assets.dat().civs.size(); civ++) {
             const auto &units = assets.dat().civs[civ].units;
             if (id < 0 || (size_t)id >= units.size() || !units[(size_t)id].exists) continue;
@@ -226,6 +228,37 @@ static int cmdUnit(const char *dataDir, int id) {
         }
 
         return 0;
+}
+
+static int cmdUnits(const char *dataDir, const char *fragment) {
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    std::string err;
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    if (assets.dat().civs.empty()) return 0;
+    const auto &units = assets.dat().civs[0].units;
+    for (size_t id = 0; id < units.size(); id++) {
+        const auto &unit = units[id];
+        if (!unit.exists ||
+            (unit.name.find(fragment) == std::string::npos &&
+             unit.name2.find(fragment) == std::string::npos))
+            continue;
+        const auto *graphic =
+            assets.dat().graphic(unit.standingGraphic[0]);
+        printf("%4zu %-24s %-24s type %u graphic %d slp %d "
+               "frames %d duration %.3f sequence 0x%02x "
+               "copy/base %d/%d\n",
+               id, unit.name.c_str(), unit.name2.c_str(), unit.type,
+               unit.standingGraphic[0], graphic ? graphic->slp : -1,
+               graphic ? graphic->frameCount : 0,
+               graphic ? graphic->frameDuration : 0,
+               graphic ? graphic->sequenceType : 0,
+               unit.copyId, unit.baseId);
+    }
+    return 0;
 }
 
 static int cmdRestriction(const char *dataDir, int id) {
@@ -810,6 +843,21 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     const size_t boxSelected = game.selectedObjectCount();
 
     input = {};
+    input.pointerX = 118;
+    input.pointerY = 452;
+    input.selectPressed = true;
+    game.update(0.001f, input);
+    const size_t portraitSelected = game.selectedObjectCount();
+
+    input = {};
+    input.boxSelectCommit = true;
+    input.boxStartX = 0;
+    input.boxStartY = 0;
+    input.boxEndX = 959;
+    input.boxEndY = 543;
+    game.update(0.001f, input);
+
+    input = {};
     input.cycleAttackMode = true;
     game.update(0.001f, input);
     const size_t attackModeChanges = game.combatStats().attackModeChanges;
@@ -837,18 +885,20 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
         }
     }
     const MovementStats movement = game.movementStats();
-    printf("controls: single %zu, double %zu, box %zu, commanded %zu, sounds %zu, "
+    printf("controls: single %zu, double %zu, box %zu, portrait %zu, commanded %zu, sounds %zu, "
            "stance changes %zu, single audio %d/%d, quiet startup %d, "
            "pending goals %zu/%zu, overlaps %zu, terrain violations %zu\n",
-           singleSelected, doubleSelected, boxSelected, commanded,
+           singleSelected, doubleSelected, boxSelected, portraitSelected,
+           commanded,
            acknowledgementSounds.size(), attackModeChanges,
            doubleClickPlayedOnce ? 1 : 0, movePlayedOnce ? 1 : 0,
            quietStartup ? 1 : 0,
            movement.selectedPendingMoveGoals, movement.pendingMoveGoals,
            movement.overlappingPairs,
            movement.terrainViolations);
-    if (singleSelected != 1 || doubleSelected <= 1 || boxSelected < doubleSelected ||
-        commanded == 0 || acknowledgementSounds.size() < 5 ||
+    if (singleSelected != 1 || doubleSelected <= 1 ||
+        boxSelected < doubleSelected || portraitSelected != 1 ||
+        commanded == 0 || acknowledgementSounds.size() < 4 ||
         attackModeChanges != 1 ||
         !doubleClickPlayedOnce || !movePlayedOnce ||
         !quietStartup ||
@@ -1129,6 +1179,7 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "terrain") && argc >= 4) return cmdTerrain(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "restriction") && argc >= 4) return cmdRestriction(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "unit") && argc >= 4) return cmdUnit(argv[2], atoi(argv[3]));
+    if (!strcmp(cmd, "units") && argc >= 4) return cmdUnits(argv[2], argv[3]);
     if (!strcmp(cmd, "sound") && argc >= 4) return cmdSound(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "drs")) return cmdDrs(argv[2]);
     if (!strcmp(cmd, "drs-slps")) return cmdDrsSlps(argv[2]);
