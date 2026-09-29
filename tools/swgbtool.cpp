@@ -229,11 +229,13 @@ static int cmdScenario(const char *path, int entryNumber) {
     for (size_t i = 0; i < 8; i++) {
         const ScenarioPlayer &player = scenario.players[i];
         printf("player %zu: active %d, human %d, civ %u, color %u, resources "
-               "%.0f/%.0f/%.0f/%.0f/%.0f, population %.0f, allied victory %d, name '%s'\n",
+               "%.0f/%.0f/%.0f/%.0f/%.0f, population %.0f, allied victory %d, name '%s', diplomacy",
                i + 1, player.active, player.human, player.civilization, player.color,
                player.resources[0], player.resources[1], player.resources[2],
                player.resources[3], player.resources[4], player.populationLimit,
                player.alliedVictory, player.name.c_str());
+        for (size_t other = 0; other < 9; other++) printf(" %u", player.diplomacy[other]);
+        printf("\n");
     }
     printf("triggers: %zu, system %.2f, objective state %u\n", scenario.triggers.size(),
            scenario.triggerSystemVersion, scenario.objectiveState);
@@ -264,12 +266,12 @@ static int cmdScenarioUnits(const char *dataDir, const char *path, int entryNumb
         fprintf(stderr, "error: %s\n", err.c_str());
         return 1;
     }
-    if (detailId >= 0) {
+    if (detailId >= -1) {
         for (const ScenarioUnit &unit : scenario.units) {
-            if (unit.unitId != detailId) continue;
-            printf("player %u spawn %u unit %u at %.2f,%.2f rotation %.6f frame %u\n",
+            if (detailId >= 0 && unit.unitId != detailId) continue;
+            printf("player %u spawn %u unit %u at %.2f,%.2f rotation %.6f frame %u garrison %d\n",
                    unit.player, unit.spawnId, unit.unitId, unit.x, unit.y, unit.rotation,
-                   unit.initialFrame);
+                   unit.initialFrame, unit.garrisonedInId);
         }
         return 0;
     }
@@ -487,7 +489,8 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "campaign")) return cmdCampaign(argv[2]);
     if (!strcmp(cmd, "scenario") && argc >= 4) return cmdScenario(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "scenario-units") && argc >= 5)
-        return cmdScenarioUnits(argv[2], argv[3], atoi(argv[4]), argc > 5 ? atoi(argv[5]) : -1);
+        return cmdScenarioUnits(argv[2], argv[3], atoi(argv[4]),
+                                argc > 5 ? atoi(argv[5]) : -2);
     if (!strcmp(cmd, "angles") && argc >= 5) return cmdAngles(argv[2], atoi(argv[3]), argv[4]);
     if (!strcmp(cmd, "slp") && argc >= 5) return cmdSlp(argv[2], atoi(argv[3]), argv[4], argc > 5 ? atoi(argv[5]) : 16);
     if (!strcmp(cmd, "slopes") && argc >= 5)

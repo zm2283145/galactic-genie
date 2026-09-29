@@ -133,6 +133,7 @@ inline void toScreen(float x, float y, float &sx, float &sy) {
 bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     rng_.seed(seed);
     players_ = {};
+    localPlayer_ = 0;
     for (size_t i = 0; i < players_.size(); i++) players_[i].color = (uint32_t)i;
     mapSize_ = mapSize;
     generateTerrain(mapSize);
@@ -176,6 +177,13 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
 
     rng_.seed(1);
     players_ = scenario.players;
+    localPlayer_ = 0;
+    for (size_t i = 0; i < players_.size(); i++) {
+        if (players_[i].active && players_[i].human) {
+            localPlayer_ = (int)i + 1;
+            break;
+        }
+    }
     mapSize_ = (int)scenario.map.width;
     terrain_.resize(scenario.map.tiles.size());
     // Rotate scenario world coordinates 90 degrees counterclockwise. Transforming
@@ -398,7 +406,19 @@ int Game::playerColorBase(int player) const {
     const auto &pc = assets_.dat().playerColours;
     if (player <= 0) return 16;
     const size_t playerIndex = (size_t)(player - 1);
-    const size_t colorIndex = playerIndex < players_.size() ? players_[playerIndex].color : playerIndex;
+    size_t colorIndex = playerIndex < players_.size() ? players_[playerIndex].color : playerIndex;
+    if (localPlayer_ > 0) {
+        if (player == localPlayer_) {
+            colorIndex = 0; // blue
+        } else {
+            const ScenarioPlayer &local = players_[(size_t)localPlayer_ - 1];
+            const uint32_t stance = (size_t)player < local.diplomacy.size()
+                                        ? local.diplomacy[(size_t)player]
+                                        : UINT32_MAX;
+            if (stance == 0) colorIndex = 3; // yellow ally
+            if (stance == 3) colorIndex = 1; // red enemy
+        }
+    }
     return colorIndex < pc.size() ? pc[colorIndex].playerColorBase : 16;
 }
 

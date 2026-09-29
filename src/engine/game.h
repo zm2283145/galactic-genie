@@ -87,6 +87,7 @@ private:
     std::vector<uint8_t> tileSlope_;
     std::vector<Object> objects_;
     std::array<ScenarioPlayer, 16> players_{};
+    int localPlayer_ = 0;
     float camX_ = 0, camY_ = 0; // world-pixel position of the screen centre
     float zoom_ = 1.0f;
     bool debug_ = false;
