@@ -33,6 +33,7 @@ static int usage() {
             "  swgbtool restriction <DataDir> <restrictionId>\n"
             "  swgbtool unit <DataDir> <unitId>\n"
             "  swgbtool units <DataDir> <name-fragment>\n"
+            "  swgbtool graphics <DataDir> <name-fragment>\n"
             "  swgbtool tech <DataDir> <techId>\n"
             "  swgbtool techs <DataDir> <name-fragment>\n"
             "  swgbtool options <DataDir> <civId> <buildingId>\n"
@@ -42,6 +43,7 @@ static int usage() {
             "  swgbtool slp    <DataDir> <slpId> <out.png> [playerBase]\n"
             "  swgbtool slopes <DataDir> <slpId> <out.png> [frame]\n"
             "  swgbtool render <DataDir> <out.png> [seed] [seconds] [zoom]\n"
+            "  swgbtool render-compact <DataDir> <out.png> [seed] [seconds] [zoom]\n"
             "  swgbtool campaign <file.cpx>\n"
             "  swgbtool scenario <file.cpx> <entry>\n"
             "  swgbtool scenario-units <DataDir> <file.cpx> <entry> [unitId]\n"
@@ -63,6 +65,7 @@ static int cmdInfo(const char *dataDir) {
         fprintf(stderr, "error: %s\n", err.c_str());
         return 1;
     }
+
     const auto &d = a.dat();
     size_t g = 0, u = 0;
     for (auto &x : d.graphics) g += x.exists;
@@ -99,6 +102,39 @@ static int cmdInfo(const char *dataDir) {
         if (terrain.blendType >= 8)
             printf("  terrain %zu %-16s blend type %d, priority %d\n", i, terrain.name2.c_str(),
                    terrain.blendType, terrain.blendPriority);
+    }
+    return 0;
+}
+
+static int cmdGraphics(const char *dataDir,
+                       const char *fragment) {
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    std::string err;
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    for (size_t id = 0;
+         id < assets.dat().graphics.size(); id++) {
+        const dat::Graphic &graphic =
+            assets.dat().graphics[id];
+        if (!graphic.exists ||
+            (graphic.name.find(fragment) ==
+                 std::string::npos &&
+             graphic.fileName.find(fragment) ==
+                 std::string::npos))
+            continue;
+        printf("%5zu %-32s file %-20s slp %d "
+               "frames %d angles %d duration %.3f "
+               "sequence 0x%02x deltas %zu\n",
+               id, graphic.name.c_str(),
+               graphic.fileName.c_str(),
+               graphic.slp, graphic.frameCount,
+               graphic.angleCount,
+               graphic.frameDuration,
+               graphic.sequenceType,
+               graphic.deltas.size());
     }
     return 0;
 }
@@ -470,6 +506,17 @@ static int cmdSound(const char *dataDir, int id) {
         return 1;
     }
     const auto &sounds = assets.dat().sounds;
+    if (id == -1) {
+        for (size_t soundId = 0;
+             soundId < sounds.size(); soundId++) {
+            const auto &sound = sounds[soundId];
+            for (const auto &item : sound.items)
+                printf("%4zu %5d %s\n", soundId,
+                       item.resourceId,
+                       item.fileName.c_str());
+        }
+        return 0;
+    }
     if (id < 0 || (size_t)id >= sounds.size()) {
         fprintf(stderr, "error: sound ID out of range\n");
         return 1;
@@ -746,7 +793,8 @@ static int cmdSlopes(const char *dataDir, int id, const char *out, size_t frame)
     return 0;
 }
 
-static int cmdRender(const char *dataDir, const char *out, uint32_t seed, float seconds, float zoom) {
+static int cmdRender(const char *dataDir, const char *out, uint32_t seed,
+                     float seconds, float zoom, bool compact = false) {
     SoftRenderer r;
     Assets a(&r);
     std::string err;
@@ -756,7 +804,9 @@ static int cmdRender(const char *dataDir, const char *out, uint32_t seed, float 
         return 1;
     }
     Game g(a);
-    if (!g.init(seed, 64, &err)) {
+    if (!(compact
+              ? g.initCompactTestMap(seed, 64, &err)
+              : g.init(seed, 64, &err))) {
         fprintf(stderr, "error: %s\n", err.c_str());
         return 1;
     }
@@ -1406,6 +1456,7 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
     bool constructionCompleted = false;
     bool constructionAssignmentCleared = false;
     bool constructionReassigned = false;
+    bool multipleBuildersAssigned = false;
     bool builderStateEntered = false;
     bool garrisonModeActivated = false;
     bool workerGarrisoned = false;
@@ -1566,6 +1617,18 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
             if (game.objectScreenPosition(
                     foundationId, screenW, screenH,
                     foundationX, foundationY)) {
+                const std::array<float, 2>
+                    foundationPosition =
+                        game.objectPosition(
+                            foundationId);
+                const uint32_t secondBuilderId =
+                    game.spawnObjectForTesting(
+                        3, 83, 1,
+                        foundationPosition[0] + 3.0f,
+                        foundationPosition[1] + 1.0f);
+                game.selectObjectsForTesting(
+                    {selectedWorkerId,
+                     secondBuilderId});
                 input = {};
                 input.pointerX = foundationX;
                 input.pointerY = foundationY;
@@ -1575,6 +1638,13 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
                     game.constructionBuilderId(
                         foundationId) ==
                     selectedWorkerId;
+                multipleBuildersAssigned =
+                    game.objectBuildingTarget(
+                        selectedWorkerId,
+                        foundationId) &&
+                    game.objectBuildingTarget(
+                        secondBuilderId,
+                        foundationId);
                 for (int frame = 0;
                      frame < 1500 &&
                      !builderStateEntered;
@@ -1839,10 +1909,20 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
     const bool remainsDecayed = game.combatStats().activeRemains == 0;
     const int commandCenterBeforeAge =
         game.objectUnitId(commandCenterId);
+    const uint32_t troopCenterId =
+        game.spawnObjectForTesting(
+            3, 87, 1,
+            mapSize * 0.30f + 8.0f,
+            mapSize * 0.35f + 8.0f);
     const bool buildingUpgraded =
         game.researchTechnology(1, 1) &&
         commandCenterBeforeAge == 109 &&
         game.objectUnitId(commandCenterId) == 71;
+    const bool upgradedProductionMenusWork =
+        !game.productionOptionIds(
+                 commandCenterId).empty() &&
+        !game.productionOptionIds(
+                 troopCenterId).empty();
 
     Game systems(assets);
     if (!systems.init(0x51E1D, mapSize, &err)) {
@@ -1920,12 +2000,19 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
             0.01f;
     systems.moveObjectForTesting(
         shieldBuildingId, 40.0f, 48.0f);
-    systems.update(0.1f, {});
-    const bool shieldClearedOutsideRadius =
+    const float shieldBeforeLeaving =
         systems.objectShieldPoints(
-            shieldBuildingId) == 0 &&
+            shieldBuildingId);
+    systems.update(0.1f, {});
+    const bool shieldRetainedOutsideRadius =
+        systems.objectShieldPoints(
+            shieldBuildingId) <
+            shieldBeforeLeaving &&
+        systems.objectShieldPoints(
+            shieldBuildingId) >
+            shieldBeforeLeaving - 4.1f &&
         systems.objectMaxShieldPoints(
-            shieldBuildingId) == 0;
+            shieldBuildingId) > 0;
     systems.moveObjectForTesting(
         shieldBuildingId, 13.0f, 48.0f);
     systems.update(400.0f, {});
@@ -1958,17 +2045,78 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
             testBaseY + 2.0f);
     const float foodBeforeGathering =
         systems.resource(1, 0);
-    const bool gatherOrderIssued =
-        systems.issueGatherForTesting(
+    const uint32_t secondGatherWorkerId =
+        systems.spawnObjectForTesting(
+            3, 83, 1,
+            testBaseX + 3.5f,
+            testBaseY + 2.8f);
+    systems.lookAt(
+        testBaseX + 4.75f,
+        testBaseY + 2.0f);
+    const bool gatherWorkerSelected =
+        systems.selectObjectsForTesting(
+            {gatherWorkerId,
+             secondGatherWorkerId});
+    float foodScreenX = 0.0f;
+    float foodScreenY = 0.0f;
+    const bool foodOnScreen =
+        systems.objectScreenPosition(
+            foodId, screenW, screenH,
+            foodScreenX, foodScreenY);
+    InputState gatherInput{};
+    gatherInput.commandPressed = true;
+    gatherInput.pointerX = foodScreenX;
+    gatherInput.pointerY = foodScreenY;
+    if (foodOnScreen)
+        systems.update(0.001f, gatherInput);
+    const bool gatherInputAccepted =
+        systems.objectGatheringTarget(
             gatherWorkerId, foodId);
+    const bool multipleGatherersAssigned =
+        gatherInputAccepted &&
+        systems.objectGatheringTarget(
+            secondGatherWorkerId, foodId);
     for (int frame = 0; frame < 2400 &&
          systems.resource(1, 0) <=
              foodBeforeGathering; frame++)
         systems.update(1.0f / 30.0f, {});
     const bool workerGatheredAndDeposited =
-        gatherOrderIssued &&
+        gatherWorkerSelected &&
+        foodOnScreen &&
+        multipleGatherersAssigned &&
         systems.resource(1, 0) >
             foodBeforeGathering;
+    if (!workerGatheredAndDeposited) {
+        const std::array<float, 2> workerPosition =
+            systems.objectPosition(gatherWorkerId);
+        fprintf(
+            stderr,
+            "gather input debug: selected %d screen %d "
+            "accepted %d resource %.1f -> %.1f at %.1f,%.1f "
+            "carried %.1f remaining %.1f moving %zu target %d "
+            "position %.2f,%.2f\n",
+            gatherWorkerSelected ? 1 : 0,
+            foodOnScreen ? 1 : 0,
+            gatherInputAccepted ? 1 : 0,
+            foodBeforeGathering,
+            systems.resource(1, 0),
+            foodScreenX, foodScreenY,
+            systems.objectCarriedAmount(
+                gatherWorkerId),
+            systems.objectResourceAmount(foodId),
+            systems.selectedMovingObjectCount(),
+            systems.objectGatheringTarget(
+                gatherWorkerId, foodId) ? 1 : 0,
+            workerPosition[0], workerPosition[1]);
+    }
+    const std::vector<int> farmEconomyBuildings =
+        systems.buildingOptionIds(
+            gatherWorkerId, 2);
+    const bool farmAvailable =
+        std::find(
+            farmEconomyBuildings.begin(),
+            farmEconomyBuildings.end(),
+            50) != farmEconomyBuildings.end();
 
     const uint32_t repairWorkerId =
         systems.spawnObjectForTesting(
@@ -2151,11 +2299,11 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            "building destroyed/remains/decayed %d/%d/%d, edge scroll %d, "
            "attack audio %d, offscreen muted %d, approach retries %zu, "
            "automatic/retaliation/armed %zu/%zu/%zu, tech damage %d -> %d, "
-           "worker builds/pages %d/%d, research queued/cost/cancelled/completed/upgrade %d/%d/%d/%d/%d, "
+           "worker builds/pages/farm %d/%d/%d, research queued/cost/cancelled/completed/upgrade/menus %d/%d/%d/%d/%d/%d, "
            "garrison mode/entered/ejected %d/%d/%d, "
-           "foundation placed/reassigned/builder/completed %d/%d/%d/%d, "
+           "foundation placed/reassigned/multi/builder/completed %d/%d/%d/%d/%d, "
            "shields building/mobile/overflow/leave/full/drain %d/%d/%d/%d/%d/%d, "
-           "gather/repair/ally-mech/livestock/gate/empty-menu %d/%d/%d/%d/%d/%d, "
+           "gather/multi/repair/ally-mech/livestock/gate/empty-menu %d/%d/%d/%d/%d/%d/%d, "
            "formation immediate %d, "
            "repair order/hp/carbon %d/%.1f->%.1f/%.1f->%.1f gate locked/passable %d/%d, "
            "building damage/destroy %.2f/%.2fs\n",
@@ -2175,11 +2323,13 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            baseBuildingDamage, upgradedBuildingDamage,
            workerCanBuild ? 1 : 0,
            buildingPagesSeparated ? 1 : 0,
+           farmAvailable ? 1 : 0,
            researchQueued ? 1 : 0,
            researchCostDeducted ? 1 : 0,
            researchCancelled ? 1 : 0,
            researchCompleted ? 1 : 0,
            buildingUpgraded ? 1 : 0,
+           upgradedProductionMenusWork ? 1 : 0,
            garrisonModeActivated ? 1 : 0,
            workerGarrisoned ? 1 : 0,
            workerEjected ? 1 : 0,
@@ -2188,18 +2338,20 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
                    constructionReassigned
                ? 1
                : 0,
+           multipleBuildersAssigned ? 1 : 0,
            builderStateEntered ? 1 : 0,
            constructionCompleted ? 1 : 0,
            buildingShieldAbsorbed ? 1 : 0,
            mobileShieldBleedThrough ? 1 : 0,
            shieldOverflowDamagedHealth ? 1 : 0,
-           shieldClearedOutsideRadius ? 1 : 0,
+           shieldRetainedOutsideRadius ? 1 : 0,
            shieldChargedFully ? 1 : 0,
            shieldFixturesCreated &&
                    unpoweredShieldDrained
                ? 1
                : 0,
            workerGatheredAndDeposited ? 1 : 0,
+           multipleGatherersAssigned ? 1 : 0,
            workerRepairedBuilding ? 1 : 0,
            workerRepairedAlliedMech ? 1 : 0,
            livestockCaptured ? 1 : 0,
@@ -2233,24 +2385,28 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         !researchedFocusCoils ||
         !workerCanBuild ||
         !buildingPagesSeparated ||
+        !farmAvailable ||
         !researchQueued || !researchCostDeducted ||
         !researchCancelled || !researchCompleted ||
         !buildingUpgraded ||
+        !upgradedProductionMenusWork ||
         !garrisonModeActivated || !workerGarrisoned ||
         !workerEjected ||
         !foundationPlaced ||
         !constructionAssignmentCleared ||
         !constructionReassigned ||
+        !multipleBuildersAssigned ||
         !builderStateEntered ||
         !constructionCompleted ||
         !buildingShieldAbsorbed ||
         !mobileShieldBleedThrough ||
         !shieldOverflowDamagedHealth ||
-        !shieldClearedOutsideRadius ||
+        !shieldRetainedOutsideRadius ||
         !shieldChargedFully ||
         !shieldFixturesCreated ||
         !unpoweredShieldDrained ||
         !workerGatheredAndDeposited ||
+        !multipleGatherersAssigned ||
         !workerRepairedBuilding ||
         !workerRepairedAlliedMech ||
         !livestockCaptured ||
@@ -2272,6 +2428,34 @@ static int cmdAngles(const char *dataDir, int gid, const char *out) {
     if (!a.init(dataDir, &err)) {
         fprintf(stderr, "error: %s\n", err.c_str());
         return 1;
+    }
+    if (const dat::Graphic *graphic = a.dat().graphic(gid)) {
+        printf("graphic %d '%s' file '%s': slp %d frames %d angles %d duration %.3f "
+               "sequence 0x%02x layer %u deltas %zu\n",
+               gid, graphic->name.c_str(), graphic->fileName.c_str(),
+               graphic->slp, graphic->frameCount,
+               graphic->angleCount, graphic->frameDuration,
+               graphic->sequenceType, graphic->layer,
+               graphic->deltas.size());
+        for (const dat::GraphicDelta &delta :
+             graphic->deltas)
+            printf("  delta graphic %d offset %d,%d display-angle %d\n",
+                   delta.graphicId, delta.offsetX, delta.offsetY,
+                   delta.displayAngle);
+        if (graphic->slp < 0) {
+            const size_t suffix = graphic->name.rfind('-');
+            const std::string prefix =
+                graphic->name.substr(0, suffix == std::string::npos
+                                            ? graphic->name.size()
+                                            : suffix + 1);
+            for (size_t i = 0; i < a.dat().graphics.size(); i++) {
+                const dat::Graphic &candidate = a.dat().graphics[i];
+                if (candidate.exists && candidate.slp >= 0 &&
+                    candidate.name.rfind(prefix, 0) == 0)
+                    printf("  variant %zu '%s': slp %d\n", i,
+                           candidate.name.c_str(), candidate.slp);
+            }
+        }
     }
     Game g(a);
     r.beginFrame(8 * 120, 140, 1.0f, 60, 110, 60);
@@ -2297,6 +2481,8 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "restriction") && argc >= 4) return cmdRestriction(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "unit") && argc >= 4) return cmdUnit(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "units") && argc >= 4) return cmdUnits(argv[2], argv[3]);
+    if (!strcmp(cmd, "graphics") && argc >= 4)
+        return cmdGraphics(argv[2], argv[3]);
     if (!strcmp(cmd, "tech") && argc >= 4) return cmdTech(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "techs") && argc >= 4) return cmdTechs(argv[2], argv[3]);
     if (!strcmp(cmd, "options") && argc >= 5)
@@ -2316,6 +2502,12 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "render") && argc >= 4)
         return cmdRender(argv[2], argv[3], argc > 4 ? (uint32_t)atoi(argv[4]) : 1, argc > 5 ? (float)atof(argv[5]) : 0,
                          argc > 6 ? (float)atof(argv[6]) : 1.0f);
+    if (!strcmp(cmd, "render-compact") && argc >= 4)
+        return cmdRender(argv[2], argv[3],
+                         argc > 4 ? (uint32_t)atoi(argv[4]) : 1,
+                         argc > 5 ? (float)atof(argv[5]) : 0,
+                         argc > 6 ? (float)atof(argv[6]) : 1.0f,
+                         true);
     if (!strcmp(cmd, "render-scenario") && argc >= 6)
         return cmdRenderScenario(argv[2], argv[3], atoi(argv[4]), argv[5],
                                  argc > 6 ? (float)atof(argv[6]) : -1.0f,

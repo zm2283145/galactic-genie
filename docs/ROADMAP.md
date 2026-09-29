@@ -51,25 +51,33 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   acquire targets and retaliate automatically. Building damage overlays sort above their owning
   building while preserving world depth. Group attacks reserve separate melee/ranged approach slots,
   use outer waiting positions when contact space is full, and pass through attackers bound for
-  different final slots rather than deadlocking.
+  different final slots rather than deadlocking. Units sharing an attack, construction, gathering,
+  repair, garrison, or formation destination cooperatively yield and displace one another instead of
+  treating every nearby unit as a hard obstacle.
   Accuracy, blast damage, and explicit guard/patrol commands remain.
 - Economy: the four SWGB resources drive shared building queues for units and research. Original
   `tech-level-1`, `MADE-*`, and `AVAIL-*` technologies determine civilization-correct production
   choices, while researched replacement effects upgrade both available choices and existing units
-  and buildings. Every queued unit/research item is displayed and can be cancelled for a refund.
+  and buildings. Production locations follow each building's researched upgrade lineage, so Command
+  Centers and Troop Centers retain their original production menus after advancing a Tech Level.
+  Every queued unit/research item is displayed and can be cancelled for a refund.
   Power Cores provide the original nine-tile power coverage; unpowered buildings train and research
   at 25% speed. DAT power-indicator frames render solid green while powered and blink red while
   unpowered. Selected buildings also show powered/unpowered and shield-coverage icons. Power Core
   placement/construction uses the original blue coverage ring, while Shield Generators retain the
-  original yellow shield-boundary ring through placement, construction, and completion. Workers expose
+  original yellow shield-boundary ring during placement and draw their original civilization-specific
+  animated shield field while completed and powered. Workers expose
   technology-driven economy, military, and defense building pages, validate placement and costs with
   flashing green/red footprints, walk to foundations, switch to their original Builder state, and
-  construct buildings with progressive graphics and hit points. Retasked workers can resume a
-  foundation through a contextual command. Workers use original resource cursors, task variants,
+  construct buildings with progressive graphics and hit points. Multiple workers can be assigned to
+  one foundation using the original diminishing-returns build-rate curve; retasked workers can resume
+  a foundation through a contextual command. Workers use original resource cursors, task variants,
   working/carrying animations, capacities, and civilization drop sites while gathering food,
-  carbon, ore, and nova; depleted static nodes are removed. Neutral Nerfs and Banthas use the
+  carbon, ore, and nova, and multiple selected workers can share one gather order; depleted static
+  nodes are removed. Farms are available as a base economy building rather than depending on their
+  circular `MADE-*` technology. Neutral Nerfs and Banthas use the
   original Gaia color and convert through proximity capture. Live-animal slaughter, farms,
-  fishing, automatic adjacent-node retargeting, multiple builders, and population-limit
+  fishing, automatic adjacent-node retargeting, and population-limit
   enforcement remain.
 - Researched technology effects apply packed DAT attack/armor modifiers plus generic health, speed,
   and reload-time modifiers, along with chained unit/building upgrade and age effects. Remaining
@@ -78,8 +86,9 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 - SWGB-specific mechanics: power and shield coverage are implemented. A powered Shield Generator
   gives eligible units and buildings a gold shield bar equal to maximum HP, with original
   tiered regeneration, non-stacking coverage, overflow damage, and one-HP per-hit leakage for
-  mobile units but not buildings. Unpowered generators drain shields at 40 points per second,
-  reduced to 20 by Superconducting Shields; Shield Wall enables adjacent wall coverage.
+  mobile units but not buildings. Shields retained after leaving coverage drain visibly at 40
+  points per second, reduced to 20 by Superconducting Shields; Shield Wall enables adjacent wall
+  coverage. World and selection bars display the remaining shield amount numerically.
   Air-unit special behavior, Jedi/Sith conversion, and holocrons remain.
 
 ## Milestone 4: interface and input on Vita
@@ -99,16 +108,20 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   ejection and capacity feedback. Choosing a formation immediately rearranges idle combat units.
   Workers open three categorized building pages with placement previews. Empty buildings do not
   expose an action-menu hint. Selection status distinguishes the local player,
-  named allies, neutral sides, and enemies using scenario diplomacy. A persistent resource and population bar is shown at
-  the top. A scrollable L + R + Select test menu exposes
+  named allies, neutral sides, and enemies using scenario diplomacy, scenario player names, and
+  civilization names. Status icons expose powered, unpowered, shielded, and unshielded tooltips.
+  A persistent resource, population, and Tech Level bar is shown at the top, including age-research
+  progress. A scrollable L + R + Select test menu exposes
   the original base-game and Clone Campaigns cheats, including resource grants, unit spawns, instant
   production/construction, victory/player defeat, and hidden DAT cheat technologies. General worker
   guard/patrol buttons, minimap, and pause menu remain.
 - Audio: selection, move, and attack acknowledgements plus camera-relative weapon-fire, impact, and
   death effects are implemented. The original Ogg soundtrack streams from storage, ducks beneath
   scenario dialogue, and mixes with terrain-specific world ambience. Garrison/ejection, gate
-  transformation, unit-training, and construction cues use their DAT sound groups. User-facing
-  volume controls remain.
+  transformation, unit-training, construction-start, and building-completion cues use their DAT
+  sound groups. The DAT has no per-technology completion sound field, so the original generic
+  research-completion cue still requires executable-level verification. User-facing volume controls
+  remain.
 
 ## Milestone 5: AI and skirmish
 - A subset of the AI script interpreter (`.per` rules), checked against the original using Ghidra where needed.

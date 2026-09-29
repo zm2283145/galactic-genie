@@ -190,6 +190,14 @@ public:
     uint32_t constructionBuilderId(
         uint32_t spawnId) const;
     bool objectIsBuilder(uint32_t spawnId) const;
+    bool objectGatheringTarget(
+        uint32_t spawnId, uint32_t targetId) const;
+    bool objectBuildingTarget(
+        uint32_t spawnId, uint32_t targetId) const;
+    float objectCarriedAmount(uint32_t spawnId) const;
+    float objectResourceAmount(uint32_t spawnId) const;
+    std::array<float, 2> objectPosition(
+        uint32_t spawnId) const;
     bool technologyResearched(int player, int technologyId) const {
         return player >= 0 &&
                (size_t)player < researchedTechs_.size() &&
@@ -415,7 +423,10 @@ private:
     void selectObject(Object &object, bool first = false);
     void syncSelectionOrder();
     std::vector<Object *> selectedObjectsInOrder(bool selectableOnly);
-    Object *objectAtScreen(float screenX, float screenY, int screenW, int screenH);
+    Object *objectAtScreen(float screenX, float screenY, int screenW,
+                           int screenH, bool includeGatherables = false);
+    Object *gatherableAtScreen(float screenX, float screenY,
+                               int screenW, int screenH);
     Object *enemyAtScreen(float screenX, float screenY, int screenW, int screenH);
     void selectAtScreen(float screenX, float screenY, int screenW, int screenH);
     void selectBox(float startX, float startY, float endX, float endY,
@@ -428,6 +439,8 @@ private:
     bool openSelectedActionMenu();
     std::vector<const dat::Unit *> productionOptions(
         const Object &building) const;
+    bool buildingMatchesLocation(
+        const Object &building, int locationId) const;
     std::vector<int> researchOptions(
         const Object &building) const;
     std::vector<const dat::Unit *> buildingOptions(
@@ -443,6 +456,9 @@ private:
     void refreshAllAutomaticTechnologies();
     std::string unitDisplayName(const dat::Unit &unit) const;
     std::string ownershipLabel(int player) const;
+    std::string factionName(int civilization) const;
+    char factionAbbreviation(int civilization) const;
+    int civilizationGraphic(int graphicId, int player) const;
     bool isWorker(const Object &object) const;
     bool isPowerCore(const Object &object) const;
     bool isShieldGenerator(const Object &object) const;
@@ -481,6 +497,7 @@ private:
     void updateRepairing(float dt);
     bool canGarrison(const Object &unit,
                      const Object &building) const;
+    uint8_t garrisonCategory(const Object &unit) const;
     size_t garrisonedCount(const Object &building,
                            bool includeIncoming) const;
     bool issueGarrisonCommand(Object &building);
@@ -563,6 +580,8 @@ private:
     mutable std::vector<int> pathParentScratch_;
     mutable std::vector<uint32_t> pathSearchStamp_;
     mutable uint32_t pathSearchGeneration_ = 0;
+    mutable std::map<std::pair<int, int>, int>
+        civilizationGraphicCache_;
     std::array<ScenarioPlayer, 16> players_{};
     std::array<std::map<int, float>, 17> resources_{};
     std::array<std::set<int>, 17> researchedTechs_{};
