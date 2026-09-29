@@ -117,6 +117,7 @@ public:
     bool triggerEnabled(size_t id) const;
     bool triggerFired(size_t id) const;
     bool gateLocked(uint32_t spawnId) const;
+    size_t gateCount() const;
     bool objectActive(uint32_t spawnId) const;
     float resource(int player, int resourceId) const;
     bool researchTechnology(int player, int technologyId);
@@ -260,6 +261,7 @@ private:
     const Object *findObject(uint32_t spawnId) const;
     int civilizationForPlayer(int player) const;
     void rebuildAdjacency();
+    bool configureGate(Object &object);
     void rebuildMobileOccupancy();
     void updateTriggers(float dt);
     bool conditionMet(const ScenarioCondition &condition, float triggerElapsed);

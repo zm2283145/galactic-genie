@@ -459,27 +459,14 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
             }
         }
     }
+    for (Object &object : objects_)
+        configureGate(object);
     for (const ScenarioTrigger &trigger : triggers_)
         for (const ScenarioEffect &effect : trigger.effects)
             if (effect.type == 6 || effect.type == 7)
                 for (uint32_t spawnId : effect.selectedUnitIds)
-                    if (Object *object = findObject(spawnId)) {
-                        object->gate = true;
-                        const std::string &name = object->unit->name;
-                        const size_t closed = name.rfind("CLOS");
-                        if (closed != std::string::npos &&
-                            closed + 4 == name.size()) {
-                            const std::string prefix =
-                                name.substr(0, closed);
-                            const int civilization =
-                                civilizationForPlayer(object->player);
-                            object->gateClosedUnit = object->unit;
-                            object->gateOpenUnit =
-                                findUnit(civilization, prefix + "OPEN");
-                            object->gateEndUnit =
-                                findUnit(civilization, prefix + "END");
-                        }
-                    }
+                    if (Object *object = findObject(spawnId))
+                        configureGate(*object);
     rebuildAdjacency();
     const Object *hero = nullptr;
     size_t heroCount = 0;
@@ -610,6 +597,28 @@ Game::Object *Game::addObject(const dat::Unit *unit, int player, float x, float 
     objects_.push_back(object);
     if (spawnId) objectIndices_[spawnId] = objects_.size() - 1;
     return &objects_.back();
+}
+
+bool Game::configureGate(Object &object) {
+    if (!object.unit) return false;
+    const std::string &name = object.unit->name;
+    const size_t closed = name.rfind("CLOS");
+    if (closed == std::string::npos ||
+        closed + 4 != name.size())
+        return false;
+    const std::string prefix = name.substr(0, closed);
+    const int civilization =
+        civilizationForPlayer(object.player);
+    const dat::Unit *open =
+        findUnit(civilization, prefix + "OPEN");
+    const dat::Unit *end =
+        findUnit(civilization, prefix + "END");
+    if (!open || !end) return false;
+    object.gate = true;
+    object.gateClosedUnit = object.unit;
+    object.gateOpenUnit = open;
+    object.gateEndUnit = end;
+    return true;
 }
 
 Game::Object *Game::spawn(int civ, const std::string &name, int player, float x, float y, float facing) {
@@ -949,6 +958,17 @@ bool Game::triggerFired(size_t id) const {
 bool Game::gateLocked(uint32_t spawnId) const {
     const Object *object = findObject(spawnId);
     return object && object->active && object->locked;
+}
+
+size_t Game::gateCount() const {
+    return (size_t)std::count_if(
+        objects_.begin(), objects_.end(),
+        [](const Object &object) {
+            return object.active && object.gate &&
+                   object.gateClosedUnit &&
+                   object.gateOpenUnit &&
+                   object.gateEndUnit;
+        });
 }
 
 bool Game::objectActive(uint32_t spawnId) const {
@@ -3413,7 +3433,7 @@ void Game::executeEffect(const ScenarioEffect &effect) {
     case 6:
     case 7: {
         for (Object *object : effectTargets(effect)) {
-            object->gate = true;
+            configureGate(*object);
             object->locked = effect.type == 7;
             if (object->locked && object->gateClosedUnit) {
                 object->unit = object->gateClosedUnit;

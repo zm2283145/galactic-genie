@@ -162,6 +162,18 @@ static int cmdUnit(const char *dataDir, int id) {
                    unit.frameDelay, unit.graphicDisplacement[0], unit.graphicDisplacement[1],
                    unit.graphicDisplacement[2],
                    unit.displayedAttack, unit.displayedMeleeArmour);
+            if (graphic)
+                for (const auto &delta : graphic->deltas) {
+                   const auto *child =
+                       assets.dat().graphic(delta.graphicId);
+                   printf("  delta graphic %d offset %d,%d frames %d "
+                          "duration %.3f sequence 0x%02x slp %d\n",
+                          delta.graphicId, delta.offsetX, delta.offsetY,
+                          child ? child->frameCount : 0,
+                          child ? child->frameDuration : 0.0f,
+                          child ? child->sequenceType : 0,
+                          child ? child->slp : -1);
+                }
             printf("  interface name id %d '%s', internal '%s', icon %d, portrait %d, kind %u, line %d\n",
                    unit.languageDllName,
                    assets.localizedString(unit.languageDllName).c_str(),
@@ -882,6 +894,7 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
         startupCombat.attacksLanded == 0 &&
         startupCombat.unitsKilled == 0 &&
         startupCombat.projectilesLaunched == 0;
+    const size_t configuredGates = game.gateCount();
     input.pointerX = 480;
     input.pointerY = 272;
     input.selectPressed = true;
@@ -999,7 +1012,7 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     }
     const MovementStats movement = game.movementStats();
     printf("controls: single %zu, double %zu, box %zu, portrait %zu, commanded %zu, sounds %zu, move %.2fs, "
-           "leader double/portrait %d/%d, stance changes %zu, single audio %d/%d, quiet startup %d, cheat %d, "
+           "leader double/portrait %d/%d, stance changes %zu, single audio %d/%d, quiet startup %d, gates %zu, cheat %d, "
            "pending goals %zu/%zu, overlaps %zu (%u:u%d:s%d/%u:u%d:s%d), terrain violations %zu\n",
            singleSelected, doubleSelected, boxSelected, portraitSelected,
            commanded, acknowledgementSounds.size(),
@@ -1009,6 +1022,7 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
            attackModeChanges,
            doubleClickPlayedOnce ? 1 : 0, movePlayedOnce ? 1 : 0,
            quietStartup ? 1 : 0,
+           configuredGates,
            forceFoodGranted ? 1 : 0,
            movement.selectedPendingMoveGoals, movement.pendingMoveGoals,
            movement.overlappingPairs,
@@ -1024,7 +1038,8 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
         !firstPortraitSelectedLeader ||
         attackModeChanges != 1 ||
         !doubleClickPlayedOnce || !movePlayedOnce ||
-        !quietStartup || !forceFoodGranted ||
+        !quietStartup || configuredGates < 3 ||
+        !forceFoodGranted ||
         movement.selectedPendingMoveGoals != 0 ||
         movement.overlappingPairs != 0 ||
         movement.terrainViolations != 0) {
