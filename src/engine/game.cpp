@@ -5,6 +5,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <queue>
@@ -22,6 +23,7 @@ constexpr size_t kCursorNormal = 0;
 constexpr size_t kCursorCommand = 3;
 constexpr size_t kCursorAttack = 4;
 constexpr size_t kCursorMove = 11;
+constexpr int kUnitIconSlpBase = 53251;
 
 // Terrain ids from genie_x1.dat's terrain table.
 enum : uint8_t {
@@ -756,8 +758,40 @@ std::vector<std::string> wrapText(const std::string &text, size_t columns) {
     return lines;
 }
 
+std::string displayUnitName(const dat::Unit &unit,
+                            const std::string &localizedName) {
+    std::string name =
+        localizedName.empty()
+            ? (unit.name2.empty() ? unit.name : unit.name2)
+            : localizedName;
+    if (name.rfind("UNIT-", 0) == 0) name.erase(0, 5);
+    for (char &c : name)
+        if (c == '-' || c == '_') c = ' ';
+    std::string cleaned;
+    cleaned.reserve(name.size());
+    bool previousSpace = true;
+    for (char c : name) {
+        const bool space = std::isspace((unsigned char)c) != 0;
+        if (space && previousSpace) continue;
+        cleaned.push_back(space ? ' ' : c);
+        previousSpace = space;
+    }
+    while (!cleaned.empty() && cleaned.back() == ' ') cleaned.pop_back();
+    if (cleaned.empty()) cleaned = "UNIT " + std::to_string(unit.id);
+    return cleaned;
+}
+
+std::string displayDecimal(float value) {
+    std::ostringstream text;
+    text << std::fixed << std::setprecision(
+                std::abs(value - std::round(value)) < 0.05f ? 0 : 1)
+         << value;
+    return text.str();
+}
+
 void drawBitmapText(Renderer &renderer, const std::vector<std::string> &lines,
-                    float x, float y, float pixel) {
+                    float x, float y, float pixel, uint8_t red = 255,
+                    uint8_t green = 255, uint8_t blue = 255) {
     for (size_t line = 0; line < lines.size(); line++) {
         for (size_t column = 0; column < lines[line].size(); column++) {
             const uint64_t bits = glyphBits(lines[line][column]);
@@ -772,7 +806,8 @@ void drawBitmapText(Renderer &renderer, const std::vector<std::string> &lines,
                     while (bit < 5 && (rowBits & (1 << (4 - bit)))) bit++;
                     renderer.fillRect(x + (column * 6 + start) * pixel,
                                       y + (line * 9 + row) * pixel,
-                                      (bit - start) * pixel, pixel, 255, 255, 255, 255);
+                                      (bit - start) * pixel, pixel,
+                                      red, green, blue, 255);
                 }
             }
         }
@@ -2858,6 +2893,51 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     const bool reducedTerrainLighting = overview;
     Texture *selectionRing = assets_.selectionRing();
     const SpriteSheet *cursors = assets_.interfaceSheet(kCursorSlp);
+    const Object *panelObject = nullptr;
+    const Object *selectedAttacker = nullptr;
+    size_t panelSelectionCount = 0;
+    float panelHitPoints = 0, panelMaxHitPoints = 0;
+    bool panelMixedUnits = false;
+    bool mixedAttackModes = false;
+    for (const Object &object : objects_) {
+        if (!object.selected || !isInspectable(object)) continue;
+        if (!panelObject)
+            panelObject = &object;
+        else if (panelObject->unit->id != object.unit->id)
+            panelMixedUnits = true;
+        panelSelectionCount++;
+        panelHitPoints += object.hitPoints;
+        panelMaxHitPoints += object.maxHitPoints;
+        if (!canAttack(object)) continue;
+        if (!selectedAttacker)
+            selectedAttacker = &object;
+        else if (selectedAttacker->attackMode != object.attackMode)
+            mixedAttackModes = true;
+    }
+    const SpriteFrame *panelPortrait = nullptr;
+    bool panelPortraitFlipped = false;
+    if (panelObject) {
+        const int civilization = civilizationForPlayer(panelObject->player);
+        const SpriteSheet *icons =
+            assets_.interfaceSheet(kUnitIconSlpBase + civilization);
+        if (icons && panelObject->unit->iconId >= 0 &&
+            (size_t)panelObject->unit->iconId < icons->frames.size()) {
+            panelPortrait = &icons->frames[(size_t)panelObject->unit->iconId];
+        } else {
+            const dat::Graphic *graphic =
+                assets_.dat().graphic(panelObject->unit->standingGraphic[0]);
+            const SpriteSheet *sheet =
+                graphic ? assets_.sheet(graphic->slp,
+                                        playerColorBase(panelObject->player))
+                        : nullptr;
+            size_t frame = 0;
+            if (graphic && sheet &&
+                pickFrame(*graphic, sheet->frames.size(), panelObject->facing,
+                          panelObject->animTime, 0, frame,
+                          panelPortraitFlipped))
+                panelPortrait = &sheet->frames[frame];
+        }
+    }
     // At overview zoom the blend overlays are sub-pixel detail but account for
     // hundreds of extra masked draws and slope-mask cache entries on Vita.
     const bool drawTerrainBlends = !overview && assets_.hasBlendMasks();
@@ -3242,6 +3322,8 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         r.fillRect(sx - barWidth * 0.5f - 1.0f / zoom_, barY - 1.0f / zoom_,
                    barWidth + 2.0f / zoom_, barHeight + 2.0f / zoom_,
                    0, 0, 0, 230);
+        r.fillRect(sx - barWidth * 0.5f, barY, barWidth, barHeight,
+                   185, 32, 28, 255);
         r.fillRect(sx - barWidth * 0.5f, barY, barWidth * health, barHeight,
                    20, 220, 55, 255);
     }
@@ -3286,18 +3368,107 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             }
     }
 
-    const Object *selectedAttacker = nullptr;
-    bool mixedAttackModes = false;
-    for (const Object &object : objects_) {
-        if (!object.selected || !isSelectable(object) || !canAttack(object)) continue;
-        if (!selectedAttacker)
-            selectedAttacker = &object;
-        else if (selectedAttacker->attackMode != object.attackMode)
-            mixedAttackModes = true;
-    }
-    if (selectedAttacker) {
+    if (panelObject) {
+        const float invZoom = 1.0f / zoom_;
+        const float panelHeight = 112.0f;
+        const float panelX = 0;
+        const float panelY = (screenH - panelHeight) * invZoom;
+        const float panelW = screenW * invZoom;
+        const float portraitX = 14.0f * invZoom;
+        const float portraitY = panelY + 12.0f * invZoom;
+        const float portraitW = 86.0f * invZoom;
+        const float portraitH = 86.0f * invZoom;
+        r.fillRect(panelX, panelY, panelW, panelHeight * invZoom,
+                   5, 8, 16, 238);
+        r.fillRect(panelX, panelY, panelW, 3.0f * invZoom,
+                   196, 188, 145, 255);
+        r.fillRect(portraitX, portraitY, portraitW, portraitH,
+                   18, 25, 38, 255);
+        r.fillRect(portraitX, portraitY, portraitW, 2.0f * invZoom,
+                   104, 119, 132, 255);
+        r.fillRect(portraitX, portraitY + portraitH - 2.0f * invZoom,
+                   portraitW, 2.0f * invZoom, 104, 119, 132, 255);
+        r.fillRect(portraitX, portraitY, 2.0f * invZoom, portraitH,
+                   104, 119, 132, 255);
+        r.fillRect(portraitX + portraitW - 2.0f * invZoom, portraitY,
+                   2.0f * invZoom, portraitH, 104, 119, 132, 255);
+        if (panelPortrait && panelPortrait->w > 0 && panelPortrait->h > 0) {
+            const float maxPortraitW = 76.0f * invZoom;
+            const float maxPortraitH = 76.0f * invZoom;
+            const float portraitScale =
+                std::min(maxPortraitW / panelPortrait->w,
+                         maxPortraitH / panelPortrait->h);
+            const float width = panelPortrait->w * portraitScale;
+            const float height = panelPortrait->h * portraitScale;
+            const float x = portraitX + (portraitW - width) * 0.5f;
+            const float y = portraitY + (portraitH - height) * 0.5f;
+            r.draw(panelPortrait->tex,
+                   {x, y, width, height,
+                    panelPortraitFlipped ? panelPortrait->u + panelPortrait->w
+                                         : panelPortrait->u,
+                    panelPortrait->v,
+                    panelPortraitFlipped ? panelPortrait->u
+                                         : panelPortrait->u + panelPortrait->w,
+                    panelPortrait->v + panelPortrait->h});
+        } else {
+            drawBitmapText(r, {"?"}, portraitX + 34.0f * invZoom,
+                           portraitY + 29.0f * invZoom, 3.0f * invZoom,
+                           150, 160, 170);
+        }
+
+        std::string title;
+        if (panelMixedUnits)
+            title = std::to_string(panelSelectionCount) + " UNITS SELECTED";
+        else {
+            title =
+                displayUnitName(*panelObject->unit,
+                                assets_.localizedString(
+                                    panelObject->unit->languageDllName));
+            if (panelSelectionCount > 1)
+                title += " X" + std::to_string(panelSelectionCount);
+        }
+        if (title.size() > 40) title.resize(40);
+        const float infoX = 116.0f * invZoom;
+        drawBitmapText(r, {title}, infoX, panelY + 11.0f * invZoom,
+                       1.8f * invZoom, 238, 231, 190);
+
+        const int hitPoints = std::max(0, (int)std::lround(panelHitPoints));
+        const int maxHitPoints =
+            std::max(1, (int)std::lround(panelMaxHitPoints));
+        drawBitmapText(r,
+                       {"HP " + std::to_string(hitPoints) + " / " +
+                        std::to_string(maxHitPoints)},
+                       infoX, panelY + 33.0f * invZoom, 1.25f * invZoom);
+        const float health = std::max(
+            0.0f, std::min(1.0f, panelHitPoints / panelMaxHitPoints));
+        const float healthBarY = panelY + 47.0f * invZoom;
+        const float healthBarW = 270.0f * invZoom;
+        r.fillRect(infoX, healthBarY, healthBarW, 10.0f * invZoom,
+                   0, 0, 0, 255);
+        const float healthFillW = healthBarW - 2.0f * invZoom;
+        r.fillRect(infoX + 1.0f * invZoom, healthBarY + 1.0f * invZoom,
+                   healthFillW, 8.0f * invZoom, 185, 32, 28, 255);
+        r.fillRect(infoX + 1.0f * invZoom, healthBarY + 1.0f * invZoom,
+                   healthFillW * health, 8.0f * invZoom, 20, 205, 45, 255);
+
+        std::string combatLine;
+        if (panelMixedUnits) {
+            combatLine = "ATTACK --   ARMOR --   RANGE --";
+        } else {
+            const dat::Unit &unit = *panelObject->unit;
+            const float range =
+                unit.displayedRange > 0 ? unit.displayedRange : unit.maxRange;
+            combatLine =
+                "ATTACK " + std::to_string(std::max(0, (int)unit.displayedAttack)) +
+                "   ARMOR " +
+                std::to_string(std::max(0, (int)unit.displayedMeleeArmour)) +
+                "   RANGE " + displayDecimal(std::max(0.0f, range));
+        }
+        drawBitmapText(r, {combatLine}, infoX, panelY + 67.0f * invZoom,
+                       1.4f * invZoom, 190, 210, 220);
+
         const char *mode = "MIXED";
-        if (!mixedAttackModes)
+        if (selectedAttacker && !mixedAttackModes)
             switch (selectedAttacker->attackMode) {
             case AttackMode::Aggressive:
                 mode = "AGGRESSIVE";
@@ -3312,15 +3483,39 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 mode = "PASSIVE";
                 break;
             }
-        const float invZoom = 1.0f / zoom_;
-        const float boxX = 16.0f * invZoom;
-        const float boxY = (screenH - 38.0f) * invZoom;
-        const std::vector<std::string> line = {
-            std::string("STANCE: ") + mode + "  TRIANGLE"};
-        r.fillRect(boxX, boxY, 310.0f * invZoom, 26.0f * invZoom,
-                   5, 8, 16, 210);
-        drawBitmapText(r, line, boxX + 8.0f * invZoom,
-                       boxY + 6.0f * invZoom, 1.5f * invZoom);
+        std::string status = panelObject->player == localPlayer_
+                                 ? (selectedAttacker
+                                        ? std::string("STANCE: ") + mode
+                                        : "FRIENDLY")
+                                 : "ENEMY";
+        drawBitmapText(r, {status}, infoX, panelY + 89.0f * invZoom,
+                       1.25f * invZoom, 120, 220, 255);
+
+        const float commandsX = std::max(500.0f, screenW - 300.0f) * invZoom;
+        r.fillRect(commandsX, panelY + 12.0f * invZoom,
+                   (screenW * invZoom - commandsX - 14.0f * invZoom),
+                   86.0f * invZoom, 14, 20, 31, 245);
+        if (panelObject->player == localPlayer_) {
+            drawBitmapText(r, {"O: MOVE / ATTACK"},
+                           commandsX + 12.0f * invZoom,
+                           panelY + 24.0f * invZoom, 1.35f * invZoom);
+            drawBitmapText(r, {"TRIANGLE: CHANGE STANCE"},
+                           commandsX + 12.0f * invZoom,
+                           panelY + 48.0f * invZoom, 1.2f * invZoom);
+            drawBitmapText(r, {"X: SELECT   SQUARE: BOX"},
+                           commandsX + 12.0f * invZoom,
+                           panelY + 71.0f * invZoom, 1.15f * invZoom,
+                           175, 190, 205);
+        } else {
+            drawBitmapText(r, {"ENEMY UNIT / BUILDING"},
+                           commandsX + 12.0f * invZoom,
+                           panelY + 30.0f * invZoom, 1.35f * invZoom,
+                           255, 120, 105);
+            drawBitmapText(r, {"X: INSPECT"},
+                           commandsX + 12.0f * invZoom,
+                           panelY + 59.0f * invZoom, 1.2f * invZoom,
+                           175, 190, 205);
+        }
     }
 
     if (!currentInstruction_.empty()) {

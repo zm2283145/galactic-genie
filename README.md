@@ -53,7 +53,7 @@ cmake -B build-pc && cmake --build build-pc
 
 ## Installing on the Vita
 
-1. Copy these files from the game's `Game/Data` folder to `ux0:data/swgb/Data/`: `genie_x1.dat`, `graphics.drs`, `graphics_x1.drs`, `terrain.drs`, `terrain_x1.drs`, `interfac.drs`, `interfac_x1.drs`, `sounds.drs`, `sounds_x1.drs`, `blendomatic.dat`, `STemplet.dat`, `FilterMaps.dat`, `VIEW_ICM.DAT`, `lightMaps.dat`, and `PatternMasks.dat`. `tools\deploy_vita.ps1 -GameData` copies the core data; `tools\deploy_vita.ps1 -UnitSoundData` copies the unit audio archives.
+1. Copy these files from the game's `Game/Data` folder to `ux0:data/swgb/Data/`: `genie_x1.dat`, `graphics.drs`, `graphics_x1.drs`, `terrain.drs`, `terrain_x1.drs`, `interfac.drs`, `interfac_x1.drs`, `sounds.drs`, `sounds_x1.drs`, `blendomatic.dat`, `STemplet.dat`, `FilterMaps.dat`, `VIEW_ICM.DAT`, `lightMaps.dat`, and `PatternMasks.dat`. Also copy `Game/language.dll`, `language_x1.dll`, and `language_x2.dll` for localized interface names. `tools\deploy_vita.ps1 -GameData` copies the core data; `tools\deploy_vita.ps1 -UnitSoundData` copies the unit audio archives; `tools\deploy_vita.ps1 -LanguageData` copies the language strings.
 2. Copy `Game/Campaign/XCAM3.CPX` to `ux0:data/swgb/Campaign/xcam3.cpx`. `tools\deploy_vita.ps1 -CampaignData` does this over FTP. The current vertical slice loads its second mission, “Breaking Bread,” including its initial trees, resources, buildings, and units.
 3. Copy the MP3 dialogue referenced by the mission from `Game/Sound/Scenario` to
    `ux0:data/swgb/Sound/Scenario/`. `tools\deploy_vita.ps1 -SoundData` extracts the names from

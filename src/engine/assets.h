@@ -7,6 +7,7 @@
 #include "../core/drs.h"
 #include "../core/elevation.h"
 #include "../core/genie_dat.h"
+#include "../core/language_strings.h"
 #include "../core/palette.h"
 #include "../core/slp.h"
 #include "../core/slope_lighting.h"
@@ -46,6 +47,9 @@ public:
 
     const dat::DatFile &dat() const { return dat_; }
     const Palette &palette() const { return palette_; }
+    const std::string &localizedString(int id) const {
+        return languageStrings_.get(id);
+    }
 
     // Returns the atlas for an SLP tinted for one player (playerColorBase
     // from the dat's player colour table). Null if the SLP doesn't exist.
@@ -92,6 +96,7 @@ private:
     ResourceSet graphics_, terrain_, interfac_, sounds_;
     Palette palette_;
     dat::DatFile dat_;
+    LanguageStrings languageStrings_;
     std::unique_ptr<Blendomatic> blendomatic_;
     std::unique_ptr<ElevationMaps> elevationMaps_;
     std::map<uint64_t, std::unique_ptr<SpriteSheet>> sheets_;

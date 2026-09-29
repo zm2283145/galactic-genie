@@ -188,6 +188,28 @@ bool Assets::init(const std::string &dataDir, std::string *err) {
     log("loaded " + datPath + ": " + std::to_string(dat_.graphics.size()) + " graphics, " +
         std::to_string(dat_.civs.size()) + " civs");
 
+    bool loadedLanguage = false;
+    for (const char *name :
+         {"language.dll", "language_x0.dll", "language_x1.dll",
+          "language_x2.dll"}) {
+        std::string languagePath = findFileNoCase(dataDir, name);
+        if (languagePath.empty())
+            languagePath = findFileNoCase(dataDir + "/..", name);
+        if (languagePath.empty()) continue;
+        std::string languageError;
+        if (languageStrings_.load(languagePath, &languageError,
+                                  loadedLanguage)) {
+            loadedLanguage = true;
+            log("loaded " + languagePath + ": " +
+                std::to_string(languageStrings_.size()) +
+                " localized strings");
+        } else {
+            log(languageError);
+        }
+    }
+    if (!loadedLanguage)
+        log("language DLLs not found; using internal object names");
+
     std::string blendPath = findFileNoCase(dataDir, "blendomatic.dat");
     if (blendPath.empty()) {
         log("blendomatic.dat not found; terrain blending disabled");

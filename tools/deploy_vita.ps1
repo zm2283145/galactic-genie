@@ -5,6 +5,7 @@
 #   tools\deploy_vita.ps1 -CampaignData # copies XCAM3.CPX for the Breaking Bread scenario
 #   tools\deploy_vita.ps1 -SoundData    # copies voices referenced by the selected campaign mission
 #   tools\deploy_vita.ps1 -UnitSoundData # copies the DAT-referenced unit sound archives
+#   tools\deploy_vita.ps1 -LanguageData  # copies localized interface strings
 #   tools\deploy_vita.ps1 -PullLog      # downloads ux0:data/swgb/swgb.log to build-vita\swgb.log
 param(
     [string]$Vita = "10.1.1.93",
@@ -18,6 +19,7 @@ param(
     [switch]$CampaignData,
     [switch]$SoundData,
     [switch]$UnitSoundData,
+    [switch]$LanguageData,
     [switch]$PullLog
 )
 $ErrorActionPreference = "Stop"
@@ -93,6 +95,13 @@ if ($UnitSoundData) {
     Ftp-MkDir "ux0:/data/swgb/Data"
     foreach ($f in "SOUNDS.DRS", "sounds_x1.drs") {
         Ftp-Put (Join-Path $GameDir $f) "ux0:/data/swgb/Data/$($f.ToLower())"
+    }
+}
+if ($LanguageData) {
+    Ftp-MkDir "ux0:/data/swgb/Data"
+    $gameRoot = Split-Path -Parent $GameDir
+    foreach ($f in "language.dll", "language_x1.dll", "language_x2.dll") {
+        Ftp-Put (Join-Path $gameRoot $f) "ux0:/data/swgb/Data/$f"
     }
 }
 if ($Vpk) { Ftp-Put (Join-Path $repo "build-vita\swgb.vpk") "ux0:/data/swgb/swgb.vpk" }

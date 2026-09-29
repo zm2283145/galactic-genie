@@ -21,6 +21,7 @@ set(SWGB_CORE_SOURCES
     src/core/slope_lighting.cpp
     src/core/slp.cpp
     src/core/genie_dat.cpp
+    src/core/language_strings.cpp
     src/engine/assets.cpp
     src/engine/game.cpp
 )

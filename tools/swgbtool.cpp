@@ -154,6 +154,10 @@ static int cmdUnit(const char *dataDir, int id) {
                    unit.frameDelay, unit.graphicDisplacement[0], unit.graphicDisplacement[1],
                    unit.graphicDisplacement[2],
                    unit.displayedAttack, unit.displayedMeleeArmour);
+            printf("  interface name id %d '%s', internal '%s', icon %d\n",
+                   unit.languageDllName,
+                   assets.localizedString(unit.languageDllName).c_str(),
+                   unit.name2.c_str(), unit.iconId);
             const auto *attackGraphic = assets.dat().graphic(unit.attackGraphic);
             const auto *dyingGraphic = assets.dat().graphic(unit.dyingGraphic);
             const auto *projectile = unit.projectileUnitId >= 0 &&
@@ -739,6 +743,18 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     input.selectPressed = true;
     game.update(0.001f, input);
     const size_t singleSelected = game.selectedObjectCount();
+    if (out) {
+        game.render(renderer, 960, 544);
+        std::string singleOut(out);
+        const size_t extension = singleOut.find_last_of('.');
+        singleOut.insert(extension == std::string::npos ? singleOut.size()
+                                                        : extension,
+                         "-single");
+        if (!renderer.savePng(singleOut)) {
+            fprintf(stderr, "error: could not write %s\n", singleOut.c_str());
+            return 1;
+        }
+    }
 
     input = {};
     input.pointerX = 340;

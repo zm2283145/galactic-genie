@@ -47,13 +47,15 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 - SWGB-specific mechanics: shields, air units, power cores, Jedi/Sith conversion, holocrons.
 
 ## Milestone 4: interface and input on Vita
-- Replace the temporary bitmap trigger-dialogue font with UI rendering from `interfac.drs` SLPs and
-  `language_x1.dll` strings.
+- Replace the temporary bitmap trigger-dialogue font with UI rendering from `interfac.drs` SLPs.
+  Original `language.dll`, `language_x1.dll`, and `language_x2.dll` string tables are parsed and
+  already supply localized names to the selection panel.
 - Single, box, and visible-type selection, selection sounds, and contextual original normal/move/attack
   cursors are implemented. The command cursor scrolls the camera at screen edges. Unit panels and
   control groups remain.
-- Command panel with selected unit/building attack, range, and armor/defense values; minimap,
-  resource bar, and pause menu.
+- The first command/info panel shows the selected unit or building portrait, live health,
+  attack, armor, range, stance, and Vita command hints. Full task buttons, minimap,
+  resource bar, and pause menu remain.
 - Audio: selection, move, and attack acknowledgements plus weapon-fire and death effects are
   implemented. World ambience, volume controls, and music remain.
 
