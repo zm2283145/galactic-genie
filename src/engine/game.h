@@ -21,8 +21,17 @@ namespace swgb {
 struct InputState {
     float scrollX = 0, scrollY = 0; // -1..1, from stick / d-pad
     float dragX = 0, dragY = 0;     // screen pixels moved by touch this frame
+    float pointerX = 0, pointerY = 0;
+    float boxStartX = 0, boxStartY = 0, boxEndX = 0, boxEndY = 0;
+    int screenW = 960, screenH = 544;
     int zoomStep = 0;               // -1 zoom out, +1 zoom in (edge-triggered)
     bool toggleDebug = false;
+    bool cursorVisible = false;
+    bool selectPressed = false;
+    bool commandPressed = false;
+    bool pointerTap = false;
+    bool boxSelectActive = false;
+    bool boxSelectCommit = false;
 };
 
 struct FrameStats {
@@ -76,6 +85,8 @@ public:
     float resource(int player, int resourceId) const;
     const std::string &currentInstruction() const { return currentInstruction_; }
     size_t activeObjectCount() const;
+    size_t selectedObjectCount() const;
+    size_t selectedMovingObjectCount() const;
     MovementStats movementStats() const;
     std::vector<MovingObjectInfo> movingObjects() const;
 
@@ -105,6 +116,7 @@ private:
         bool draw = true;
         bool locked = false;
         bool gate = false;
+        bool selected = false;
         bool triggerAddressable = true;
         float flashTime = 0;
         uint32_t spawnId = 0;
@@ -145,12 +157,24 @@ private:
     bool objectMatches(const Object &object, int unitId, int player, int group, int type) const;
     bool inSourceArea(const Object &object, int x1, int y1, int x2, int y2) const;
     bool issueMove(Object &object, float targetX, float targetY);
+    void issueGroupMove(std::vector<Object *> targets, float targetX, float targetY);
     bool findPath(const Object &object, float targetX, float targetY,
                   std::vector<std::array<float, 2>> &path) const;
     bool positionPassable(const Object &object, float x, float y, bool dynamic) const;
     bool terrainPassable(const Object &object, float x, float y) const;
     bool isAirUnit(const Object &object) const;
     float collisionRadius(const Object &object) const;
+    bool isSelectable(const Object &object) const;
+    void clearSelection();
+    Object *objectAtScreen(float screenX, float screenY, int screenW, int screenH);
+    void selectAtScreen(float screenX, float screenY, int screenW, int screenH);
+    void selectBox(float startX, float startY, float endX, float endY,
+                   int screenW, int screenH);
+    void commandAtScreen(float screenX, float screenY, int screenW, int screenH);
+    void objectScreenPosition(const Object &object, int screenW, int screenH,
+                              float &screenX, float &screenY) const;
+    void screenToWorld(float screenX, float screenY, int screenW, int screenH,
+                       float &worldX, float &worldY) const;
     void startInstruction(Instruction instruction);
     void queueInstruction(const std::string &text, float duration,
                           const std::string &sound = std::string());
@@ -191,6 +215,11 @@ private:
     int localPlayer_ = 0;
     float camX_ = 0, camY_ = 0; // world-pixel position of the screen centre
     float zoom_ = 1.0f;
+    float cursorX_ = 0, cursorY_ = 0;
+    float boxStartX_ = 0, boxStartY_ = 0, boxEndX_ = 0, boxEndY_ = 0;
+    float commandMarkerX_ = 0, commandMarkerY_ = 0, commandMarkerTime_ = 0;
+    bool cursorVisible_ = false;
+    bool boxSelectActive_ = false;
     bool debug_ = false;
     FrameStats stats_;
     std::function<void(const std::string &)> log_;

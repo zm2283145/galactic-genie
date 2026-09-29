@@ -14,6 +14,7 @@
 #include <psp2/touch.h>
 #include <vitaGL.h>
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <memory>
@@ -139,7 +140,9 @@ int main() {
         SceCtrlData pad{}, prev{};
         SceTouchData touch{};
         bool touching = false;
-        float lastTx = 0, lastTy = 0;
+        bool touchMoved = false, touchBox = false;
+        float touchStartX = 0, touchStartY = 0, lastTx = 0, lastTy = 0;
+        float cursorX = kScreenW * 0.5f, cursorY = kScreenH * 0.5f;
         uint64_t last = sceKernelGetProcessTimeWide();
         uint64_t statT = last;
         int frames = 0;
@@ -156,6 +159,8 @@ int main() {
             if (pad.buttons & SCE_CTRL_START) break;
 
             swgb::InputState in;
+            in.screenW = kScreenW;
+            in.screenH = kScreenH;
             in.scrollX = axis(pad.lx);
             in.scrollY = axis(pad.ly);
             if (pad.buttons & SCE_CTRL_LEFT) in.scrollX = -1;
@@ -166,17 +171,54 @@ int main() {
             if (pressed & SCE_CTRL_LTRIGGER) in.zoomStep = -1;
             if (pressed & SCE_CTRL_SELECT) in.toggleDebug = true;
 
+            cursorX += axis(pad.rx) * 520.0f * dt;
+            cursorY += axis(pad.ry) * 520.0f * dt;
+            cursorX = std::max(0.0f, std::min((float)kScreenW, cursorX));
+            cursorY = std::max(0.0f, std::min((float)kScreenH, cursorY));
+            in.pointerX = cursorX;
+            in.pointerY = cursorY;
+            in.cursorVisible = true;
+            if (pressed & SCE_CTRL_CROSS) in.selectPressed = true;
+            if (pressed & SCE_CTRL_CIRCLE) in.commandPressed = true;
+
             sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1);
             if (touch.reportNum > 0) {
                 float tx = touch.report[0].x / 2.0f, ty = touch.report[0].y / 2.0f;
-                if (touching) {
-                    in.dragX = tx - lastTx;
-                    in.dragY = ty - lastTy;
+                if (!touching) {
+                    touchStartX = lastTx = tx;
+                    touchStartY = lastTy = ty;
+                    touchMoved = false;
+                    touchBox = (pad.buttons & SCE_CTRL_SQUARE) != 0;
+                } else {
+                    const float totalX = tx - touchStartX, totalY = ty - touchStartY;
+                    if (totalX * totalX + totalY * totalY > 100.0f) touchMoved = true;
+                    if (!touchBox && touchMoved) {
+                        in.dragX = tx - lastTx;
+                        in.dragY = ty - lastTy;
+                    }
+                }
+                if (touchBox) {
+                    in.boxSelectActive = true;
+                    in.boxStartX = touchStartX;
+                    in.boxStartY = touchStartY;
+                    in.boxEndX = tx;
+                    in.boxEndY = ty;
                 }
                 lastTx = tx;
                 lastTy = ty;
                 touching = true;
-            } else {
+            } else if (touching) {
+                in.pointerX = lastTx;
+                in.pointerY = lastTy;
+                if (touchBox && touchMoved) {
+                    in.boxSelectCommit = true;
+                    in.boxStartX = touchStartX;
+                    in.boxStartY = touchStartY;
+                    in.boxEndX = lastTx;
+                    in.boxEndY = lastTy;
+                } else if (!touchMoved) {
+                    in.pointerTap = true;
+                }
                 touching = false;
             }
 

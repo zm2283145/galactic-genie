@@ -147,6 +147,9 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     instructions_.clear();
     currentInstruction_.clear();
     instructionTime_ = 0;
+    cursorVisible_ = false;
+    boxSelectActive_ = false;
+    commandMarkerTime_ = 0;
     nextSpawnId_ = 1;
     victoryState_ = -1;
     warnedEffects_.clear();
@@ -215,6 +218,9 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     instructions_.clear();
     currentInstruction_.clear();
     instructionTime_ = 0;
+    cursorVisible_ = false;
+    boxSelectActive_ = false;
+    commandMarkerTime_ = 0;
     nextSpawnId_ = scenario.nextUnitId;
     victoryState_ = -1;
     warnedEffects_.clear();
@@ -727,6 +733,21 @@ size_t Game::activeObjectCount() const {
                                  [](const Object &object) { return object.active; });
 }
 
+size_t Game::selectedObjectCount() const {
+    return (size_t)std::count_if(objects_.begin(), objects_.end(),
+                                 [](const Object &object) {
+                                     return object.active && object.selected;
+                                 });
+}
+
+size_t Game::selectedMovingObjectCount() const {
+    return (size_t)std::count_if(objects_.begin(), objects_.end(),
+                                 [](const Object &object) {
+                                     return object.active && object.selected &&
+                                            object.state == State::Walk;
+                                 });
+}
+
 MovementStats Game::movementStats() const {
     MovementStats stats;
     for (size_t i = 0; i < objects_.size(); i++) {
@@ -829,6 +850,94 @@ bool Game::isAirUnit(const Object &object) const {
 float Game::collisionRadius(const Object &object) const {
     return std::max(0.1f, std::max(object.unit->collisionSize[0],
                                     object.unit->collisionSize[1]));
+}
+
+bool Game::isSelectable(const Object &object) const {
+    return object.active && !object.hidden && object.draw && object.player == localPlayer_ &&
+           object.unit->speed > 0 && object.unit->type != dat::UT_Building;
+}
+
+void Game::clearSelection() {
+    for (Object &object : objects_) object.selected = false;
+}
+
+void Game::objectScreenPosition(const Object &object, int screenW, int screenH,
+                                float &screenX, float &screenY) const {
+    float projectedX, projectedY;
+    toScreen(object.x, object.y, projectedX, projectedY);
+    projectedY -= elevationAt(object.x, object.y) * assets_.dat().terrainBlock.elevHeight;
+    const float viewW = screenW / zoom_, viewH = screenH / zoom_;
+    const float ox = camX_ - viewW * 0.5f, oy = camY_ - viewH * 0.5f;
+    screenX = (projectedX - ox) * zoom_;
+    screenY = (projectedY - oy) * zoom_;
+}
+
+void Game::screenToWorld(float screenX, float screenY, int screenW, int screenH,
+                         float &worldX, float &worldY) const {
+    const float viewW = screenW / zoom_, viewH = screenH / zoom_;
+    const float projectedX = camX_ - viewW * 0.5f + screenX / zoom_;
+    const float projectedY = camY_ - viewH * 0.5f + screenY / zoom_;
+    float adjustedY = projectedY;
+    for (int pass = 0; pass < 2; pass++) {
+        worldX = (projectedX / kTileHalfW + adjustedY / kTileHalfH) * 0.5f;
+        worldY = (adjustedY / kTileHalfH - projectedX / kTileHalfW) * 0.5f;
+        worldX = std::max(0.0f, std::min(mapSize_ - 0.001f, worldX));
+        worldY = std::max(0.0f, std::min(mapSize_ - 0.001f, worldY));
+        adjustedY = projectedY +
+                    elevationAt(worldX, worldY) * assets_.dat().terrainBlock.elevHeight;
+    }
+}
+
+Game::Object *Game::objectAtScreen(float screenX, float screenY, int screenW, int screenH) {
+    Object *best = nullptr;
+    float bestScore = std::numeric_limits<float>::max();
+    for (Object &object : objects_) {
+        if (!isSelectable(object)) continue;
+        float objectX, objectY;
+        objectScreenPosition(object, screenW, screenH, objectX, objectY);
+        const float radiusX = std::max(30.0f, collisionRadius(object) * 48.0f * zoom_ + 12.0f);
+        const float dx = screenX - objectX, dy = screenY - objectY;
+        if (std::abs(dx) > radiusX || dy < -72.0f || dy > 28.0f) continue;
+        const float score = dx * dx + (dy + 18.0f) * (dy + 18.0f);
+        if (score < bestScore) {
+            best = &object;
+            bestScore = score;
+        }
+    }
+    return best;
+}
+
+void Game::selectAtScreen(float screenX, float screenY, int screenW, int screenH) {
+    Object *object = objectAtScreen(screenX, screenY, screenW, screenH);
+    clearSelection();
+    if (object) object->selected = true;
+}
+
+void Game::selectBox(float startX, float startY, float endX, float endY,
+                     int screenW, int screenH) {
+    const float minX = std::min(startX, endX), maxX = std::max(startX, endX);
+    const float minY = std::min(startY, endY), maxY = std::max(startY, endY);
+    clearSelection();
+    for (Object &object : objects_) {
+        if (!isSelectable(object)) continue;
+        float objectX, objectY;
+        objectScreenPosition(object, screenW, screenH, objectX, objectY);
+        if (objectX >= minX && objectX <= maxX && objectY >= minY && objectY <= maxY)
+            object.selected = true;
+    }
+}
+
+void Game::commandAtScreen(float screenX, float screenY, int screenW, int screenH) {
+    std::vector<Object *> selected;
+    for (Object &object : objects_)
+        if (isSelectable(object) && object.selected) selected.push_back(&object);
+    if (selected.empty()) return;
+    float targetX, targetY;
+    screenToWorld(screenX, screenY, screenW, screenH, targetX, targetY);
+    issueGroupMove(std::move(selected), targetX, targetY);
+    commandMarkerX_ = targetX;
+    commandMarkerY_ = targetY;
+    commandMarkerTime_ = 0.8f;
 }
 
 bool Game::terrainPassable(const Object &object, float x, float y) const {
@@ -1068,6 +1177,40 @@ bool Game::issueMove(Object &object, float targetX, float targetY) {
     return true;
 }
 
+void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float targetY) {
+    float slotSpacing = 0.6f;
+    for (const Object *object : targets)
+        if (!object->hidden && object->unit->speed > 0)
+            slotSpacing = std::max(slotSpacing, collisionRadius(*object) * 2.0f + 0.1f);
+    size_t slot = 0;
+    for (Object *object : targets) {
+        if (object->hidden || object->unit->speed <= 0) continue;
+        float slotX = targetX, slotY = targetY;
+        if (slot > 0) {
+            const int ring =
+                (int)std::ceil((std::sqrt((float)slot + 1.0f) - 1.0f) * 0.5f);
+            const int side = ring * 2;
+            const int first = (ring * 2 - 1) * (ring * 2 - 1);
+            const int offset = (int)slot - first;
+            int sx = ring, sy = ring;
+            if (offset < side) sx -= offset;
+            else if (offset < side * 2) {
+                sx = -ring;
+                sy -= offset - side;
+            } else if (offset < side * 3) {
+                sx = -ring + offset - side * 2;
+                sy = -ring;
+            } else {
+                sy = -ring + offset - side * 3;
+            }
+            slotX += sx * slotSpacing;
+            slotY += sy * slotSpacing;
+        }
+        issueMove(*object, slotX, slotY);
+        slot++;
+    }
+}
+
 void Game::setTriggerEnabled(int id, bool enabled) {
     if (id < 0 || (size_t)id >= triggerRuntime_.size()) {
         log("trigger effect references invalid trigger " + std::to_string(id));
@@ -1143,6 +1286,17 @@ bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed
         return resource(player, attribute) >= amount;
     case 10:
         return triggerElapsed >= std::max(0, triggerField(condition.fields, 7));
+    case 11: {
+        if (unitObject >= 0) {
+            const Object *object = findObject((uint32_t)unitObject);
+            return object && object->active && object->selected;
+        }
+        int selected = 0;
+        for (const Object &object : objects_)
+            if (object.selected && objectMatches(object, unitId, player, group, type))
+                selected++;
+        return selected >= std::max(1, amount);
+    }
     case 15: {
         const Object *object = findObject((uint32_t)unitObject);
         if (!object || !object->active || object->hidden || !object->draw) return false;
@@ -1154,6 +1308,14 @@ bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed
     }
     case 19:
         return difficulty_ == amount;
+    case 21: {
+        int selected = 0;
+        for (const Object &object : objects_)
+            if (object.selected && objectMatches(object, unitId, player, group, type) &&
+                inSourceArea(object, x1, y1, x2, y2))
+                selected++;
+        return selected >= std::max(1, amount);
+    }
     default:
         if (warnedConditions_.insert(condition.type).second)
             log(std::string("unsupported trigger condition ") + conditionLabel(condition.type) +
@@ -1261,39 +1423,7 @@ void Game::executeEffect(const ScenarioEffect &effect) {
             targetY = (float)mapSize_ - x;
             hasTarget = true;
         }
-        if (hasTarget) {
-            std::vector<Object *> targets = effectTargets(effect);
-            float slotSpacing = 0.6f;
-            for (const Object *object : targets)
-                if (!object->hidden && object->unit->speed > 0)
-                    slotSpacing = std::max(slotSpacing, collisionRadius(*object) * 2.0f + 0.1f);
-            size_t slot = 0;
-            for (Object *object : targets) {
-                if (object->hidden || object->unit->speed <= 0) continue;
-                float slotX = targetX, slotY = targetY;
-                if (slot > 0) {
-                    const int ring = (int)std::ceil((std::sqrt((float)slot + 1.0f) - 1.0f) * 0.5f);
-                    const int side = ring * 2;
-                    const int first = (ring * 2 - 1) * (ring * 2 - 1);
-                    const int offset = (int)slot - first;
-                    int sx = ring, sy = ring;
-                    if (offset < side) sx -= offset;
-                    else if (offset < side * 2) {
-                        sx = -ring;
-                        sy -= offset - side;
-                    } else if (offset < side * 3) {
-                        sx = -ring + offset - side * 2;
-                        sy = -ring;
-                    } else {
-                        sy = -ring + offset - side * 3;
-                    }
-                    slotX += sx * slotSpacing;
-                    slotY += sy * slotSpacing;
-                }
-                issueMove(*object, slotX, slotY);
-                slot++;
-            }
-        }
+        if (hasTarget) issueGroupMove(effectTargets(effect), targetX, targetY);
         break;
     }
     case 13:
@@ -1454,6 +1584,33 @@ void Game::update(float dt, const InputState &in) {
     if (in.toggleDebug) debug_ = !debug_;
 
     updateTriggers(dt);
+    commandMarkerTime_ = std::max(0.0f, commandMarkerTime_ - dt);
+    for (Object &object : objects_)
+        if (object.selected && !isSelectable(object)) object.selected = false;
+
+    cursorVisible_ = in.cursorVisible;
+    cursorX_ = in.pointerX;
+    cursorY_ = in.pointerY;
+    boxSelectActive_ = in.boxSelectActive;
+    boxStartX_ = in.boxStartX;
+    boxStartY_ = in.boxStartY;
+    boxEndX_ = in.boxEndX;
+    boxEndY_ = in.boxEndY;
+    if (in.boxSelectCommit)
+        selectBox(in.boxStartX, in.boxStartY, in.boxEndX, in.boxEndY,
+                  in.screenW, in.screenH);
+    if (in.selectPressed)
+        selectAtScreen(in.pointerX, in.pointerY, in.screenW, in.screenH);
+    if (in.commandPressed)
+        commandAtScreen(in.pointerX, in.pointerY, in.screenW, in.screenH);
+    if (in.pointerTap) {
+        if (objectAtScreen(in.pointerX, in.pointerY, in.screenW, in.screenH))
+            selectAtScreen(in.pointerX, in.pointerY, in.screenW, in.screenH);
+        else if (selectedObjectCount() > 0)
+            commandAtScreen(in.pointerX, in.pointerY, in.screenW, in.screenH);
+        else
+            clearSelection();
+    }
 
     std::uniform_real_distribution<float> r01(0, 1);
     for (Object &o : objects_) {
@@ -1868,6 +2025,36 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         r.fillRect(sx + pulse, sy - pulse, 2 / zoom_, pulse * 2, 255, 255, 0, 220);
     }
 
+    for (const Object &object : objects_) {
+        if (!object.active || object.hidden || !object.draw || !object.selected) continue;
+        float screenX, screenY;
+        objectScreenPosition(object, screenW, screenH, screenX, screenY);
+        const float sx = screenX / zoom_, sy = screenY / zoom_;
+        const float radius = std::max(15.0f, collisionRadius(object) * 48.0f) / zoom_;
+        const float line = 2.0f / zoom_, corner = 8.0f / zoom_;
+        r.fillRect(sx - radius, sy - radius, corner, line, 70, 255, 90, 255);
+        r.fillRect(sx - radius, sy - radius, line, corner, 70, 255, 90, 255);
+        r.fillRect(sx + radius - corner, sy - radius, corner, line, 70, 255, 90, 255);
+        r.fillRect(sx + radius - line, sy - radius, line, corner, 70, 255, 90, 255);
+        r.fillRect(sx - radius, sy + radius - line, corner, line, 70, 255, 90, 255);
+        r.fillRect(sx - radius, sy + radius - corner, line, corner, 70, 255, 90, 255);
+        r.fillRect(sx + radius - corner, sy + radius - line, corner, line, 70, 255, 90, 255);
+        r.fillRect(sx + radius - line, sy + radius - corner, line, corner, 70, 255, 90, 255);
+    }
+
+    if (commandMarkerTime_ > 0) {
+        float sx, sy;
+        toScreen(commandMarkerX_, commandMarkerY_, sx, sy);
+        sy -= elevationAt(commandMarkerX_, commandMarkerY_) *
+              assets_.dat().terrainBlock.elevHeight;
+        sx -= ox;
+        sy -= oy;
+        const float radius = (10.0f + commandMarkerTime_ * 12.0f) / zoom_;
+        const float line = 2.0f / zoom_;
+        r.fillRect(sx - radius, sy - line * 0.5f, radius * 2, line, 255, 230, 70, 230);
+        r.fillRect(sx - line * 0.5f, sy - radius, line, radius * 2, 255, 230, 70, 230);
+    }
+
     if (debug_) {
         // Coarse debug minimap; one quad per full tile is prohibitively
         // expensive on Vita for large maps.
@@ -1897,6 +2084,32 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         r.fillRect(boxX, boxY, (screenW - 40.0f) * invZoom, 2.0f * invZoom,
                    210, 210, 190, 255);
         drawBitmapText(r, lines, 32.0f * invZoom, boxY + 12.0f * invZoom, 2.0f * invZoom);
+    }
+
+    if (boxSelectActive_) {
+        const float invZoom = 1.0f / zoom_;
+        const float x = std::min(boxStartX_, boxEndX_) * invZoom;
+        const float y = std::min(boxStartY_, boxEndY_) * invZoom;
+        const float w = std::abs(boxEndX_ - boxStartX_) * invZoom;
+        const float h = std::abs(boxEndY_ - boxStartY_) * invZoom;
+        const float line = 2.0f * invZoom;
+        r.fillRect(x, y, w, h, 40, 180, 255, 35);
+        r.fillRect(x, y, w, line, 80, 210, 255, 230);
+        r.fillRect(x, y + h - line, w, line, 80, 210, 255, 230);
+        r.fillRect(x, y, line, h, 80, 210, 255, 230);
+        r.fillRect(x + w - line, y, line, h, 80, 210, 255, 230);
+    }
+
+    if (cursorVisible_) {
+        const float invZoom = 1.0f / zoom_;
+        const float x = cursorX_ * invZoom, y = cursorY_ * invZoom;
+        const float line = 2.0f * invZoom, arm = 10.0f * invZoom;
+        r.fillRect(x - arm - line, y - line, arm * 2 + line * 2, line * 3,
+                   0, 0, 0, 210);
+        r.fillRect(x - line, y - arm - line, line * 3, arm * 2 + line * 2,
+                   0, 0, 0, 210);
+        r.fillRect(x - arm, y, arm * 2, line, 245, 245, 245, 255);
+        r.fillRect(x, y - arm, line, arm * 2, 245, 245, 245, 255);
     }
     r.endFrame();
 }

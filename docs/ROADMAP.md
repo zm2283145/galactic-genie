@@ -41,7 +41,8 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 ## Milestone 4: interface and input on Vita
 - Replace the temporary bitmap trigger-dialogue font with UI rendering from `interfac.drs` SLPs and
   `language_x1.dll` strings.
-- Selection: touch tap/drag-box, and a controller cursor with snap-to-unit.
+- Expand the initial touch/controller selection and movement controls with unit panels, control
+  groups, contextual command cursors, and selection sounds.
 - Command panel, minimap, resource bar and the pause menu.
 - Audio: sounds.drs/sounds_x1.drs unit and world effects, volume controls, and music.
 

@@ -41,6 +41,7 @@ static int usage() {
             "  swgbtool render-scenario <DataDir> <file.cpx> <entry> <out.png> [x] [y] [zoom]\n"
             "  swgbtool stress-scenario <DataDir> <file.cpx> <entry> [zoom]\n"
             "  swgbtool simulate-scenario <DataDir> <file.cpx> <entry> [seconds] [out.png]\n"
+            "  swgbtool test-controls <DataDir> <file.cpx> <entry> [out.png]\n"
             "  swgbtool mp3 <file.mp3>\n");
     return 2;
 }
@@ -583,6 +584,70 @@ static int cmdSimulateScenario(const char *dataDir, const char *campaignPath, in
     return 0;
 }
 
+static int cmdTestControls(const char *dataDir, const char *campaignPath, int entryNumber,
+                           const char *out) {
+    Scenario scenario;
+    std::string err;
+    if (!loadScenario(campaignPath, entryNumber, scenario, err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    Game game(assets);
+    if (!game.initScenario(scenario, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+
+    InputState input;
+    input.pointerX = 480;
+    input.pointerY = 272;
+    input.selectPressed = true;
+    game.update(0.001f, input);
+    const size_t singleSelected = game.selectedObjectCount();
+
+    input = {};
+    input.boxSelectCommit = true;
+    input.boxStartX = 0;
+    input.boxStartY = 0;
+    input.boxEndX = 959;
+    input.boxEndY = 543;
+    game.update(0.001f, input);
+    const size_t boxSelected = game.selectedObjectCount();
+
+    input = {};
+    input.pointerX = 620;
+    input.pointerY = 360;
+    input.commandPressed = true;
+    game.update(0.001f, input);
+    const size_t commanded = game.selectedMovingObjectCount();
+    input = {};
+    for (int i = 0; i < 30; i++) game.update(1.0f / 30.0f, input);
+
+    if (out) {
+        game.render(renderer, 960, 544);
+        if (!renderer.savePng(out)) {
+            fprintf(stderr, "error: could not write %s\n", out);
+            return 1;
+        }
+    }
+    const MovementStats movement = game.movementStats();
+    printf("controls: single %zu, box %zu, commanded %zu, overlaps %zu, terrain violations %zu\n",
+           singleSelected, boxSelected, commanded, movement.overlappingPairs,
+           movement.terrainViolations);
+    if (singleSelected != 1 || boxSelected < singleSelected || commanded == 0 ||
+        movement.overlappingPairs != 0 || movement.terrainViolations != 0) {
+        fprintf(stderr, "error: control validation failed\n");
+        return 1;
+    }
+    return 0;
+}
+
 // Renders one graphic at 8 world facings (0 = +x, then +45 deg steps) in a row.
 static int cmdAngles(const char *dataDir, int gid, const char *out) {
     SoftRenderer r;
@@ -641,6 +706,9 @@ int main(int argc, char **argv) {
         return cmdSimulateScenario(argv[2], argv[3], atoi(argv[4]),
                                    argc > 5 ? (float)atof(argv[5]) : 1.1f,
                                    argc > 6 ? argv[6] : nullptr);
+    if (!strcmp(cmd, "test-controls") && argc >= 5)
+        return cmdTestControls(argv[2], argv[3], atoi(argv[4]),
+                               argc > 5 ? argv[5] : nullptr);
     if (!strcmp(cmd, "mp3")) return cmdMp3(argv[2]);
     return usage();
 }
