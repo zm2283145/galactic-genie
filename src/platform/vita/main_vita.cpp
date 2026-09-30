@@ -145,6 +145,14 @@ int main() {
             [&audio](const std::string &name) {
                 return audio.playAmbient(name);
             });
+        game.setInterfaceSoundPlayer([&](int resourceId) {
+            std::vector<uint8_t> data;
+            if (!assets.readSoundResource(resourceId, data)) {
+                logf("interface sound %d not found", resourceId);
+                return;
+            }
+            audio.playEffect(resourceId, data);
+        });
         uint32_t unitSoundChoice = 0;
         game.setUnitSoundPlayer([&](int soundId, int civilization) {
             std::vector<uint8_t> data;

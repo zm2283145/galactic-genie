@@ -114,12 +114,35 @@ public:
         const std::vector<uint32_t> &spawnIds);
     // Group move of the given units, as a right-click with them selected.
     std::string describeObjectForTesting(uint32_t spawnId) const;
+    bool garrisonForTesting(uint32_t unitId, uint32_t buildingId) {
+        Object *u = findObject(unitId);
+        if (!u) return false;
+        u->garrisonTargetId = buildingId;
+        return true;
+    }
+    int garrisonVolleyForTesting(uint32_t buildingId) const {
+        const Object *b = findObject(buildingId);
+        return b ? garrisonVolleySize(*b) : 0;
+    }
+    size_t projectilesLaunchedForTesting() const { return projectilesLaunched_; }
+    // Drags a wall of unitId from tile (x1,y1) to (x2,y2) for the worker;
+    // returns the new foundation ids.
+    std::vector<uint32_t> placeWallForTesting(uint32_t workerId, int civilization, int unitId,
+                                              int x1, int y1, int x2, int y2);
+    float objectFacing(uint32_t spawnId) const {
+        const Object *o = findObject(spawnId);
+        return o ? o->facing : 0.0f;
+    }
     void groupMoveForTesting(const std::vector<uint32_t> &spawnIds, float x,
                              float y, int formation = -1);
     const FrameStats &stats() const { return stats_; }
     void setLogger(std::function<void(const std::string &)> fn) { log_ = std::move(fn); }
     void setSoundPlayer(std::function<float(const std::string &)> fn) {
         playSound_ = std::move(fn);
+    }
+    // Plays an interface sound by sounds-DRS resource id.
+    void setInterfaceSoundPlayer(std::function<void(int)> fn) {
+        playInterfaceSound_ = std::move(fn);
     }
     void setUnitSoundPlayer(std::function<void(int, int)> fn) {
         playUnitSound_ = std::move(fn);
@@ -350,6 +373,14 @@ private:
         uint8_t repathCount = 0;
         float detourTime = 0;
         float approachRetry = 0;
+        // Gather (rally) point, command 0x78: building +0x214..0x228.
+        bool rallyActive = false;
+        float rallyX = 0, rallyY = 0;
+        uint32_t rallyTargetId = 0;
+        // Remaining garrison bolts of the current volley (0x55be20).
+        int volleyRemaining = 0;
+        float volleyTimer = 0;
+        uint32_t volleyTargetId = 0;
         uint32_t blockerId = 0;     // unit that blocked the last step
         float productionRemaining = 0;
         float constructionRemaining = 0;
@@ -375,6 +406,10 @@ private:
         uint32_t targetId = 0;
         uint32_t sourceId = 0;
         int damage = 0;
+        // Garrison bolts are aimed at a scattered point near the target and
+        // only hurt it if they land on it.
+        bool groundAimed = false;
+        float aimX = 0, aimY = 0;
     };
 
     struct Remains {
@@ -465,6 +500,40 @@ private:
                                 float baseValue) const;
     int graphicSound(int graphicId) const;
     float collisionRadius(const Object &object) const;
+    bool workingOn(const Object &unit, uint32_t targetId) const;
+    // Original rollover help (FUN_004d1520): creation/description string
+    // + 20000 with <cost>/<hp>/<attack>/... tags expanded. Returns the body
+    // (the part after the "Create <b>Name<b> (<cost>)" first line).
+    std::string originalHelpText(int stringId, const dat::Unit *unit,
+                                 const dat::Tech *technology) const;
+    void unmetVisibleRequirements(int player, int technologyId, std::vector<int> &out,
+                                  int depth = 0) const;
+    float garrisonFirePower(const dat::Unit &unit) const;
+    float buildingProjectileTotal(const Object &building) const;
+    int garrisonVolleySize(const Object &building) const;
+    void launchVolleyBolt(Object &source, const Object &target);
+    enum class BuildingCommand : uint8_t { Eject, ToggleGate, SetGatherPoint, RemoveGatherPoint };
+    std::vector<BuildingCommand> buildingCommands(const Object &building) const;
+    int buildingCommandIcon(const Object &building, BuildingCommand command) const;
+    std::string buildingCommandTitle(const Object &building, BuildingCommand command) const;
+    std::string buildingCommandHelp(const Object &building, BuildingCommand command) const;
+    void executeBuildingCommand(Object &building, BuildingCommand command);
+    bool canSetGatherPoint(const Object &building) const;
+    void setGatherPoint(Object &building, float screenX, float screenY, int screenW, int screenH);
+    void sendToGatherPoint(const Object &building, Object &unit);
+    struct WallTile {
+        int x, y, frame;
+    };
+    std::vector<WallTile> wallLine(int x1, int y1, int x2, int y2) const;
+    Object *createFoundation(const dat::Unit &unit, int player, float x, float y);
+    bool placeWallLine(int x1, int y1, int x2, int y2);
+    bool isWallPlacement() const;
+    bool hasResearchTab(const Object &building) const;
+    bool overlapsWorkingUnit(const Object &object, uint32_t targetId) const;
+    // Closest spot around the target's footprint that no other unit is
+    // standing on (the original treats the whole perimeter as the goal).
+    bool freeInteractionPoint(const Object &source, const Object &target,
+                              float clearance, float &x, float &y) const;
     void interactionPoint(const Object &source, const Object &target,
                           float clearance, float &x, float &y) const;
     bool withinInteractionRange(const Object &source, const Object &target,
@@ -687,6 +756,9 @@ private:
     bool cursorVisible_ = false;
     CursorMode cursorMode_ = CursorMode::Normal;
     FormationType selectedFormation_ = FormationType::Line;
+    // Destination of each active group move, so a formation change can
+    // re-form the group on the way there instead of stopping it.
+    std::unordered_map<uint32_t, std::array<float, 2>> moveGroupDestinations_;
     bool actionMenuOpen_ = false;
     uint32_t actionMenuObjectId_ = 0;
     ActionMenuTab actionMenuTab_ = ActionMenuTab::Units;
@@ -694,6 +766,27 @@ private:
     size_t actionMenuScroll_ = 0;
     const dat::Unit *placementUnit_ = nullptr;
     uint32_t placementBuilderId_ = 0;
+    // Set when placement starts from the build menu, so the same press
+    // that picked the item cannot also place it.
+    bool placementJustBegun_ = false;
+    uint32_t gatherPointBuildingId_ = 0; // "click an area to set gather point" mode
+public:
+    bool setGatherPointForTesting(uint32_t buildingId, float x, float y, uint32_t targetId = 0) {
+        Object *b = findObject(buildingId);
+        if (!b || !canSetGatherPoint(*b)) return false;
+        b->rallyActive = true;
+        b->rallyX = x;
+        b->rallyY = y;
+        b->rallyTargetId = targetId;
+        return true;
+    }
+    bool queueUnitForTesting(uint32_t buildingId, int unitId);
+private:
+    // Wall placement (mouse mode 0x15 in the original): first press sets
+    // the start tile, the preview follows the cursor, the next press
+    // commits the L-shaped line of foundations.
+    bool wallDragActive_ = false;
+    int wallStartTileX_ = 0, wallStartTileY_ = 0;
     bool cheatMenuOpen_ = false;
     size_t cheatMenuSelection_ = 0;
     bool forceBuildCheat_ = false;
@@ -721,6 +814,7 @@ private:
     size_t attackModeChanges_ = 0;
     std::function<void(const std::string &)> log_;
     std::function<float(const std::string &)> playSound_;
+    std::function<void(int)> playInterfaceSound_;
     std::function<void(int, int)> playUnitSound_;
     std::function<float(const std::string &)> playAmbientSound_;
 };

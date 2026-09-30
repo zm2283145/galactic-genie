@@ -64,6 +64,11 @@ public:
     bool readSound(int soundId, int civilization, uint32_t choice,
                    std::vector<uint8_t> &data, int *resourceId = nullptr,
                    std::string *fileName = nullptr);
+    // Raw WAV from the sounds DRS by resource id (interface sounds such as
+    // gatel.wav 50362 / gateu.wav 50363 are loaded by id, not via the dat).
+    bool readSoundResource(int resourceId, std::vector<uint8_t> &data) {
+        return sounds_.read(resourceId, data);
+    }
     Texture *selectionRing();
     bool hasBlendMasks() const { return blendMaskTexture_ != nullptr; }
     bool hasElevationMaps() const { return elevationMaps_ != nullptr; }

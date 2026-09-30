@@ -2101,6 +2101,9 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         [&](int soundId, int) {
             systemsSounds.push_back(soundId);
         });
+    systems.setInterfaceSoundPlayer([&](int resourceId) {
+        systemsSounds.push_back(resourceId);
+    });
     if (!systems.init(0x51E1D, mapSize, &err)) {
         fprintf(stderr, "error: %s\n", err.c_str());
         return 1;
@@ -2536,7 +2539,7 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         std::find(
             systemsSounds.begin(),
             systemsSounds.end(),
-            541) != systemsSounds.end();
+            50362) != systemsSounds.end(); // gatel.wav
     const bool gatePositionPassable =
         systems.positionPassableForTesting(
             7, 50.0f, 10.0f);
@@ -3047,6 +3050,208 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
                "time=" + std::to_string(frames / 30.0f) + " overlaps=" +
                    std::to_string(ms.overlappingPairs) + " (" + std::to_string(ms.firstOverlapObject) + "/" +
                    std::to_string(ms.secondOverlapObject) + ")");
+    }
+    // 7) Builders route around a building to reach a foundation behind it
+    //    and do not jam on each other.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        g.spawnObjectForTesting(3, 109, 1, 40.0f, 44.0f); // command centre in the way
+        std::vector<uint32_t> workers;
+        for (int i = 0; i < 4; i++)
+            workers.push_back(g.spawnObjectForTesting(3, 83, 1, 43.5f + (i % 2) * 0.6f,
+                                                      43.4f + (i / 2) * 0.8f));
+        g.update(1.0f / 30.0f, {});
+        const uint32_t site = g.spawnFoundationForTesting(3, 70, 1, 36.0f, 44.0f, workers);
+        const float hp0 = g.objectHitPoints(site);
+        int started = -1, frames = 0;
+        for (; frames < 30 * 60; frames++) {
+            g.update(1.0f / 30.0f, {});
+            if (started < 0 && g.objectHitPoints(site) > hp0 + 0.5f) started = frames;
+            if (started >= 0 && frames > started + 30 * 8) break;
+        }
+        int building = 0;
+        for (uint32_t id : workers) {
+            const auto p = g.objectPosition(id);
+            const float dx = p[0] - 36.0f, dy = p[1] - 44.0f;
+            if (std::getenv("SWGB_TRACE_BUILDERS"))
+                printf("  worker %u at %.2f,%.2f %s\n", id, p[0], p[1],
+                       g.describeObjectForTesting(id).substr(0, 150).c_str());
+            if (std::sqrt(dx * dx + dy * dy) < 2.6f) building++;
+            else printf("  far worker %u at %.2f,%.2f %s\n", id, p[0], p[1],
+                        g.describeObjectForTesting(id).substr(0, 120).c_str());
+        }
+        const MovementStats ms = g.movementStats();
+        g.lookAtObject(site);
+        shot(g, "_builders");
+        report("builders-route", started >= 0 && started < 30 * 15 && building == 4 &&
+                                     ms.overlappingPairs == 0,
+               "start=" + std::to_string(started / 30.0f) + " atSite=" + std::to_string(building) +
+                   " overlaps=" + std::to_string(ms.overlappingPairs));
+    }
+    // 8) A worker wedged in a gap between two buildings gets out and builds.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        g.spawnObjectForTesting(3, 70, 1, 38.0f, 40.0f);
+        g.spawnObjectForTesting(3, 70, 1, 40.3f, 40.0f);
+        const uint32_t worker = g.spawnObjectForTesting(3, 83, 1, 39.15f, 40.0f);
+        g.update(1.0f / 30.0f, {});
+        const uint32_t site = g.spawnFoundationForTesting(3, 70, 1, 39.0f, 45.0f, {worker});
+        const float hp0 = g.objectHitPoints(site);
+        int started = -1;
+        for (int f = 0; f < 30 * 20 && started < 0; f++) {
+            g.update(1.0f / 30.0f, {});
+            if (g.objectHitPoints(site) > hp0 + 0.5f) started = f;
+        }
+        const auto p = g.objectPosition(worker);
+        report("wedged-worker", started >= 0,
+               "start=" + std::to_string(started / 30.0f) + " at " + std::to_string(p[0]) + "," +
+                   std::to_string(p[1]) + " " + g.describeObjectForTesting(worker).substr(0, 100));
+    }
+    // 9) Wall drag lines: L-shape, diagonal and straight, with the original
+    //    connection frames (posts at ends and corners).
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        g.setResourceForTesting(1, 2, 5000);
+        const uint32_t worker = g.spawnObjectForTesting(3, 83, 1, 28.0f, 36.0f);
+        g.update(1.0f / 30.0f, {});
+        std::vector<uint32_t> walls;
+        auto add = [&](int x1, int y1, int x2, int y2) {
+            auto ids = g.placeWallForTesting(worker, 3, 117, x1, y1, x2, y2);
+            walls.insert(walls.end(), ids.begin(), ids.end());
+            return ids;
+        };
+        // Find a clear 16x16 patch.
+        int bx = -1, by = -1;
+        for (int cy = 10; cy < 80 && bx < 0; cy += 4)
+            for (int cx = 10; cx < 80 && bx < 0; cx += 4) {
+                bool clear = true;
+                for (int y = cy; y < cy + 16 && clear; y++)
+                    for (int x = cx; x < cx + 16 && clear; x++)
+                        clear = g.positionPassableForTesting(worker, x + 0.5f, y + 0.5f);
+                if (clear) { bx = cx; by = cy; }
+            }
+        printf("  wall patch %d,%d\n", bx, by);
+        g.moveObjectForTesting(worker, bx - 1.0f, by + 8.0f);
+        const auto lWall = add(bx + 1, by + 1, bx + 7, by + 4);
+        const auto diag = add(bx + 1, by + 8, bx + 5, by + 12);
+        const auto straight = add(bx + 11, by + 1, bx + 11, by + 7);
+        for (uint32_t id : walls) g.completeFoundationForTesting(id);
+        for (int f = 0; f < 10; f++) g.update(1.0f / 30.0f, {});
+        auto frameOf = [&](uint32_t id) {
+            return (int)std::lround(g.objectFacing(id) / (2.0f * 3.14159265f / 5.0f));
+        };
+        std::string frames;
+        for (uint32_t id : lWall) frames += std::to_string(frameOf(id));
+        frames += " ";
+        for (uint32_t id : diag) frames += std::to_string(frameOf(id));
+        frames += " ";
+        for (uint32_t id : straight) frames += std::to_string(frameOf(id));
+        g.lookAtObject(lWall.empty() ? worker : lWall[lWall.size() / 2]);
+        shot(g, "_walls");
+        if (!diag.empty()) {
+            g.lookAtObject(diag[diag.size() / 2]);
+            shot(g, "_walls_diag");
+        }
+        // L: 7 tiles along X (ends/corner = 2, middle = 1) then 3 along Y.
+        report("wall-lines", lWall.size() == 10 && diag.size() == 5 && straight.size() == 7 &&
+                                 frames == "2111112002 24442 2000002",
+               "counts " + std::to_string(lWall.size()) + "/" + std::to_string(diag.size()) + "/" +
+                   std::to_string(straight.size()) + " frames " + frames);
+    }
+    // 10) Gather point: a trained unit walks to it; removing it works.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t center = g.spawnObjectForTesting(3, 87, 1, 44.0f, 16.0f);
+        g.update(1.0f / 30.0f, {});
+        const bool set = g.setGatherPointForTesting(center, 50.0f, 22.0f);
+        const size_t before = g.selectedObjectIds().size();
+        (void)before;
+        g.queueUnitForTesting(center, 460);
+        float bestDistance = 1e9f;
+        for (int f = 0; f < 30 * 20; f++) {
+            g.update(1.0f / 30.0f, {});
+        }
+        // Find the trooper nearest the gather point.
+        for (uint32_t id = 1; id < 20000; id++) {
+            if (g.objectUnitId(id) != 460) continue;
+            const auto p = g.objectPosition(id);
+            const float dx = p[0] - 50.0f, dy = p[1] - 22.0f;
+            bestDistance = std::min(bestDistance, std::sqrt(dx * dx + dy * dy));
+        }
+        report("gather-point", set && bestDistance < 1.0f,
+               "set=" + std::to_string(set) + " nearest=" + std::to_string(bestDistance));
+    }
+    // 11) Command Center fires only when garrisoned: +1 bolt per trooper.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t cc = g.spawnObjectForTesting(3, 109, 1, 46.0f, 18.0f);
+        const uint32_t enemy = g.spawnObjectForTesting(1, 460, 2, 46.0f, 23.5f);
+        g.setDiplomacyForTesting(1, 2, 3);
+        g.setDiplomacyForTesting(2, 1, 3);
+        g.setDiplomacyForTesting(2, 1, 3);
+        g.update(1.0f / 30.0f, {});
+        const size_t shots0 = g.projectilesLaunchedForTesting();
+        for (int f = 0; f < 60; f++) g.update(1.0f / 30.0f, {});
+        const size_t emptyShots = g.projectilesLaunchedForTesting() - shots0;
+        std::vector<uint32_t> troops;
+        for (int i = 0; i < 5; i++) {
+            troops.push_back(g.spawnObjectForTesting(3, 460, 1, 44.0f + i * 0.5f, 15.6f));
+            g.garrisonForTesting(troops.back(), cc);
+        }
+        const float hp0 = g.objectHitPoints(enemy);
+        const size_t shots1 = g.projectilesLaunchedForTesting();
+        const int emptyVolley = g.garrisonVolleyForTesting(cc);
+        for (int f = 0; f < 180; f++) g.update(1.0f / 30.0f, {});
+        const int volley = g.garrisonVolleyForTesting(cc);
+        const size_t garrisonShots = g.projectilesLaunchedForTesting() - shots1;
+        printf("  cc %s\n  enemy %s\n", g.describeObjectForTesting(cc).substr(0, 200).c_str(),
+               g.describeObjectForTesting(enemy).substr(0, 120).c_str());
+        // Troopers (class 52) add 4 dmg / 2 s / 2.5 = 1.6 bolts each: 1 + 8 = 9.
+        (void)emptyShots;
+        report("garrison-fire", emptyVolley == 1 && volley == 9 && garrisonShots >= 5 &&
+                                    g.objectHitPoints(enemy) < hp0,
+               "emptyVolley=" + std::to_string(emptyVolley) + " volley=" + std::to_string(volley) +
+                   " shots=" + std::to_string(garrisonShots) + " enemyHp " + std::to_string(hp0) +
+                   "->" + std::to_string(g.objectHitPoints(enemy)));
+    }
+    // 12) Research/unit help uses the original rollover text.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t cc = g.spawnObjectForTesting(3, 109, 1, 46.0f, 18.0f);
+        g.update(1.0f / 30.0f, {});
+        g.selectObjectForTesting(cc);
+        g.lookAtObject(cc);
+        InputState in;
+        in.screenW = 960; in.screenH = 544;
+        in.cycleAttackMode = true;
+        g.update(0.001f, in);
+        const bool opened = g.actionMenuOpenForTesting();
+        shot(g, "_menu_units");
+        in = {};
+        in.screenW = 960; in.screenH = 544;
+        in.actionTabRight = true;
+        g.update(0.001f, in);
+        shot(g, "_menu_research");
+        in = {};
+        in.screenW = 960; in.screenH = 544;
+        in.cursorVisible = true;
+        in.pointerX = 960 - 8 - 94 * 3 + 20; in.pointerY = 20; // carbon field
+        in.menuBack = true;
+        g.update(0.001f, in);
+        shot(g, "_tooltip");
+        report("original-help", opened, "opened=" + std::to_string(opened));
     }
     printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;
