@@ -67,6 +67,8 @@ Texture *Assets::selectionRing() {
 void Assets::destroySheet(std::unique_ptr<SpriteSheet> &sheet) {
     if (!sheet) return;
     for (Texture *texture : sheet->pages) renderer_->destroyTexture(texture);
+    for (Texture *texture : sheet->outlinePages)
+        renderer_->destroyTexture(texture);
     textureBytes_ = sheet->bytes <= textureBytes_ ? textureBytes_ - sheet->bytes : 0;
     sheet.reset();
 }
@@ -678,20 +680,44 @@ std::unique_ptr<SpriteSheet> Assets::pack(const std::vector<SlpImage> &imgs, int
 
     auto sheet = std::make_unique<SpriteSheet>();
     std::vector<std::vector<uint8_t>> pixels(pageSize.size());
+    bool hasOutlines = false;
+    for (const SlpImage &image : imgs)
+        if (std::find(image.kind.begin(), image.kind.end(),
+                      PX_OUTLINE) != image.kind.end()) {
+            hasOutlines = true;
+            break;
+        }
+    std::vector<std::vector<uint8_t>> outlines(
+        hasOutlines ? pageSize.size() : 0);
     for (size_t p = 0; p < pageSize.size(); p++) {
         pageSize[p].second = std::max(1, pageSize[p].second);
         pixels[p].assign((size_t)pageSize[p].first * pageSize[p].second * 4, 0);
+        if (hasOutlines)
+            outlines[p].assign(
+                (size_t)pageSize[p].first * pageSize[p].second, 0);
     }
     ColorizeOptions opt;
     opt.playerColorBase = playerColorBase;
     for (size_t i = 0; i < n; i++) {
         const Place &pl = place[i];
         const int pw = pageSize[pl.page].first;
-        if (imgs[i].width > 0 && imgs[i].height > 0)
+        if (imgs[i].width > 0 && imgs[i].height > 0) {
             colorize(imgs[i], palette_, opt, &pixels[pl.page][((size_t)pl.y * pw + pl.x) * 4], pw);
+            if (hasOutlines)
+                for (int y = 0; y < imgs[i].height; y++)
+                    for (int x = 0; x < imgs[i].width; x++)
+                        if (imgs[i].kind[
+                                (size_t)y * imgs[i].width + x] ==
+                            PX_OUTLINE)
+                            outlines[pl.page][
+                                (size_t)(pl.y + y) * pw +
+                                pl.x + x] = 255;
+        }
     }
     size_t packedBytes = 0;
     for (const auto &pagePixels : pixels) packedBytes += pagePixels.size();
+    for (const auto &pageOutlines : outlines)
+        packedBytes += pageOutlines.size();
     ensureTerrainCacheSpace(packedBytes);
     for (size_t p = 0; p < pageSize.size(); p++) {
         Texture *t = renderer_->createTexture(pageSize[p].first, pageSize[p].second, pixels[p].data());
@@ -701,12 +727,30 @@ std::unique_ptr<SpriteSheet> Assets::pack(const std::vector<SlpImage> &imgs, int
             return nullptr;
         }
         sheet->pages.push_back(t);
+        if (hasOutlines) {
+            Texture *outline = renderer_->createMaskTexture(
+                pageSize[p].first, pageSize[p].second,
+                outlines[p].data());
+            if (!outline) {
+                for (Texture *pageTexture : sheet->pages)
+                    renderer_->destroyTexture(pageTexture);
+                for (Texture *pageTexture :
+                     sheet->outlinePages)
+                    renderer_->destroyTexture(pageTexture);
+                log("sprite outline texture allocation failed");
+                return nullptr;
+            }
+            sheet->outlinePages.push_back(outline);
+        }
     }
     sheet->bytes = packedBytes;
     sheet->frames.resize(n);
     for (size_t i = 0; i < n; i++) {
         SpriteFrame &f = sheet->frames[i];
         f.tex = sheet->pages[place[i].page];
+        if (hasOutlines)
+            f.outlineTex =
+                sheet->outlinePages[place[i].page];
         f.u = (float)place[i].x;
         f.v = (float)place[i].y;
         f.w = imgs[i].width;

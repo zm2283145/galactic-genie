@@ -8,7 +8,7 @@
 namespace swgb {
 
 struct AudioClip {
-    static constexpr uint32_t kSampleRate = 48000;
+    static constexpr uint32_t kSampleRate = 44100;
     static constexpr uint32_t kChannels = 2;
 
     std::vector<int16_t> samples;
@@ -18,5 +18,6 @@ struct AudioClip {
 bool decodeMp3(const std::vector<uint8_t> &data, AudioClip &clip, std::string *err = nullptr);
 bool decodeWav(const std::vector<uint8_t> &data, AudioClip &clip, std::string *err = nullptr);
 bool loadMp3(const std::string &path, AudioClip &clip, std::string *err = nullptr);
+bool loadWav(const std::string &path, AudioClip &clip, std::string *err = nullptr);
 
 } // namespace swgb

@@ -31,7 +31,10 @@ const char *kRoot = "ux0:data/swgb";
 const char *kDataDir = "ux0:data/swgb/Data";
 const char *kCampaignPath = "ux0:data/swgb/Campaign/xcam3.cpx";
 const char *kScenarioSoundDir = "ux0:data/swgb/Sound/Scenario";
+const char *kMusicDir = "ux0:data/swgb/Music";
+const char *kTerrainSoundDir = "ux0:data/swgb/Sound/Terrain";
 const int kScreenW = 960, kScreenH = 544;
+constexpr bool kUseCompactTestMap = true;
 
 FILE *g_log = nullptr;
 
@@ -102,35 +105,54 @@ int main() {
         }
         logf("assets loaded in %llu ms", (unsigned long long)((sceKernelGetProcessTimeWide() - t0) / 1000));
 
-        auto campaign = swgb::CpxArchive::open(kCampaignPath, &err);
-        if (!campaign) {
-            errorScreen(err + " (copy XCAM3.CPX to ux0:data/swgb/Campaign)");
-            sceKernelExitProcess(0);
-            return 0;
-        }
-        std::vector<uint8_t> scx;
-        if (!campaign->read(1, scx, &err)) {
-            errorScreen(err);
-            sceKernelExitProcess(0);
-            return 0;
-        }
         swgb::Scenario scenario;
-        if (!scenario.load(scx, &err)) {
-            errorScreen(err);
-            sceKernelExitProcess(0);
-            return 0;
+        if (!kUseCompactTestMap) {
+            auto campaign = swgb::CpxArchive::open(
+                kCampaignPath, &err);
+            if (!campaign) {
+                errorScreen(
+                    err +
+                    " (copy XCAM3.CPX to ux0:data/swgb/Campaign)");
+                sceKernelExitProcess(0);
+                return 0;
+            }
+            std::vector<uint8_t> scx;
+            if (!campaign->read(1, scx, &err) ||
+                !scenario.load(scx, &err)) {
+                errorScreen(err);
+                sceKernelExitProcess(0);
+                return 0;
+            }
+            logf("scenario %s loaded: %ux%u, %u units, player data %.2f",
+                 scenario.originalFilename.c_str(),
+                 (unsigned)scenario.map.width,
+                 (unsigned)scenario.map.height,
+                 (unsigned)scenario.units.size(),
+                 scenario.playerDataVersion);
+        } else {
+            logf("compact gameplay test map selected");
         }
-        logf("scenario %s loaded: %ux%u, %u units, player data %.2f", scenario.originalFilename.c_str(),
-             (unsigned)scenario.map.width, (unsigned)scenario.map.height, (unsigned)scenario.units.size(),
-             scenario.playerDataVersion);
 
         swgb::Game game(assets);
         game.setLogger([](const std::string &s) { logf("%s", s.c_str()); });
-        swgb::VitaAudio audio(kScenarioSoundDir);
+        swgb::VitaAudio audio(
+            kScenarioSoundDir, kMusicDir, kTerrainSoundDir);
         audio.setLogger([](const std::string &s) { logf("audio: %s", s.c_str()); });
         std::string audioError;
         if (!audio.start(&audioError)) logf("audio disabled: %s", audioError.c_str());
         game.setSoundPlayer([&audio](const std::string &name) { return audio.play(name); });
+        game.setAmbientSoundPlayer(
+            [&audio](const std::string &name) {
+                return audio.playAmbient(name);
+            });
+        game.setInterfaceSoundPlayer([&](int resourceId) {
+            std::vector<uint8_t> data;
+            if (!assets.readSoundResource(resourceId, data)) {
+                logf("interface sound %d not found", resourceId);
+                return;
+            }
+            audio.playEffect(resourceId, data);
+        });
         uint32_t unitSoundChoice = 0;
         game.setUnitSoundPlayer([&](int soundId, int civilization) {
             std::vector<uint8_t> data;
@@ -144,7 +166,12 @@ int main() {
             if (!audio.playEffect(resourceId, data))
                 logf("unit sound %s (%d) could not play", fileName.c_str(), resourceId);
         });
-        if (!game.initScenario(scenario, &err)) {
+        const bool initialized =
+            kUseCompactTestMap
+                ? game.initCompactTestMap(
+                      0x5A17u, 64, &err)
+                : game.initScenario(scenario, &err);
+        if (!initialized) {
             errorScreen(err);
             sceKernelExitProcess(0);
             return 0;
@@ -158,6 +185,7 @@ int main() {
         float touchStartX = 0, touchStartY = 0, lastTx = 0, lastTy = 0;
         float stickBoxStartX = 0, stickBoxStartY = 0;
         float cursorX = kScreenW * 0.5f, cursorY = kScreenH * 0.5f;
+        int menuStickY = 0;
         uint64_t last = sceKernelGetProcessTimeWide();
         uint64_t statT = last;
         int frames = 0;
@@ -177,6 +205,28 @@ int main() {
             swgb::InputState in;
             in.screenW = kScreenW;
             in.screenH = kScreenH;
+            const bool cheatChord =
+                (pressed & SCE_CTRL_SELECT) &&
+                (pad.buttons & SCE_CTRL_LTRIGGER) &&
+                (pad.buttons & SCE_CTRL_RTRIGGER);
+            in.toggleCheatMenu = cheatChord;
+            in.menuUp = (pressed & SCE_CTRL_UP) != 0;
+            in.menuDown = (pressed & SCE_CTRL_DOWN) != 0;
+            in.menuLeft = (pressed & SCE_CTRL_LEFT) != 0;
+            in.menuRight = (pressed & SCE_CTRL_RIGHT) != 0;
+            in.menuActivate = (pressed & SCE_CTRL_CROSS) != 0;
+            in.menuBack = (pressed & SCE_CTRL_CIRCLE) != 0;
+            in.actionTabLeft =
+                (pressed & SCE_CTRL_LTRIGGER) != 0;
+            in.actionTabRight =
+                (pressed & SCE_CTRL_RTRIGGER) != 0;
+            const int currentMenuStickY =
+                pad.ly < 64 ? -1 : pad.ly > 192 ? 1 : 0;
+            if (currentMenuStickY < 0 && menuStickY >= 0)
+                in.menuUp = true;
+            if (currentMenuStickY > 0 && menuStickY <= 0)
+                in.menuDown = true;
+            menuStickY = currentMenuStickY;
             in.scrollX = axis(pad.lx);
             in.scrollY = axis(pad.ly);
             if (pad.buttons & SCE_CTRL_LEFT) in.scrollX = -1;
@@ -185,7 +235,8 @@ int main() {
             if (pad.buttons & SCE_CTRL_DOWN) in.scrollY = 1;
             if (pressed & SCE_CTRL_RTRIGGER) in.zoomStep = 1;
             if (pressed & SCE_CTRL_LTRIGGER) in.zoomStep = -1;
-            if (pressed & SCE_CTRL_SELECT) in.toggleDebug = true;
+            if ((pressed & SCE_CTRL_SELECT) && !cheatChord)
+                in.toggleDebug = true;
 
             if (pressed & SCE_CTRL_SQUARE) {
                 stickBoxArmed = true;

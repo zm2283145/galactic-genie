@@ -4,6 +4,7 @@
 #pragma once
 
 #include "assets.h"
+#include "pathfinding.h"
 #include "../core/scenario.h"
 
 #include <array>
@@ -34,6 +35,15 @@ struct InputState {
     bool pointerTap = false;
     bool boxSelectActive = false;
     bool boxSelectCommit = false;
+    bool toggleCheatMenu = false;
+    bool menuUp = false;
+    bool menuDown = false;
+    bool menuLeft = false;
+    bool menuRight = false;
+    bool menuActivate = false;
+    bool menuBack = false;
+    bool actionTabLeft = false;
+    bool actionTabRight = false;
 };
 
 struct FrameStats {
@@ -89,19 +99,57 @@ public:
     explicit Game(Assets &assets) : assets_(assets) {}
 
     bool init(uint32_t seed, int mapSize, std::string *err);
+    bool initCompactTestMap(
+        uint32_t seed, int mapSize,
+        std::string *err);
     bool initScenario(const Scenario &scenario, std::string *err);
     void update(float dt, const InputState &in);
     void render(Renderer &r, int screenW, int screenH);
 
     // Centre the camera on a tile (used by tools and at startup).
     void lookAt(float tx, float ty);
+    bool lookAtObject(uint32_t spawnId);
+    bool selectObjectForTesting(uint32_t spawnId);
+    bool selectObjectsForTesting(
+        const std::vector<uint32_t> &spawnIds);
+    // Group move of the given units, as a right-click with them selected.
+    std::string describeObjectForTesting(uint32_t spawnId) const;
+    bool garrisonForTesting(uint32_t unitId, uint32_t buildingId) {
+        Object *u = findObject(unitId);
+        if (!u) return false;
+        u->garrisonTargetId = buildingId;
+        return true;
+    }
+    int garrisonVolleyForTesting(uint32_t buildingId) const {
+        const Object *b = findObject(buildingId);
+        return b ? garrisonVolleySize(*b) : 0;
+    }
+    size_t projectilesLaunchedForTesting() const { return projectilesLaunched_; }
+    // Drags a wall of unitId from tile (x1,y1) to (x2,y2) for the worker;
+    // returns the new foundation ids.
+    std::vector<uint32_t> placeWallForTesting(uint32_t workerId, int civilization, int unitId,
+                                              int x1, int y1, int x2, int y2);
+    float objectFacing(uint32_t spawnId) const {
+        const Object *o = findObject(spawnId);
+        return o ? o->facing : 0.0f;
+    }
+    void groupMoveForTesting(const std::vector<uint32_t> &spawnIds, float x,
+                             float y, int formation = -1);
     const FrameStats &stats() const { return stats_; }
     void setLogger(std::function<void(const std::string &)> fn) { log_ = std::move(fn); }
     void setSoundPlayer(std::function<float(const std::string &)> fn) {
         playSound_ = std::move(fn);
     }
+    // Plays an interface sound by sounds-DRS resource id.
+    void setInterfaceSoundPlayer(std::function<void(int)> fn) {
+        playInterfaceSound_ = std::move(fn);
+    }
     void setUnitSoundPlayer(std::function<void(int, int)> fn) {
         playUnitSound_ = std::move(fn);
+    }
+    void setAmbientSoundPlayer(
+        std::function<float(const std::string &)> fn) {
+        playAmbientSound_ = std::move(fn);
     }
 
     // Debug helper: draws one graphic immediately at a screen position.
@@ -112,20 +160,110 @@ public:
     bool triggerEnabled(size_t id) const;
     bool triggerFired(size_t id) const;
     bool gateLocked(uint32_t spawnId) const;
+    size_t gateCount() const;
+    void setLocalPlayerForTesting(int player) { localPlayer_ = player; }
+    size_t garrisonedCount(uint32_t spawnId) const;
+    bool garrisonCursorActive() const {
+        return garrisonCursorActive_;
+    }
     bool objectActive(uint32_t spawnId) const;
     float resource(int player, int resourceId) const;
     bool researchTechnology(int player, int technologyId);
     const std::string &currentInstruction() const { return currentInstruction_; }
     size_t activeObjectCount() const;
+    size_t underConstructionObjectCount() const;
     size_t selectedObjectCount() const;
     size_t selectedMovingObjectCount() const;
     MovementStats movementStats() const;
     CombatStats combatStats() const;
     float objectHitPoints(uint32_t spawnId) const;
     float objectMaxHitPoints(uint32_t spawnId) const;
+    float objectShieldPoints(uint32_t spawnId) const;
+    float objectMaxShieldPoints(uint32_t spawnId) const;
+    bool objectShielded(uint32_t spawnId) const;
+    uint32_t spawnObjectForTesting(int civilization, int unitId, int player,
+                                   float x, float y);
+    uint32_t spawnFoundationForTesting(
+        int civilization, int unitId, int player,
+        float x, float y,
+        const std::vector<uint32_t> &builderIds);
+    bool completeFoundationForTesting(uint32_t spawnId);
+    bool setConstructionProgressForTesting(
+        uint32_t spawnId, float progress);
+    bool damageObjectForTesting(uint32_t spawnId, int damage);
+    bool moveObjectForTesting(uint32_t spawnId, float x, float y);
+    int objectPlayer(uint32_t spawnId) const;
+    bool setGateLockedForTesting(
+        uint32_t spawnId, bool locked);
+    bool positionPassableForTesting(
+        uint32_t spawnId, float x, float y) const;
+    bool issueRepairForTesting(
+        uint32_t workerId, uint32_t targetId);
+    bool issueGatherForTesting(
+        uint32_t workerId, uint32_t targetId);
+    bool issueDropOffForTesting(
+        uint32_t workerId, uint32_t buildingId);
+    bool objectPoweredForTesting(uint32_t spawnId) const;
+    bool destroyLastSelectedForTesting();
+    bool ejectGarrisonedUnitForTesting(
+        uint32_t buildingId, uint32_t unitId);
+    void setResourceForTesting(
+        int player, int resourceType,
+        float amount);
+    void setDiplomacyForTesting(
+        int sourcePlayer, int targetPlayer,
+        uint32_t stance);
+    bool actionMenuOpenForTesting() const {
+        return actionMenuOpen_;
+    }
+    int objectUnitId(uint32_t spawnId) const;
     int objectAttackDamage(uint32_t sourceId,
                            uint32_t targetId) const;
     bool objectSelected(uint32_t spawnId) const;
+    std::vector<uint32_t> selectedObjectIds() const;
+    std::vector<int> productionOptionIds(
+        uint32_t spawnId) const;
+    std::vector<int> researchOptionIds(
+        uint32_t spawnId) const;
+    std::vector<int> buildingOptionIds(
+        uint32_t spawnId) const;
+    std::vector<int> buildingOptionIds(
+        uint32_t spawnId, int interfaceKind) const;
+    std::vector<uint32_t> underConstructionObjectIds() const;
+    uint32_t constructionBuilderId(
+        uint32_t spawnId) const;
+    bool objectIsBuilder(uint32_t spawnId) const;
+    bool objectGatheringTarget(
+        uint32_t spawnId, uint32_t targetId) const;
+    bool objectBuildingTarget(
+        uint32_t spawnId, uint32_t targetId) const;
+    float objectCarriedAmount(uint32_t spawnId) const;
+    float objectResourceAmount(uint32_t spawnId) const;
+    bool objectFelled(uint32_t spawnId) const {
+        const Object *o = findObject(spawnId);
+        return o && o->felled;
+    }
+    std::array<float, 2> objectPosition(
+        uint32_t spawnId) const;
+    bool technologyResearched(int player, int technologyId) const {
+        return player >= 0 &&
+               (size_t)player < researchedTechs_.size() &&
+               researchedTechs_[(size_t)player].count(technologyId);
+    }
+    bool technologyRequirementsMetForTesting(
+        int player, int technologyId) const {
+        if (technologyId < 0 ||
+            (size_t)technologyId >=
+                assets_.dat().techs.size())
+            return false;
+        return technologyRequirementsMet(
+            player,
+            assets_.dat().techs[
+                (size_t)technologyId]);
+    }
+    bool fullTechTreeUnlocked() const {
+        return fullTechTreeCheat_;
+    }
     bool objectScreenPosition(uint32_t spawnId, int screenW, int screenH,
                               float &screenX, float &screenY) const;
     std::vector<MovingObjectInfo> movingObjects() const;
@@ -134,8 +272,31 @@ public:
     static constexpr int kTileHalfH = 24;
 
 private:
-    enum class State : uint8_t { Idle, Walk, Attack };
-    enum class CursorMode : uint8_t { Normal, Move, Attack };
+    enum class State : uint8_t {
+        Idle,
+        Walk,
+        Attack,
+        Build,
+        Gather,
+        Repair,
+    };
+    enum class CursorMode : uint8_t {
+        Normal,
+        Move,
+        Attack,
+        Garrison,
+        Gather,
+        Repair,
+    };
+    enum class ActionMenuTab : uint8_t {
+        Units,
+        Research,
+        Commands,
+        Stances,
+        Economy,
+        Military,
+        Defense,
+    };
     enum class FormationType : uint8_t { Line, Box, Staggered, Flank };
     enum class AttackMode : uint8_t {
         Aggressive,
@@ -144,12 +305,18 @@ private:
         Passive,
     };
 
+    struct ProductionItem {
+        const dat::Unit *unit = nullptr;
+        int technologyId = -1;
+        float duration = 0;
+    };
+
     struct Object {
         const dat::Unit *unit = nullptr;
         const dat::Unit *gateClosedUnit = nullptr;
         const dat::Unit *gateOpenUnit = nullptr;
         const dat::Unit *gateEndUnit = nullptr;
-        std::deque<const dat::Unit *> productionQueue;
+        std::deque<ProductionItem> productionQueue;
         int player = 0; // 0 = gaia
         float x = 0, y = 0;
         float facing = 0; // radians, 0 = +x world axis
@@ -158,6 +325,11 @@ private:
         float stateTime = 0;
         float targetX = 0, targetY = 0;
         float hitPoints = 1, maxHitPoints = 1;
+        float shieldPoints = 0, maxShieldPoints = 0;
+        float resourceAmount = 0;
+        float carriedAmount = 0;
+        int resourceType = -1;
+        int carriedResourceType = -1;
         std::vector<std::array<float, 2>> path;
         size_t pathIndex = 0;
         float blockedTime = 0;
@@ -188,11 +360,37 @@ private:
         bool draw = true;
         bool locked = false;
         bool gate = false;
+        bool underConstruction = false;
+        bool manualDropOff = false;
         bool selected = false;
         bool triggerAddressable = true;
         float flashTime = 0;
         float gateOpenAmount = 0;
+        float gateCloseTimer = 0;
+        bool felled = false; // carbon tree cut down, still holding resources
+        uint32_t pathGoalId = 0;      // object approached (region goal), 0 = point
+        float pathGoalClearance = 0;
+        uint8_t repathCount = 0;
+        float detourTime = 0;
+        float approachRetry = 0;
+        // Gather (rally) point, command 0x78: building +0x214..0x228.
+        bool rallyActive = false;
+        float rallyX = 0, rallyY = 0;
+        uint32_t rallyTargetId = 0;
+        // Remaining garrison bolts of the current volley (0x55be20).
+        int volleyRemaining = 0;
+        float volleyTimer = 0;
+        uint32_t volleyTargetId = 0;
+        uint32_t blockerId = 0;     // unit that blocked the last step
         float productionRemaining = 0;
+        float constructionRemaining = 0;
+        float constructionTotal = 0;
+        uint32_t constructionBuilderId = 0;
+        uint32_t constructionTargetId = 0;
+        uint32_t gatherTargetId = 0;
+        uint32_t dropOffTargetId = 0;
+        uint32_t repairTargetId = 0;
+        uint32_t garrisonTargetId = 0;
         uint32_t spawnId = 0;
         int32_t garrisonedInId = -1;
         uint16_t initialFrame = 0;
@@ -208,6 +406,10 @@ private:
         uint32_t targetId = 0;
         uint32_t sourceId = 0;
         int damage = 0;
+        // Garrison bolts are aimed at a scattered point near the target and
+        // only hurt it if they land on it.
+        bool groundAimed = false;
+        float aimX = 0, aimY = 0;
     };
 
     struct Remains {
@@ -230,9 +432,10 @@ private:
 
     struct PathGridCache {
         int terrainRestriction = -1;
-        int radiusHundredths = 0;
         bool air = false;
-        std::vector<uint8_t> passable;
+        int player = -1;
+        int radiusHundredths = 0;
+        TilePathfinder finder;
     };
 
     struct Instruction {
@@ -254,7 +457,10 @@ private:
     const Object *findObject(uint32_t spawnId) const;
     int civilizationForPlayer(int player) const;
     void rebuildAdjacency();
+    bool configureGate(Object &object);
+    bool gateBlocks(const Object &gate, const Object &mover) const;
     void rebuildMobileOccupancy();
+    void updateLivestockOwnership();
     void updateTriggers(float dt);
     bool conditionMet(const ScenarioCondition &condition, float triggerElapsed);
     void executeEffect(const ScenarioEffect &effect);
@@ -262,11 +468,18 @@ private:
     std::vector<Object *> effectTargets(const ScenarioEffect &effect);
     bool objectMatches(const Object &object, int unitId, int player, int group, int type) const;
     bool inSourceArea(const Object &object, int x1, int y1, int x2, int y2) const;
-    bool issueMove(Object &object, float targetX, float targetY);
+    bool issueMove(Object &object, float targetX, float targetY,
+                   const Object *goalObject = nullptr, float clearance = 0.0f);
     void issueGroupMove(std::vector<Object *> targets, float targetX, float targetY,
                         FormationType formation = FormationType::Line);
     bool findPath(const Object &object, float targetX, float targetY,
-                  std::vector<std::array<float, 2>> &path) const;
+                  std::vector<std::array<float, 2>> &path,
+                  const Object *goalObject = nullptr, float clearance = 0.0f) const;
+    bool segmentClear(const Object &object, float ax, float ay, float bx, float by) const;
+    bool staticPassableAt(const Object &object, float x, float y) const;
+    const Object *unitBlockerAt(const Object &object, float x, float y) const;
+    bool detourAround(Object &object, float goalX, float goalY);
+    bool approach(Object &object, const Object &target, float clearance);
     bool positionPassable(const Object &object, float x, float y, bool dynamic) const;
     bool terrainPassable(const Object &object, float x, float y) const;
     bool isAirUnit(const Object &object) const;
@@ -282,14 +495,61 @@ private:
     bool technologyCommandApplies(
         const dat::EffectCommand &command,
         const Object &object) const;
+    float modifiedUnitAttribute(const Object &object,
+                                int attribute,
+                                float baseValue) const;
     int graphicSound(int graphicId) const;
     float collisionRadius(const Object &object) const;
+    bool workingOn(const Object &unit, uint32_t targetId) const;
+    // Original rollover help (FUN_004d1520): creation/description string
+    // + 20000 with <cost>/<hp>/<attack>/... tags expanded. Returns the body
+    // (the part after the "Create <b>Name<b> (<cost>)" first line).
+    std::string originalHelpText(int stringId, const dat::Unit *unit,
+                                 const dat::Tech *technology) const;
+    void unmetVisibleRequirements(int player, int technologyId, std::vector<int> &out,
+                                  int depth = 0) const;
+    float garrisonFirePower(const dat::Unit &unit) const;
+    float buildingProjectileTotal(const Object &building) const;
+    int garrisonVolleySize(const Object &building) const;
+    void launchVolleyBolt(Object &source, const Object &target);
+    enum class BuildingCommand : uint8_t { Eject, ToggleGate, SetGatherPoint, RemoveGatherPoint };
+    std::vector<BuildingCommand> buildingCommands(const Object &building) const;
+    int buildingCommandIcon(const Object &building, BuildingCommand command) const;
+    std::string buildingCommandTitle(const Object &building, BuildingCommand command) const;
+    std::string buildingCommandHelp(const Object &building, BuildingCommand command) const;
+    void executeBuildingCommand(Object &building, BuildingCommand command);
+    bool canSetGatherPoint(const Object &building) const;
+    void setGatherPoint(Object &building, float screenX, float screenY, int screenW, int screenH);
+    void sendToGatherPoint(const Object &building, Object &unit);
+    struct WallTile {
+        int x, y, frame;
+    };
+    std::vector<WallTile> wallLine(int x1, int y1, int x2, int y2) const;
+    Object *createFoundation(const dat::Unit &unit, int player, float x, float y);
+    bool placeWallLine(int x1, int y1, int x2, int y2);
+    bool isWallPlacement() const;
+    bool hasResearchTab(const Object &building) const;
+    bool overlapsWorkingUnit(const Object &object, uint32_t targetId) const;
+    // Closest spot around the target's footprint that no other unit is
+    // standing on (the original treats the whole perimeter as the goal).
+    bool freeInteractionPoint(const Object &source, const Object &target,
+                              float clearance, float &x, float &y) const;
+    void interactionPoint(const Object &source, const Object &target,
+                          float clearance, float &x, float &y) const;
+    bool withinInteractionRange(const Object &source, const Object &target,
+                                float clearance) const;
     bool isInspectable(const Object &object) const;
     bool isSelectable(const Object &object) const;
     bool hasSelectedUnit() const;
     bool hasSelectedAttacker() const;
     void clearSelection();
-    Object *objectAtScreen(float screenX, float screenY, int screenW, int screenH);
+    void selectObject(Object &object, bool first = false);
+    void syncSelectionOrder();
+    std::vector<Object *> selectedObjectsInOrder(bool selectableOnly);
+    Object *objectAtScreen(float screenX, float screenY, int screenW,
+                           int screenH, bool includeGatherables = false);
+    Object *gatherableAtScreen(float screenX, float screenY,
+                               int screenW, int screenH);
     Object *enemyAtScreen(float screenX, float screenY, int screenW, int screenH);
     void selectAtScreen(float screenX, float screenY, int screenW, int screenH);
     void selectBox(float startX, float startY, float endX, float endY,
@@ -298,11 +558,105 @@ private:
                                    int screenW, int screenH);
     bool handleActionMenuClick(float screenX, float screenY,
                                int screenW, int screenH);
+    bool cancelProductionItem(Object &building, size_t index);
     bool openSelectedActionMenu();
     std::vector<const dat::Unit *> productionOptions(
         const Object &building) const;
+    bool buildingMatchesLocation(
+        const Object &building, int locationId) const;
+    std::vector<int> researchOptions(
+        const Object &building) const;
+    std::string technologyDisplayName(
+        int technologyId) const;
+    std::vector<std::string> technologyRequirementLines(
+        int player, int technologyId) const;
+    std::vector<std::string> technologyEffectLines(
+        int technologyId) const;
+    std::vector<const dat::Unit *> buildingOptions(
+        const Object &worker,
+        ActionMenuTab category) const;
+    bool unitAvailable(int player, int unitId) const;
+    const dat::Unit *effectiveUnitForPlayer(
+        int player, const dat::Unit *unit) const;
+    void applyUnitUpgrades(int player);
+    bool technologyRequirementsMet(int player,
+                                  const dat::Tech &technology) const;
+    void refreshAutomaticTechnologies(int player);
+    bool technologyVisible(int player, const dat::Tech &technology) const;
+    void refreshAllAutomaticTechnologies();
+    std::string unitDisplayName(const dat::Unit &unit) const;
+    std::string ownershipLabel(int player) const;
+    std::string factionName(int civilization) const;
+    char factionAbbreviation(int civilization) const;
+    int civilizationGraphic(int graphicId, int player) const;
+    bool isWorker(const Object &object) const;
+    bool isPowerCore(const Object &object) const;
+    bool isPowerSource(const Object &object) const;
+    bool isShieldGenerator(const Object &object) const;
+    bool graphicHasPowerIndicator(
+        int graphicId, int depth = 0) const;
+    bool requiresPower(const Object &building) const;
+    bool isPowered(const Object &building) const;
+    const Object *shieldGeneratorFor(
+        const Object &object) const;
+    bool isShielded(const Object &object) const;
+    void updateShields(float dt);
+    const dat::Unit *builderUnit(
+        const Object &worker) const;
+    int builderWorkingGraphic(
+        const Object &worker) const;
+    bool isGatherable(const Object &object) const;
+    const dat::Unit *gathererUnit(
+        const Object &worker) const;
+    const dat::Task *gatherTask(
+        const Object &worker,
+        const dat::Unit &gatherer) const;
+    bool issueGatherCommand(
+        Object &worker, Object &resource);
+    bool issueDropOffCommand(
+        Object &worker, Object &building);
+    Object *nearestDropSite(
+        const Object &worker,
+        const dat::Unit &gatherer);
+    bool buildingAcceptsResource(
+        const Object &building,
+        const dat::Unit &gatherer) const;
+    bool assignAutomaticWorkerTask(
+        Object &worker,
+        const Object &completedBuilding);
+    void updateGathering(float dt);
+    bool isFriendlyPlayer(int sourcePlayer,
+                          int targetPlayer) const;
+    bool isRepairableBy(
+        const Object &worker,
+        const Object &target,
+        bool requireDamage = true) const;
+    bool issueRepairCommand(
+        Object &worker, Object &target);
+    void updateRepairing(float dt);
+    bool canGarrison(const Object &unit,
+                     const Object &building) const;
+    uint8_t garrisonCategory(const Object &unit) const;
+    size_t garrisonedCount(const Object &building,
+                           bool includeIncoming) const;
+    bool issueGarrisonCommand(Object &building);
+    void updateGarrisoning();
+    bool ejectGarrisonedUnit(
+        Object &building, Object &unit,
+        size_t placementOffset = 0);
+    size_t ejectGarrisoned(Object &building);
+    bool destroyLastSelected();
+    void setGateLocked(Object &gate, bool locked);
+    bool beginBuildingPlacement(Object &worker,
+                               const dat::Unit &building);
+    void clearConstructionAssignment(Object &worker);
+    bool assignBuilder(Object &worker, Object &building);
+    bool placeBuilding(float screenX, float screenY,
+                       int screenW, int screenH);
+    void updateConstruction(float dt);
     void commandAtScreen(float screenX, float screenY, int screenW, int screenH);
     void cycleSelectedAttackMode();
+    void setSelectedAttackMode(AttackMode mode);
     void issueAttack(Object &source, Object &target, float approachAngle,
                      bool automatic = false,
                      float approachDistance = 0);
@@ -316,7 +670,7 @@ private:
     void updateProjectiles(float dt);
     void updateRemains(float dt);
     void damageObject(Object &object, int damage, uint32_t attackerId);
-    void killObject(Object &object);
+    void killObject(Object &object, bool countKill = true);
     void objectScreenPosition(const Object &object, int screenW, int screenH,
                               float &screenX, float &screenY) const;
     void screenToWorld(float screenX, float screenY, int screenW, int screenH,
@@ -324,6 +678,11 @@ private:
     void playUnitAcknowledgement(const Object &object, bool attack);
     void playWorldUnitSound(const Object &object, int soundId);
     bool worldSoundAudible(float x, float y) const;
+    void updateAmbience(float dt, int screenW, int screenH);
+    void activateCheat(size_t index, int screenW, int screenH);
+    bool spawnCheatUnit(int unitId, bool requireWater,
+                        int screenW, int screenH);
+    void defeatCheatPlayer(int player);
     void startInstruction(Instruction instruction);
     void queueInstruction(const std::string &text, float duration,
                           const std::string &sound = std::string());
@@ -335,7 +694,11 @@ private:
     void drawGraphic(Renderer &r, int graphicId, float sx, float sy, float facing, float animTime, int player,
                      int initialFrame, int depth, bool drawShadows, float viewW, float viewH,
                      int sortLayerOverride = -1, int sortBias = 0,
-                     float sortYOverride = -1000000000.0f);
+                     float sortYOverride = -1000000000.0f,
+                     uint32_t ownerId = 0,
+                     bool outlineCandidate = false,
+                     int powerState = -1,
+                     int frameOverride = -1);
     int graphicSortLayer(int graphicId, int depth = 0) const;
 
     Assets &assets_;
@@ -358,14 +721,16 @@ private:
     std::vector<uint32_t> staticObstructionIndices_;
     std::vector<std::vector<uint32_t>> staticObstructionCells_;
     mutable std::vector<PathGridCache> pathGridCache_;
-    mutable std::vector<int> pathCostScratch_;
-    mutable std::vector<int> pathParentScratch_;
-    mutable std::vector<uint32_t> pathSearchStamp_;
-    mutable uint32_t pathSearchGeneration_ = 0;
+    mutable uint32_t pathSearches_ = 0;
+    mutable std::vector<uint32_t> shieldGeneratorIndices_;
+    mutable size_t shieldGeneratorCacheSize_ = (size_t)-1;
+    mutable std::map<std::pair<int, int>, int>
+        civilizationGraphicCache_;
     std::array<ScenarioPlayer, 16> players_{};
     std::array<std::map<int, float>, 17> resources_{};
     std::array<std::set<int>, 17> researchedTechs_{};
     std::array<std::set<int>, 17> disabledTechs_{};
+    std::array<std::set<int>, 17> disabledUnits_{};
     std::vector<ScenarioTrigger> triggers_;
     std::vector<uint32_t> triggerOrder_;
     std::vector<TriggerRuntime> triggerRuntime_;
@@ -387,11 +752,51 @@ private:
     float selectionClickAge_ = 1000.0f;
     float lastSelectionX_ = 0, lastSelectionY_ = 0;
     int lastSelectionUnitId_ = -1;
+    std::vector<uint32_t> selectionOrder_;
     bool cursorVisible_ = false;
     CursorMode cursorMode_ = CursorMode::Normal;
     FormationType selectedFormation_ = FormationType::Line;
+    // Destination of each active group move, so a formation change can
+    // re-form the group on the way there instead of stopping it.
+    std::unordered_map<uint32_t, std::array<float, 2>> moveGroupDestinations_;
     bool actionMenuOpen_ = false;
     uint32_t actionMenuObjectId_ = 0;
+    ActionMenuTab actionMenuTab_ = ActionMenuTab::Units;
+    size_t actionMenuSelection_ = 0;
+    size_t actionMenuScroll_ = 0;
+    const dat::Unit *placementUnit_ = nullptr;
+    uint32_t placementBuilderId_ = 0;
+    // Set when placement starts from the build menu, so the same press
+    // that picked the item cannot also place it.
+    bool placementJustBegun_ = false;
+    uint32_t gatherPointBuildingId_ = 0; // "click an area to set gather point" mode
+public:
+    bool setGatherPointForTesting(uint32_t buildingId, float x, float y, uint32_t targetId = 0) {
+        Object *b = findObject(buildingId);
+        if (!b || !canSetGatherPoint(*b)) return false;
+        b->rallyActive = true;
+        b->rallyX = x;
+        b->rallyY = y;
+        b->rallyTargetId = targetId;
+        return true;
+    }
+    bool queueUnitForTesting(uint32_t buildingId, int unitId);
+private:
+    // Wall placement (mouse mode 0x15 in the original): first press sets
+    // the start tile, the preview follows the cursor, the next press
+    // commits the L-shaped line of foundations.
+    bool wallDragActive_ = false;
+    int wallStartTileX_ = 0, wallStartTileY_ = 0;
+    bool cheatMenuOpen_ = false;
+    size_t cheatMenuSelection_ = 0;
+    bool forceBuildCheat_ = false;
+    bool fullTechTreeCheat_ = false;
+    bool forceExploreCheat_ = false;
+    bool forceSightCheat_ = false;
+    bool garrisonCursorActive_ = false;
+    bool repairCursorActive_ = false;
+    float ambienceTime_ = 2.0f;
+    uint32_t ambienceSequence_ = 0;
     std::string statusMessage_;
     float statusTime_ = 0;
     bool boxSelectActive_ = false;
@@ -409,7 +814,9 @@ private:
     size_t attackModeChanges_ = 0;
     std::function<void(const std::string &)> log_;
     std::function<float(const std::string &)> playSound_;
+    std::function<void(int)> playInterfaceSound_;
     std::function<void(int, int)> playUnitSound_;
+    std::function<float(const std::string &)> playAmbientSound_;
 };
 
 } // namespace swgb

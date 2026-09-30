@@ -13,7 +13,9 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   per-frame slope cache are done. Terrain blend masks are resampled through the same slope filters.
 - Cliffs, trees and gaia resources (carbon, ore, nova, fruit, animals).
 - CPX campaign archive and SCX terrain/elevation loading are done. The Vita vertical slice now opens
-  Galactic Empire mission 2, “Breaking Bread,” directly from the original `XCAM3.CPX`.
+  Galactic Empire mission 2, “Breaking Bread,” directly from the original `XCAM3.CPX`. Development
+  builds can instead start on an isolated compact test map containing both bases, power and shield
+  coverage, a walled gate, resources, livestock, and shielded/unshielded targets.
 - Initial scenario objects and the saved camera are loaded, including trees, resources, buildings, and
   units. Terrain aliases and civilization-specific farm terrain are resolved from the original data.
 - Player names, civilizations, colors, resources, population limits, diplomacy, and allied-victory state
@@ -36,7 +38,10 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   shared formation routes, route-tangent marching columns, slowest-member group speed with bounded
   catch-up, collision-free movement within established formations, and precise destination formations.
   Workers, traders, and distant stragglers move independently. Broader task-list actions remain.
-- Unit commands from the dat task lists (`UnitHeader.tasks`): move, attack, gather, build, repair, garrison.
+- Unit commands from the dat task lists (`UnitHeader.tasks`): move, attack, gather, build, repair,
+  and garrison. Workers repair owned or allied buildings and DAT-designated mechanical classes,
+  consume half of the target's original resource cost across a full HP restoration, and use the
+  original working animation.
 - The initial combat slice includes contextual hostile targeting, runtime hit points, DAT-driven
   attack/armor classes, range and minimum range, reload timing, attack animations and sounds,
   original projectile flight and weapon sounds, health-bar depletion, death sounds, and progressive
@@ -46,28 +51,93 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   acquire targets and retaliate automatically. Building damage overlays sort above their owning
   building while preserving world depth. Group attacks reserve separate melee/ranged approach slots,
   use outer waiting positions when contact space is full, and pass through attackers bound for
-  different final slots rather than deadlocking.
+  different final slots rather than deadlocking. Units sharing an attack, construction, gathering,
+  repair, garrison, or formation destination cooperatively yield and displace one another instead of
+  treating every nearby unit as a hard obstacle.
   Accuracy, blast damage, and explicit guard/patrol commands remain.
-- Economy: the four SWGB resources and an initial resource-charging building training queue are visible.
-  Gathering/drop sites, worker construction, research, and population limits (power cores and prefab
-  shelters) remain.
-- Researched technology effects apply packed DAT attack and armor modifiers. Remaining attribute,
-  resource, upgrade, and age effects still need to be applied.
-- SWGB-specific mechanics: shields, air units, power cores, Jedi/Sith conversion, holocrons.
+- Economy: the four SWGB resources drive shared building queues for units and research. Original
+  `tech-level-1`, `MADE-*`, and `AVAIL-*` technologies determine civilization-correct production
+  choices, while researched replacement effects upgrade both available choices and existing units
+  and buildings. Production locations follow each building's researched upgrade lineage, so Command
+  Centers and Troop Centers retain their original production menus after advancing a Tech Level.
+  Every queued unit/research item is displayed and can be cancelled for a refund.
+  Power Cores and mobile Power Droids provide the original nine-tile power coverage; selected power
+  sources show the original blue coverage ring. Unpowered buildings train and research at 25% speed.
+  DAT power-indicator frames render solid green while powered and blink red while
+  unpowered. Selected buildings also show powered/unpowered and shield-coverage icons. Power Core
+  placement/construction uses the original blue coverage ring, while Shield Generators retain the
+  original yellow shield-boundary ring during placement and draw their original civilization-specific
+  animated shield field while completed and powered. Workers expose
+  technology-driven economy, military, and defense building pages, validate placement and costs with
+  flashing green/red footprints, walk to foundations, switch to their original Builder state, and
+  construct buildings with progressive graphics and hit points. Multiple workers can be assigned to
+  one foundation using the original diminishing-returns build-rate curve; retasked workers can resume
+  a foundation through a contextual command. After completing a resource drop site, assigned workers
+  automatically gather a compatible nearby node; otherwise they continue onto the nearest friendly
+  foundation within their original line of sight. Workers use original resource cursors, task variants,
+  working/carrying animations, capacities, and civilization drop sites while gathering food,
+  carbon, ore, and nova, and multiple selected workers can share one gather order. The panel shows
+  each worker's carried resource amount and capacity. Workers accept explicit orders to deposit a
+  partial load at any compatible building and then return to their previous node. Depleted trees and
+  other nodes transition through their original death/remains graphics instead of vanishing. Farms
+  are available as a base economy building rather than depending on their
+  circular `MADE-*` technology. Neutral Nerfs and Banthas use the
+  original Gaia color and convert through proximity capture. Live-animal slaughter, farms,
+  fishing, automatic adjacent-node retargeting, and population-limit
+  enforcement remain.
+- Researched technology effects apply packed DAT attack/armor modifiers plus generic health, speed,
+  and reload-time modifiers, along with chained unit/building upgrade and age effects. Remaining
+  attributes and resource effects still need
+  to be applied.
+- SWGB-specific mechanics: power and shield coverage are implemented. A powered Shield Generator
+  gives eligible units and buildings a gold shield bar equal to maximum HP, with original
+  tiered regeneration, non-stacking coverage, overflow damage, and one-HP per-hit leakage for
+  mobile units but not buildings. Shields retained after leaving coverage drain visibly at 40
+  points per second, reduced to 20 by Superconducting Shields; Shield Wall enables adjacent wall
+  coverage. World and selection bars display the remaining shield amount numerically.
+  Air-unit special behavior, Jedi/Sith conversion, and holocrons remain.
 
 ## Milestone 4: interface and input on Vita
 - Replace the temporary bitmap trigger-dialogue font with UI rendering from `interfac.drs` SLPs.
   Original `language.dll`, `language_x1.dll`, and `language_x2.dll` string tables are parsed and
   already supply localized names to the selection panel.
-- Single, box, and visible-type selection, selection sounds, and contextual original normal/move/attack
-  cursors are implemented. The command cursor scrolls the camera at screen edges. Unit panels and
-  control groups remain.
-- The command/info panel shows the selected unit or building portrait, live health, attack,
-  armor, range, stance, multi-selection portraits with individual health, formation controls,
-  Vita command hints, and a contextual building production menu. A persistent four-resource
-  bar is shown at the top. Worker task buttons, research, minimap, and pause menu remain.
+- Single, box, and visible-type selection, original leader-first group ordering and command audio,
+  selection sounds, and contextual original normal/move/attack cursors are implemented. The command
+  cursor scrolls the camera at screen edges. Unit panels and control groups remain.
+- The command/info panel shows the selected unit or building portrait, live health and shields,
+  non-zero combat attributes, stance, multi-selection portraits with individual health, formation controls,
+  Vita command hints, and an original-style five-by-three icon command grid with a high-contrast
+  information pane. Buildings separate civilization-correct Units and Research tabs, support touch
+  or L/R switching, and show every cancellable queue item plus current progress. Research pages use
+  the Clone Campaigns technology sheets and show only technologies whose current Tech Level and
+  prerequisites are satisfied. A successor sharing a button slot replaces its prerequisite in that
+  same slot after research, while visible choices retain exact costs, duration, requirements, and
+  DAT-derived effects. Gates expose lock/unlock commands rather than production;
+  selected gate footprints follow their oriented annexes. Unit/group panels use the original command sheet for
+  garrison targeting, repair targeting, gate locking, destruction, and ejection. The destroy command
+  removes one object per press in reverse selection order. Eligible buildings show their garrisoned
+  unit portraits; a portrait ejects only that unit while Eject All remains available. Attack-capable
+  selections expose a dedicated original-style stance grid while Triangle still cycles stances
+  directly. Choosing a formation immediately rearranges idle combat units.
+  Multiple selected workers can open the same three categorized building pages and share the resulting
+  construction order and placement preview. Empty buildings do not
+  expose an action-menu hint. Selection status distinguishes the local player,
+  named allies, neutral sides, and enemies using scenario diplomacy, scenario player names, and
+  civilization names. Status icons expose powered, unpowered, shielded, and unshielded tooltips.
+  Player-color occlusion outlines use a thicker, high-alpha masked pass so units remain legible
+  behind buildings and resource sprites.
+  A persistent resource, population, and Tech Level bar is shown at the top, including age-research
+  progress. A scrollable L + R + Select test menu exposes
+  the original base-game and Clone Campaigns cheats, including resource grants, unit spawns, instant
+  production/construction, victory/player defeat, and hidden DAT cheat technologies. General worker
+  guard/patrol buttons, minimap, and pause menu remain.
 - Audio: selection, move, and attack acknowledgements plus camera-relative weapon-fire, impact, and
-  death effects are implemented. World ambience, volume controls, and music remain.
+  death effects are implemented. The original Ogg soundtrack streams from storage, ducks beneath
+  scenario dialogue, and mixes with terrain-specific world ambience. Garrison/ejection, gate
+  transformation, unit-training, construction-start, and building-completion cues use their DAT
+  sound groups. The DAT has no per-technology completion sound field, so the original generic
+  research-completion cue still requires executable-level verification. User-facing volume controls
+  remain.
 
 ## Milestone 5: AI and skirmish
 - A subset of the AI script interpreter (`.per` rules), checked against the original using Ghidra where needed.

@@ -52,6 +52,7 @@ Texture *GlRenderer::createMaskTexture(int width, int height, const uint8_t *alp
     auto *t = new GlTexture();
     t->width = width;
     t->height = height;
+    t->alphaOnly = true;
     t->invW = 1.0f / width;
     t->invH = 1.0f / height;
     glGenTextures(1, &t->id);
@@ -137,6 +138,19 @@ void GlRenderer::drawMasked(Texture *tex, const Quad &q, Texture *mask, const Qu
     push(tex, mask, q.x, q.y, q.x + q.w, q.y + q.h, q.u0 * gt->invW, q.v0 * gt->invH, q.u1 * gt->invW,
          q.v1 * gt->invH, maskQ.u0 * gm->invW, maskQ.v0 * gm->invH, maskQ.u1 * gm->invW,
          maskQ.v1 * gm->invH, 255, 255, 255, 255);
+}
+
+void GlRenderer::drawMaskedTinted(Texture *tex, const Quad &q, Texture *mask,
+                                  const Quad &maskQ, uint8_t r, uint8_t g,
+                                  uint8_t b, uint8_t a) {
+    auto *gt = static_cast<GlTexture *>(tex);
+    auto *gm = static_cast<GlTexture *>(mask);
+    push(tex, mask, q.x, q.y, q.x + q.w, q.y + q.h,
+         q.u0 * gt->invW, q.v0 * gt->invH,
+         q.u1 * gt->invW, q.v1 * gt->invH,
+         maskQ.u0 * gm->invW, maskQ.v0 * gm->invH,
+         maskQ.u1 * gm->invW, maskQ.v1 * gm->invH,
+         r, g, b, a);
 }
 
 void GlRenderer::fillRect(float x, float y, float w, float h, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {

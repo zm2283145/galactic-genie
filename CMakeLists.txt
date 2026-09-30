@@ -24,6 +24,7 @@ set(SWGB_CORE_SOURCES
     src/core/language_strings.cpp
     src/engine/assets.cpp
     src/engine/game.cpp
+    src/engine/pathfinding.cpp
 )
 
 if(VITA)
@@ -40,16 +41,18 @@ if(VITA)
         src/platform/vita/vita_audio.cpp
         src/platform/vita/main_vita.cpp
     )
-    target_compile_options(swgb PRIVATE -O2 -Wall -Wno-psabi)
+    target_compile_options(swgb PRIVATE
+        -Os -ffunction-sections -fdata-sections
+        -Wall -Wno-psabi)
     # -Wl,-q keeps relocations; vita-elf-create needs them for a valid velf.
-    target_link_options(swgb PRIVATE -Wl,-q)
+    target_link_options(swgb PRIVATE -Wl,-q,--gc-sections)
     target_link_libraries(swgb PRIVATE
         vitaGL vitashark SceShaccCgExt taihen_stub mathneon z
         SceGxm_stub SceDisplay_stub SceCtrl_stub SceTouch_stub SceHid_stub
         SceAudio_stub SceCommonDialog_stub SceSysmodule_stub SceMotion_stub
         SceAppUtil_stub SceAppMgr_stub SceShaccCg_stub ScePower_stub
         SceKernelDmacMgr_stub SceIme_stub
-        stdc++ m)
+        vorbisfile vorbis ogg stdc++ m)
 
     # 32MB phycont budget: without it vitaGL renders nothing on this setup.
     set(VITA_MAKE_FSELF_FLAGS "${VITA_MAKE_FSELF_FLAGS} -pm 0x2000000")

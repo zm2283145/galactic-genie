@@ -171,4 +171,32 @@ bool loadMp3(const std::string &path, AudioClip &clip, std::string *err) {
     return decodeMp3(data, clip, err);
 }
 
+bool loadWav(const std::string &path, AudioClip &clip, std::string *err) {
+    FILE *fp = fopen(path.c_str(), "rb");
+    if (!fp) {
+        if (err) *err = "cannot open " + path;
+        return false;
+    }
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        if (err) *err = "cannot seek " + path;
+        return false;
+    }
+    const long length = ftell(fp);
+    if (length <= 0 || fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        if (err) *err = "invalid WAV file " + path;
+        return false;
+    }
+    std::vector<uint8_t> data((size_t)length);
+    const bool read =
+        fread(data.data(), 1, data.size(), fp) == data.size();
+    fclose(fp);
+    if (!read) {
+        if (err) *err = "cannot read " + path;
+        return false;
+    }
+    return decodeWav(data, clip, err);
+}
+
 } // namespace swgb

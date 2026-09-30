@@ -58,8 +58,11 @@ cmake -B build-pc && cmake --build build-pc
 3. Copy the MP3 dialogue referenced by the mission from `Game/Sound/Scenario` to
    `ux0:data/swgb/Sound/Scenario/`. `tools\deploy_vita.ps1 -SoundData` extracts the names from
    campaign entry 2 and copies only those files.
-4. Install `swgb.vpk` with VitaShell. `tools\deploy_vita.ps1 -Vpk` uploads it to `ux0:data/swgb/`.
-5. The app writes a log to `ux0:data/swgb/swgb.log`. `tools\deploy_vita.ps1 -PullLog` fetches it.
+4. Copy `Game/MUSIC/Track02.ogg` and `Track03.ogg` to `ux0:data/swgb/Music/`, and the WAV files
+   from `Game/Sound/Terrain` to `ux0:data/swgb/Sound/Terrain/`. The deployment script options
+   `-MusicData` and `-TerrainSoundData` copy these soundtrack and ambience files.
+5. Install `swgb.vpk` with VitaShell. `tools\deploy_vita.ps1 -Vpk` uploads it to `ux0:data/swgb/`.
+6. The app writes a log to `ux0:data/swgb/swgb.log`. `tools\deploy_vita.ps1 -PullLog` fetches it.
 
 Controls: left stick, d-pad, or a touch drag scrolls; L/R zoom. The right stick moves the
 command cursor, and holding it against a screen edge scrolls the camera. X selects a visible
@@ -69,8 +72,11 @@ or command behavior. Double-tap a unit or press X twice to select every matching
 in the viewport. Hold Square and move the right stick, or hold Square while touch-dragging, to
 box-select units. The normal, move, and attack cursors are loaded from the original
 `interfac.drs`, with a procedural fallback if they are unavailable. Triangle cycles selected
-combat units through defensive, stand-ground, passive, and aggressive stances. SELECT toggles
-the minimap overlay and START quits.
+combat units through defensive, stand-ground, passive, and aggressive stances. The selection
+panel's garrison command enters original-cursor building targeting; Triangle on a selected
+production building opens its Units, Research, and Commands pages, where queued items can be
+cancelled, while a gate opens only its lock/unlock command. Selected buildings show power and
+shield-coverage state. SELECT toggles the minimap overlay and START quits.
 
 Combat currently includes pursuit with collision-aware A* pathfinding, attack animations and
 acknowledgements, original projectile graphics and weapon sounds, DAT attack/armor classes,

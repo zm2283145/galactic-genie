@@ -16,11 +16,14 @@ namespace swgb {
 
 class VitaAudio {
 public:
-    explicit VitaAudio(std::string scenarioSoundDir);
+    VitaAudio(std::string scenarioSoundDir,
+              std::string musicDir,
+              std::string terrainSoundDir);
     ~VitaAudio();
 
     bool start(std::string *err = nullptr);
     float play(const std::string &name);
+    float playAmbient(const std::string &name);
     bool playEffect(int resourceId, const std::vector<uint8_t> &data);
     void setLogger(std::function<void(const std::string &)> logger) { log_ = std::move(logger); }
 
@@ -29,7 +32,14 @@ private:
     int run();
     void log(const std::string &message) const;
 
+    struct PendingVoice {
+        std::shared_ptr<AudioClip> clip;
+        float gain = 1.0f;
+    };
+
     std::string scenarioSoundDir_;
+    std::string musicDir_;
+    std::string terrainSoundDir_;
     std::function<void(const std::string &)> log_;
     std::atomic<bool> running_{false};
     SceUID thread_ = -1;
@@ -37,7 +47,8 @@ private:
     int port_ = -1;
     std::deque<std::shared_ptr<AudioClip>> queue_;
     std::map<int, std::shared_ptr<AudioClip>> effectCache_;
-    std::deque<std::shared_ptr<AudioClip>> pendingEffects_;
+    std::map<std::string, std::shared_ptr<AudioClip>> ambientCache_;
+    std::deque<PendingVoice> pendingEffects_;
 };
 
 } // namespace swgb
