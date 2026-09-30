@@ -277,6 +277,37 @@ public:
     float minimumRangeForTesting(uint32_t id) const { const Object *o = findObject(id); return o ? minimumRange(*o) : -1.0f; }
     void clearSelectionForTesting() { clearSelection(); }
     int terrainAtForTesting(int x, int y) const { return terrainAt(x, y); }
+    bool setTerrainForTesting(int x, int y, int terrain) {
+        if (x < 0 || y < 0 || x >= mapSize_ ||
+            y >= mapSize_ || terrain < 0 ||
+            terrain > 255)
+            return false;
+        terrain_[(size_t)y * mapSize_ + x] =
+            (uint8_t)terrain;
+        return true;
+    }
+    bool setCornerElevationForTesting(
+        int x, int y, int elevation) {
+        if (x < 0 || y < 0 || x > mapSize_ ||
+            y > mapSize_ || elevation < 0 ||
+            elevation > 255)
+            return false;
+        cornerElevation_[
+            (size_t)y * (mapSize_ + 1) + x] =
+            (uint8_t)elevation;
+        buildTileElevation();
+        return true;
+    }
+    std::array<float, 2>
+    snappedBuildingPositionForTesting(
+        int civilization, int unitId,
+        float x, float y) const;
+    bool placementValidForTesting(
+        int civilization, int unitId,
+        float x, float y);
+    int placementFailureForTesting() const {
+        return placementFailureCode_;
+    }
     void setObjectResourceForTesting(uint32_t spawnId, float amount) {
         if (Object *o = findObject(spawnId)) o->resourceAmount = amount;
     }
@@ -582,7 +613,9 @@ private:
     const Object *unitBlockerAt(const Object &object, float x, float y) const;
     bool detourAround(Object &object, float goalX, float goalY);
     bool approach(Object &object, const Object &target, float clearance);
-    bool positionPassable(const Object &object, float x, float y, bool dynamic) const;
+    bool positionPassable(
+        const Object &object, float x, float y,
+        bool dynamic, int *failure = nullptr) const;
     bool terrainPassable(const Object &object, float x, float y) const;
     bool isAirUnit(const Object &object) const;
     bool isEnemy(const Object &source, const Object &target) const;
@@ -926,6 +959,7 @@ private:
     size_t actionMenuSelection_ = 0;
     size_t actionMenuScroll_ = 0;
     const dat::Unit *placementUnit_ = nullptr;
+    int placementFailureCode_ = 0;
     uint32_t placementBuilderId_ = 0;
     // Set when placement starts from the build menu, so the same press
     // that picked the item cannot also place it.

@@ -11,6 +11,8 @@ build and test on Vita.
 | System | Original evidence | Current status |
 |---|---|---|
 | Production exits | `0x56e390` completes production; `0x558810` searches footprint-relative exit positions | Verified and covered |
+| Building placement | Preview at `0x5fc7b0`; execution at `0x618e70`; DAT clearance/terrain/hill fields | Verified and covered |
+| Command cursors | `mcursors.shp` (`51000`), 19 frames | Verified and covered |
 | Gather points | Commands at `0x502580`/`0x5bcb30`; spawned-unit dispatch at `0x56e390` | Verified and covered |
 | Gates | State update at `0x558390`; placement at `0x60c100` | Verified and covered |
 | Shields and power | Coverage/status logic at `0x54bc40`/`0x55ec20` | Partially verified; mobile damage bleed-through remains open |
@@ -46,6 +48,59 @@ Engine contract:
 - Freeing one position allows exactly the waiting item to complete on a later
   update.
 - Rally orders are issued only after the unit is successfully created.
+
+## Building placement
+
+The preview routine at `0x5fc7b0` and execution routine at `0x618e70` both
+invoke the unit master's coordinate adjustment before its placement validator.
+The adjustment applies to every building, not only walls and gates: a footprint
+with a fractional half-size is centred on a tile centre, while an integral
+half-size is centred on a tile corner.
+
+Placement uses the rectangular `clearanceSize`, which can differ from
+`collisionSize`. The diagonal gate variants 665 and 673 are the decisive case:
+their collision is `1 x 1`, but their placement clearance is `2 x 2`.
+Every tile covered by the clearance rectangle is checked against the unit's
+terrain-restriction row. `placementTerrain` lists alternative required
+footprint terrains, while `placementSideTerrain` requires at least one
+neighbouring terrain of either listed type. Shipyards use water `1/4` under
+their entire footprint and shore `2/35` beside it.
+
+DAT `hillMode` supplies the elevation rule. Mode 0 is unrestricted, modes 1
+and 2 require a level footprint, and mode 3 allows at most one elevation level
+between the lowest and highest footprint corner. Ordinary foundations paint
+their DAT `foundationTerrainId`; terrain 27 changes to snow foundation 36 over
+snow. Farms retain their separate staged terrain, and shore buildings do not
+replace their water.
+
+The original preview draws the complete standing silhouette and applies a
+valid/invalid color to it. Invalid placement sets the red tint state; valid
+placement uses a player-color-derived tint. It does not substitute a
+construction sprite or communicate validity solely through a synthetic
+outline and cross.
+
+Engine contract:
+
+- Placement preview and execution share identical snapping and validation.
+- Map edges and obstructions use rectangular clearance, including gates whose
+  clearance is larger than their collision box.
+- Every footprint tile must be buildable and satisfy explicit placement
+  terrain; side-terrain and elevation rules are checked across the complete
+  footprint.
+- Mobile units and static obstructions make any overlapping placement invalid.
+- Walls show each dragged segment with its own valid or invalid silhouette.
+- A committed ordinary building paints its foundation terrain immediately.
+
+## Command cursors
+
+`mcursors.shp` resource 51000 contains distinct semantic frames. Frame 2 is
+the valid-order confirmation marker; frame 5 is move, 6 gather/drop-off, 7
+building placement, 9 repair, 11 attack, 12 garrison, and 18 set gather point.
+Frames 2/3/4 are not interchangeable generic action cursors. The repair and
+destroy command-panel icons remain frames 28 and 59 of command sheet 50721,
+as constructed by the executable with help strings 4927 and 4941.
+Attack stances are offered only to eligible combat units; workers and
+buildings do not show the stance button or stance status.
 
 ## Workers
 

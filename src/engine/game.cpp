@@ -20,16 +20,16 @@ namespace {
 constexpr float kPi = 3.14159265358979f;
 constexpr uint8_t kSequenceAnimated = 0x1;
 constexpr int kCursorSlp = 51000;
-// mcursors.shp frames (player cursor picker 0x5d3d00): 0 arrow, 3 green
-// ellipse (gather / drop off / build / repair), 4 attack, 7 building
-// placement, 14 garrison, 18 flag (gather point).
+// mcursors.shp frames: 0 arrow, 2 valid-order confirmation, 5 move,
+// 6 gather/drop-off, 7 building placement, 9 repair, 11 attack,
+// 12 garrison and 18 gather-point flag.
 constexpr size_t kCursorNormal = 0;
-constexpr size_t kCursorCommand = 3;
-constexpr size_t kCursorAttack = 4;
-constexpr size_t kCursorMove = 0;
-constexpr size_t kCursorGarrison = 14;
-constexpr size_t kCursorGather = 3;
-constexpr size_t kCursorRepair = 3;
+constexpr size_t kCursorCommand = 2;
+constexpr size_t kCursorAttack = 11;
+constexpr size_t kCursorMove = 5;
+constexpr size_t kCursorGarrison = 12;
+constexpr size_t kCursorGather = 6;
+constexpr size_t kCursorRepair = 9;
 constexpr size_t kCursorPlacement = 7;
 constexpr size_t kCursorGatherPoint = 18;
 constexpr int kCommandIconSlp = 50721;
@@ -86,19 +86,36 @@ constexpr float kCheatMenuWidth = 620.0f;
 constexpr float kCheatMenuRowHeight = 34.0f;
 constexpr size_t kCheatMenuVisibleRows = 11;
 
-// Placement snapping for adjacent-mode buildings (walls, gates), as the
-// original: along each axis the centre sits on a tile centre when the
-// half-size has a fractional part, otherwise on a tile corner. Uses our
-// world-axis sizes (swapped at load), so gates snap along their posts.
-void snapAdjacentBuildingPosition(
+float placementHalfSize(const dat::Unit &unit, size_t axis) {
+    const float clearance = unit.clearanceSize[axis];
+    return std::max(
+        0.5f,
+        clearance > 0.001f
+            ? clearance
+            : unit.collisionSize[axis]);
+}
+
+void placementTileBounds(
+    const dat::Unit &unit, float x, float y,
+    int &x0, int &y0, int &x1, int &y1) {
+    const float halfX = placementHalfSize(unit, 0);
+    const float halfY = placementHalfSize(unit, 1);
+    x0 = (int)std::floor(x - halfX + 0.001f);
+    y0 = (int)std::floor(y - halfY + 0.001f);
+    x1 = (int)std::ceil(x + halfX - 0.001f);
+    y1 = (int)std::ceil(y + halfY - 0.001f);
+}
+
+// The unit-master coordinate adjustment used before both placement preview
+// and execution snaps every building by the parity of its DAT clearance.
+void snapBuildingPosition(
     const dat::Unit &unit, float &x, float &y) {
-    if (!unit.adjacentMode) return;
     auto snap = [](float value, float half) {
         const float fraction = half - std::floor(half);
         return fraction > 0.01f ? std::floor(value) + 0.5f : std::round(value);
     };
-    x = snap(x, std::max(0.5f, unit.collisionSize[0]));
-    y = snap(y, std::max(0.5f, unit.collisionSize[1]));
+    x = snap(x, placementHalfSize(unit, 0));
+    y = snap(y, placementHalfSize(unit, 1));
 }
 
 enum class CheatAction {
@@ -171,6 +188,11 @@ struct SpriteDraw {
     uint32_t ownerId = 0;
     bool outlineCandidate = false;
     bool occludes = true;
+    bool tinted = false;
+    uint8_t tintR = 255;
+    uint8_t tintG = 255;
+    uint8_t tintB = 255;
+    uint8_t tintA = 255;
 };
 
 Quad clippedQuad(const Quad &quad, float left, float top,
@@ -404,7 +426,7 @@ bool Game::initCompactTestMap(
     const dat::Unit *gateUnit =
         findUnit(civ, "BLDG-ENTRYA1CLOS");
     if (gateUnit)
-        snapAdjacentBuildingPosition(
+        snapBuildingPosition(
             *gateUnit, gateX, gateY);
     const Object *initialGate = spawn(civ, "BLDG-ENTRYA1CLOS", 1,
                                       gateX, gateY, 0);
@@ -1409,6 +1431,27 @@ std::array<float, 2> Game::objectPosition(
                : std::array<float, 2>{0, 0};
 }
 
+std::array<float, 2>
+Game::snappedBuildingPositionForTesting(
+    int civilization, int unitId,
+    float x, float y) const {
+    const dat::Unit *unit =
+        findUnit(civilization, unitId);
+    if (!unit) return {x, y};
+    snapBuildingPosition(*unit, x, y);
+    return {x, y};
+}
+
+bool Game::placementValidForTesting(
+    int civilization, int unitId,
+    float x, float y) {
+    const dat::Unit *unit =
+        findUnit(civilization, unitId);
+    if (!unit) return false;
+    snapBuildingPosition(*unit, x, y);
+    return placementValid(*unit, x, y);
+}
+
 size_t Game::selectedMovingObjectCount() const {
     return (size_t)std::count_if(objects_.begin(), objects_.end(),
                                  [](const Object &object) {
@@ -1523,17 +1566,10 @@ uint32_t Game::spawnFoundationForTesting(
     const dat::Unit *unit =
         findUnit(civilization, unitId);
     if (!unit) return 0;
-    const uint32_t spawnId = nextSpawnId_++;
-    Object *building = addObject(
-        unit, player, x, y, 0, spawnId);
+    Object *building =
+        createFoundation(*unit, player, x, y);
     if (!building) return 0;
-    building->wander = false;
-    building->underConstruction = true;
-    building->constructionTotal =
-        std::max(1.0f, (float)unit->trainTime);
-    building->constructionRemaining =
-        building->constructionTotal;
-    building->hitPoints = 1.0f;
+    const uint32_t spawnId = building->spawnId;
     rebuildAdjacency();
     for (uint32_t builderId : builderIds) {
         Object *worker = findObject(builderId);
@@ -2461,9 +2497,11 @@ bool Game::handleSelectionPanelClick(float screenX, float screenY,
                        isWorker(*object);
             });
     Object *selectedAttacker = nullptr;
-    // Buildings (turrets, fortresses) have no stances in the original.
+    // Workers and buildings have no stances in the original.
     for (Object *object : selected)
-        if (object && canAttack(*object) && object->unit->type != dat::UT_Building) {
+        if (object && !isWorker(*object) &&
+            canAttack(*object) &&
+            object->unit->type != dat::UT_Building) {
             selectedAttacker = object;
             break;
         }
@@ -5514,6 +5552,57 @@ Game::Object *Game::createFoundation(const dat::Unit &unit, int player, float x,
     building->constructionTotal = std::max(1.0f, (float)unit.trainTime);
     building->constructionRemaining = building->constructionTotal;
     building->hitPoints = 1.0f;
+    // Farms paint their staged terrain in syncFarmTerrain. Shore buildings
+    // retain water beneath their footprint; ordinary foundations paint the
+    // DAT foundation terrain as soon as the site is committed.
+    if (unit.foundationTerrainId >= 0 &&
+        unit.cls != 7 &&
+        unit.placementTerrain[0] < 0 &&
+        unit.placementTerrain[1] < 0) {
+        int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        placementTileBounds(
+            unit, x, y, x0, y0, x1, y1);
+        const auto &terrains =
+            assets_.dat().terrainBlock.terrains;
+        for (int tileY = y0; tileY < y1; tileY++)
+            for (int tileX = x0; tileX < x1;
+                 tileX++) {
+                if (tileX < 0 || tileY < 0 ||
+                    tileX >= mapSize_ ||
+                    tileY >= mapSize_)
+                    continue;
+                uint8_t &terrain =
+                    terrain_[(size_t)tileY *
+                                 mapSize_ +
+                             tileX];
+                int foundation =
+                    unit.foundationTerrainId;
+                if (foundation == 27 &&
+                    (size_t)terrain <
+                        terrains.size()) {
+                    std::string name =
+                        terrains[(size_t)terrain].name +
+                        " " +
+                        terrains[(size_t)terrain].name2;
+                    std::transform(
+                        name.begin(), name.end(),
+                        name.begin(),
+                        [](unsigned char c) {
+                            return (char)
+                                std::tolower(c);
+                        });
+                    if (name.find("snow") !=
+                        std::string::npos)
+                        foundation = 36;
+                }
+                if (foundation >= 0 &&
+                    foundation <=
+                        std::numeric_limits<
+                            uint8_t>::max())
+                    terrain =
+                        (uint8_t)foundation;
+            }
+    }
     return building;
 }
 
@@ -5698,21 +5787,121 @@ int Game::gateVariantAt(int x0, int y0) const {
 
 bool Game::placementValid(const dat::Unit &unit, float x, float y,
                           std::vector<Object *> *replacedWalls) {
+    placementFailureCode_ = 0;
     Object candidate;
     candidate.unit = &unit;
     candidate.player = localPlayer_;
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    placementTileBounds(unit, x, y, x0, y0, x1, y1);
+    if (x0 < 0 || y0 < 0 || x1 > mapSize_ ||
+        y1 > mapSize_) {
+        placementFailureCode_ = 1;
+        return false;
+    }
+    const bool requiresPlacementTerrain =
+        unit.placementTerrain[0] >= 0 ||
+        unit.placementTerrain[1] >= 0;
+    for (int tileY = y0; tileY < y1; tileY++)
+        for (int tileX = x0; tileX < x1; tileX++) {
+            if (!terrainPassable(
+                    candidate, tileX + 0.5f,
+                    tileY + 0.5f)) {
+                placementFailureCode_ = 2;
+                return false;
+            }
+            if (requiresPlacementTerrain) {
+                const int terrain =
+                    terrainAt(tileX, tileY);
+                if (terrain != unit.placementTerrain[0] &&
+                    terrain != unit.placementTerrain[1]) {
+                    placementFailureCode_ = 3;
+                    return false;
+                }
+            }
+        }
+    const bool requiresSideTerrain =
+        unit.placementSideTerrain[0] >= 0 ||
+        unit.placementSideTerrain[1] >= 0;
+    if (requiresSideTerrain) {
+        bool matched = false;
+        auto sideMatches = [&](int tileX, int tileY) {
+            if (tileX < 0 || tileY < 0 ||
+                tileX >= mapSize_ || tileY >= mapSize_)
+                return false;
+            const int terrain =
+                terrainAt(tileX, tileY);
+            return terrain ==
+                       unit.placementSideTerrain[0] ||
+                   terrain ==
+                       unit.placementSideTerrain[1];
+        };
+        for (int tileX = x0 - 1;
+             tileX <= x1 && !matched; tileX++)
+            matched =
+                sideMatches(tileX, y0 - 1) ||
+                sideMatches(tileX, y1);
+        for (int tileY = y0;
+             tileY < y1 && !matched; tileY++)
+            matched =
+                sideMatches(x0 - 1, tileY) ||
+                sideMatches(x1, tileY);
+        if (!matched) {
+            placementFailureCode_ = 4;
+            return false;
+        }
+    }
+    if (unit.hillMode != 0 &&
+        !cornerElevation_.empty()) {
+        uint8_t minimum =
+            std::numeric_limits<uint8_t>::max();
+        uint8_t maximum = 0;
+        const size_t stride =
+            (size_t)mapSize_ + 1;
+        for (int cornerY = y0;
+             cornerY <= y1; cornerY++)
+            for (int cornerX = x0;
+                 cornerX <= x1; cornerX++) {
+                const uint8_t elevation =
+                    cornerElevation_[
+                        (size_t)cornerY *
+                            stride +
+                        cornerX];
+                minimum =
+                    std::min(minimum, elevation);
+                maximum =
+                    std::max(maximum, elevation);
+            }
+        const int difference =
+            (int)maximum - (int)minimum;
+        if ((unit.hillMode == 1 ||
+             unit.hillMode == 2) &&
+            difference != 0) {
+            placementFailureCode_ = 5;
+            return false;
+        }
+        if (unit.hillMode == 3 &&
+            difference > 1) {
+            placementFailureCode_ = 6;
+            return false;
+        }
+    }
     std::vector<Object *> walls;
     if (unit.cls == 8) {
         // Own wall pieces under the gate are replaced by it.
-        const float hx = std::max(0.5f, unit.collisionSize[0]);
-        const float hy = std::max(0.5f, unit.collisionSize[1]);
+        const float hx = placementHalfSize(unit, 0);
+        const float hy = placementHalfSize(unit, 1);
         for (Object &o : objects_)
             if (o.active && !o.hidden && o.player == localPlayer_ && o.unit->cls == 6 &&
                 std::abs(o.x - x) < hx && std::abs(o.y - y) < hy)
                 walls.push_back(&o);
     }
     placementIgnore_ = walls.empty() ? nullptr : &walls;
-    const bool valid = positionPassable(candidate, x, y, true);
+    int positionFailure = 0;
+    const bool valid = positionPassable(
+        candidate, x, y, true, &positionFailure);
+    if (!valid)
+        placementFailureCode_ =
+            70 + positionFailure;
     placementIgnore_ = nullptr;
     if (replacedWalls) *replacedWalls = walls;
     return valid;
@@ -5741,7 +5930,7 @@ bool Game::placeBuilding(float screenX, float screenY,
 bool Game::placeBuildingWorld(float worldX, float worldY) {
     Object *worker = findObject(placementBuilderId_);
     if (!placementUnit_ || !worker) return false;
-    snapAdjacentBuildingPosition(
+    snapBuildingPosition(
         *placementUnit_, worldX, worldY);
     std::vector<Object *> replacedWalls;
     if (!placementValid(*placementUnit_, worldX, worldY, &replacedWalls)) {
@@ -5790,16 +5979,9 @@ bool Game::placeBuildingWorld(float worldX, float worldY) {
             wall->selected = false;
         }
     if (!replacedIds.empty()) rebuildAdjacency();
-    Object *building = addObject(
-        unit, localPlayer_, worldX, worldY, 0,
-        nextSpawnId_++);
+    Object *building = createFoundation(
+        *unit, localPlayer_, worldX, worldY);
     if (!building) return true;
-    building->wander = false;
-    building->underConstruction = true;
-    building->constructionTotal =
-        std::max(1.0f, (float)unit->trainTime);
-    building->constructionRemaining = building->constructionTotal;
-    building->hitPoints = 1.0f;
 
     rebuildAdjacency();
     Object *acknowledgement = nullptr;
@@ -7619,11 +7801,30 @@ bool Game::gateBlocks(const Object &gate, const Object &mover) const {
     return mover.player != gate.player && isEnemy(gate, mover);
 }
 
-bool Game::positionPassable(const Object &object, float x, float y, bool dynamic) const {
+bool Game::positionPassable(
+    const Object &object, float x, float y,
+    bool dynamic, int *failure) const {
+    if (failure) *failure = 0;
     const float radius = collisionRadius(object);
-    if (x < radius || y < radius || x >= mapSize_ - radius || y >= mapSize_ - radius ||
-        !terrainPassable(object, x, y))
+    const bool placingBuilding =
+        dynamic && object.spawnId == 0 && object.unit &&
+        object.unit->type == dat::UT_Building;
+    const float placementHalfX =
+        placingBuilding
+            ? placementHalfSize(*object.unit, 0)
+            : radius;
+    const float placementHalfY =
+        placingBuilding
+            ? placementHalfSize(*object.unit, 1)
+            : radius;
+    if (x - placementHalfX < 0 ||
+        y - placementHalfY < 0 ||
+        x + placementHalfX > mapSize_ ||
+        y + placementHalfY > mapSize_ ||
+        !terrainPassable(object, x, y)) {
+        if (failure) *failure = 1;
         return false;
+    }
 
     const bool air = isAirUnit(object);
     if (dynamic && mobileObjectGridWidth_ > 0 &&
@@ -7631,7 +7832,11 @@ bool Game::positionPassable(const Object &object, float x, float y, bool dynamic
             (size_t)mobileObjectGridWidth_ * mobileObjectGridWidth_) {
         constexpr float cellSize = 4.0f;
         const int cellRadius = std::max(
-            1, (int)std::ceil((radius + maxMobileCollisionRadius_ + 0.04f) / cellSize));
+            1, (int)std::ceil((
+                std::max(placementHalfX,
+                         placementHalfY) +
+                maxMobileCollisionRadius_ + 0.04f) /
+                cellSize));
         const int centerX = (int)std::floor(x / cellSize);
         const int centerY = (int)std::floor(y / cellSize);
         const int minMobileX = std::max(0, centerX - cellRadius);
@@ -7672,11 +7877,41 @@ bool Game::positionPassable(const Object &object, float x, float y, bool dynamic
                     const float dx = x - other.x, dy = y - other.y;
                     const float separation =
                         radius + collisionRadius(other) + 0.04f;
+                    if (placingBuilding) {
+                        const float otherRadius =
+                            collisionRadius(other) + 0.04f;
+                        const float nearestX =
+                            std::max(
+                                x - placementHalfX,
+                                std::min(
+                                    other.x,
+                                    x + placementHalfX));
+                        const float nearestY =
+                            std::max(
+                                y - placementHalfY,
+                                std::min(
+                                    other.y,
+                                    y + placementHalfY));
+                        const float rectDx =
+                            other.x - nearestX;
+                        const float rectDy =
+                            other.y - nearestY;
+                        if (rectDx * rectDx +
+                                rectDy * rectDy <
+                            otherRadius * otherRadius) {
+                            if (failure)
+                                *failure = 2;
+                            return false;
+                        }
+                        continue;
+                    }
                     const float oldDx = object.x - other.x;
                     const float oldDy = object.y - other.y;
                     if (dx * dx + dy * dy < separation * separation &&
-                        dx * dx + dy * dy <= oldDx * oldDx + oldDy * oldDy)
+                        dx * dx + dy * dy <= oldDx * oldDx + oldDy * oldDy) {
+                        if (failure) *failure = 2;
                         return false;
+                    }
                 }
     }
     if (air) return true;
@@ -7684,8 +7919,18 @@ bool Game::positionPassable(const Object &object, float x, float y, bool dynamic
     // open (open gates drop out of the obstruction grid), so nothing can be
     // built through them.
     if (object.unit && object.unit->type == dat::UT_Building && !object.gate) {
-        const float ownX = std::max(0.05f, object.unit->collisionSize[0]);
-        const float ownY = std::max(0.05f, object.unit->collisionSize[1]);
+        const float ownX =
+            placingBuilding
+                ? placementHalfX
+                : std::max(
+                      0.05f,
+                      object.unit->collisionSize[0]);
+        const float ownY =
+            placingBuilding
+                ? placementHalfY
+                : std::max(
+                      0.05f,
+                      object.unit->collisionSize[1]);
         for (const Object &other : objects_) {
             if (!other.active || other.hidden || !other.gate || &other == &object) continue;
             if (placementIgnore_ &&
@@ -7695,13 +7940,22 @@ bool Game::positionPassable(const Object &object, float x, float y, bool dynamic
             const dat::Unit *footprint = other.gateClosedUnit ? other.gateClosedUnit : other.unit;
             const float extentX = std::max(0.05f, footprint->collisionSize[0]) + ownX - 0.01f;
             const float extentY = std::max(0.05f, footprint->collisionSize[1]) + ownY - 0.01f;
-            if (std::abs(x - other.x) < extentX && std::abs(y - other.y) < extentY) return false;
+            if (std::abs(x - other.x) < extentX && std::abs(y - other.y) < extentY) {
+                if (failure) *failure = 3;
+                return false;
+            }
         }
     }
-    const int minX = std::max(0, (int)std::floor(x - radius));
-    const int maxX = std::min(mapSize_ - 1, (int)std::floor(x + radius));
-    const int minY = std::max(0, (int)std::floor(y - radius));
-    const int maxY = std::min(mapSize_ - 1, (int)std::floor(y + radius));
+    const int minX = std::max(
+        0, (int)std::floor(x - placementHalfX));
+    const int maxX = std::min(
+        mapSize_ - 1,
+        (int)std::floor(x + placementHalfX));
+    const int minY = std::max(
+        0, (int)std::floor(y - placementHalfY));
+    const int maxY = std::min(
+        mapSize_ - 1,
+        (int)std::floor(y + placementHalfY));
     for (int cellY = minY; cellY <= maxY; cellY++)
         for (int cellX = minX; cellX <= maxX; cellX++)
             for (uint32_t index :
@@ -7723,12 +7977,32 @@ bool Game::positionPassable(const Object &object, float x, float y, bool dynamic
                 // Buildings are rectangles (gates are 4 x 1 tiles), units
                 // are treated as their radius.
                 const bool rectangle = object.unit->type == dat::UT_Building;
-                const float ownX = rectangle ? std::max(0.05f, object.unit->collisionSize[0]) : radius;
-                const float ownY = rectangle ? std::max(0.05f, object.unit->collisionSize[1]) : radius;
+                const float ownX =
+                    rectangle
+                        ? (placingBuilding
+                               ? placementHalfX
+                               : std::max(
+                                     0.05f,
+                                     object.unit
+                                         ->collisionSize[0]))
+                        : radius;
+                const float ownY =
+                    rectangle
+                        ? (placingBuilding
+                               ? placementHalfY
+                               : std::max(
+                                     0.05f,
+                                     object.unit
+                                         ->collisionSize[1]))
+                        : radius;
                 const float extentX = halfX + ownX - 0.01f,
                             extentY = halfY + ownY - 0.01f;
                 const float newDx = std::abs(x - other.x), newDy = std::abs(y - other.y);
                 if (newDx >= extentX || newDy >= extentY) continue;
+                if (placingBuilding) {
+                    if (failure) *failure = 4;
+                    return false;
+                }
                 const float oldDx = std::abs(object.x - other.x);
                 const float oldDy = std::abs(object.y - other.y);
                 const bool wasInside = oldDx < extentX && oldDy < extentY;
@@ -7736,7 +8010,12 @@ bool Game::positionPassable(const Object &object, float x, float y, bool dynamic
                 const float oldPenetration = std::min(extentX - oldDx, extentY - oldDy);
                 // Already overlapping (spawned or wedged): any step that does not
                 // push deeper is allowed, so the unit can slide out.
-                if (!wasInside || newPenetration > oldPenetration + 1e-5f) return false;
+                if (!wasInside ||
+                    newPenetration >
+                        oldPenetration + 1e-5f) {
+                    if (failure) *failure = 4;
+                    return false;
+                }
             }
     return true;
 }
@@ -10917,7 +11196,11 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         panelShieldPoints += object->shieldPoints;
         panelMaxShieldPoints +=
             object->maxShieldPoints;
-        if (!canAttack(*object) || object->unit->type == dat::UT_Building) continue;
+        if (isWorker(*object) ||
+            !canAttack(*object) ||
+            object->unit->type ==
+                dat::UT_Building)
+            continue;
         if (!selectedAttacker)
             selectedAttacker = object;
         else if (selectedAttacker->attackMode != object->attackMode)
@@ -11558,14 +11841,13 @@ void Game::render(Renderer &r, int screenW, int screenH) {
 
     if (isWallPlacement()) {
         // Wall silhouette (0x5fc180): the whole dragged line, one piece per
-        // tile with its connection frame; blocked tiles pulse red.
+        // tile with its connection frame and per-piece validity tint.
         float worldX = 0, worldY = 0;
         screenToWorld(cursorX_, cursorY_, screenW, screenH, worldX, worldY);
         const int endX = (int)std::floor(worldX), endY = (int)std::floor(worldY);
         std::vector<WallTile> tiles =
             wallDragActive_ ? wallLine(wallStartTileX_, wallStartTileY_, endX, endY)
                             : std::vector<WallTile>{{endX, endY, 2}};
-        const float flash = 0.5f + 0.5f * std::sin(selectionClickAge_ * 9.0f);
         const int graphic = placementUnit_->standingGraphic[0];
         for (const WallTile &tile : tiles) {
             const float x = tile.x + 0.5f, y = tile.y + 0.5f;
@@ -11579,26 +11861,29 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             sy -= elevationAt(x, y) * assets_.dat().terrainBlock.elevHeight;
             sx -= ox;
             sy -= oy;
-            if (valid)
-                drawGraphic(r, graphic, sx, sy, tile.frame * 2.0f * kPi / 5.0f, 0,
-                            localPlayer_, 0, 0, false, viewW, viewH);
-            const uint8_t alpha = (uint8_t)std::lround(90.0f + flash * 120.0f);
-            const float hw = kTileHalfW, hh = kTileHalfH;
-            for (int step = 0; step <= 16; step++) {
-                const float t = step / 16.0f;
-                const float dot = 2.5f / zoom_;
-                const uint8_t red = valid ? 40 : 255, green = valid ? 255 : 35;
-                r.fillRect(sx - hw + hw * t - dot * 0.5f, sy - hh * t - dot * 0.5f, dot, dot, red, green, 30, alpha);
-                r.fillRect(sx + hw * t - dot * 0.5f, sy - hh + hh * t - dot * 0.5f, dot, dot, red, green, 30, alpha);
-                r.fillRect(sx + hw - hw * t - dot * 0.5f, sy + hh * t - dot * 0.5f, dot, dot, red, green, 30, alpha);
-                r.fillRect(sx - hw * t - dot * 0.5f, sy + hh - hh * t - dot * 0.5f, dot, dot, red, green, 30, alpha);
+            const size_t firstDraw = g_draws.size();
+            drawGraphic(
+                r, graphic, sx, sy,
+                tile.frame * 2.0f * kPi / 5.0f,
+                0, localPlayer_, 0, 0, false,
+                viewW, viewH);
+            for (size_t drawIndex = firstDraw;
+                 drawIndex < g_draws.size();
+                 drawIndex++) {
+                SpriteDraw &draw =
+                    g_draws[drawIndex];
+                draw.tinted = true;
+                draw.tintR = valid ? 70 : 255;
+                draw.tintG = valid ? 225 : 45;
+                draw.tintB = valid ? 95 : 45;
+                draw.tintA = 190;
             }
         }
     } else if (placementUnit_) {
         float worldX = 0, worldY = 0;
         screenToWorld(cursorX_, cursorY_, screenW, screenH,
                       worldX, worldY);
-        snapAdjacentBuildingPosition(
+        snapBuildingPosition(
             *placementUnit_, worldX, worldY);
         Object candidate;
         candidate.unit = placementUnit_;
@@ -11621,12 +11906,30 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         sx -= ox;
         sy -= oy;
         const int graphic =
-            placementUnit_->constructionGraphic >= 0
-                ? placementUnit_->constructionGraphic
-                : placementUnit_->standingGraphic[0];
+            placementUnit_->standingGraphic[0];
+        const size_t firstPlacementDraw =
+            g_draws.size();
         drawGraphic(
             r, graphic, sx, sy, 0, 0, localPlayer_, 0,
             0, false, viewW, viewH);
+        const Rgba &validColor =
+            assets_.palette()[(uint8_t)(
+                playerColorBase(localPlayer_) + 4)];
+        for (size_t drawIndex =
+                 firstPlacementDraw;
+             drawIndex < g_draws.size();
+             drawIndex++) {
+            SpriteDraw &draw =
+                g_draws[drawIndex];
+            draw.tinted = true;
+            draw.tintR =
+                valid ? validColor.r : 255;
+            draw.tintG =
+                valid ? validColor.g : 45;
+            draw.tintB =
+                valid ? validColor.b : 45;
+            draw.tintA = 190;
+        }
         if (isPowerSource(candidate) ||
             isShieldGenerator(candidate))
             drawGraphic(
@@ -11636,63 +11939,19 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                     : kShieldRadiusGraphic,
                 sx, sy, 0, 0, localPlayer_, 0, 0,
                 false, viewW, viewH);
-        const float halfX =
-            std::max(0.5f,
-                     placementUnit_->collisionSize[0]);
-        const float halfY =
-            std::max(0.5f,
-                     placementUnit_->collisionSize[1]);
-        const std::array<std::array<float, 2>, 4>
-            footprint = {{
-                {sx + (-halfX + halfY) * kTileHalfW,
-                 sy + (-halfX - halfY) * kTileHalfH},
-                {sx + (halfX + halfY) * kTileHalfW,
-                 sy + (halfX - halfY) * kTileHalfH},
-                {sx + (halfX - halfY) * kTileHalfW,
-                 sy + (halfX + halfY) * kTileHalfH},
-                {sx + (-halfX - halfY) * kTileHalfW,
-                 sy + (-halfX + halfY) * kTileHalfH},
-            }};
-        const float flash =
-            0.5f +
-            0.5f * std::sin(selectionClickAge_ * 9.0f);
-        const uint8_t red = valid ? 40 : 255;
-        const uint8_t green = valid ? 255 : 35;
-        const uint8_t alpha =
-            (uint8_t)std::lround(100.0f +
-                                 flash * 155.0f);
-        auto drawPlacementEdge =
-            [&](const std::array<float, 2> &from,
-                const std::array<float, 2> &to,
-                float thickness) {
-                r.drawLine(from[0], from[1], to[0], to[1], thickness,
-                           red, green, 30, alpha);
-            };
-        for (size_t point = 0;
-             point < footprint.size(); point++)
-            drawPlacementEdge(
-                footprint[point],
-                footprint[(point + 1) %
-                          footprint.size()],
-                (2.0f + flash * 3.0f) / zoom_);
-        if (!valid) {
-            drawPlacementEdge(
-                footprint[0], footprint[2],
-                (2.0f + flash * 2.0f) / zoom_);
-            drawPlacementEdge(
-                footprint[1], footprint[3],
-                (2.0f + flash * 2.0f) / zoom_);
-        }
-        r.fillRect(
-            sx - 28.0f / zoom_, sy - 4.0f / zoom_,
-            56.0f / zoom_, 4.0f / zoom_,
-            red, green, 30, alpha);
     }
 
     // --- objects -------------------------------------------------------
     std::stable_sort(g_draws.begin(), g_draws.end(),
                      [](const SpriteDraw &a, const SpriteDraw &b) { return a.key < b.key; });
-    for (const SpriteDraw &d : g_draws) r.draw(d.tex, d.q);
+    for (const SpriteDraw &d : g_draws) {
+        if (d.tinted)
+            r.drawTinted(
+                d.tex, d.q, d.tintR, d.tintG,
+                d.tintB, d.tintA);
+        else
+            r.draw(d.tex, d.q);
+    }
     stats_.sprites = (int)g_draws.size();
 
     for (size_t unitIndex = 0;
@@ -11880,9 +12139,9 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             const float radius = (10.0f + commandMarkerTime_ * 12.0f) / zoom_;
             const float line = 2.0f / zoom_;
             r.fillRect(sx - radius, sy - line * 0.5f, radius * 2, line,
-                       230, 45, 25, 230);
+                       40, 220, 70, 230);
             r.fillRect(sx - line * 0.5f, sy - radius, line, radius * 2,
-                       230, 45, 25, 230);
+                       40, 220, 70, 230);
         }
     }
 
@@ -14189,6 +14448,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             const SpriteFrame &frame = cursors->frames[frameIndex];
             const float width = frame.w * invZoom, height = frame.h * invZoom;
             const bool centered =
+                cursorMode_ == CursorMode::Move ||
                 cursorMode_ == CursorMode::Attack ||
                 cursorMode_ == CursorMode::Garrison ||
                 cursorMode_ == CursorMode::Gather ||

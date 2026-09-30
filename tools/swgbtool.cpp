@@ -221,6 +221,13 @@ static int cmdUnit(const char *dataDir, int id) {
                    assets.localizedString(unit.languageDllName).c_str(),
                    unit.name2.c_str(), unit.iconId, unit.oldPortraitPict,
                    unit.interfaceKind, unit.unitLine);
+            printf("  placement side terrain %d/%d terrain %d/%d clearance %.2f,%.2f "
+                   "hill %u build-on %u foundation terrain %d\n",
+                   unit.placementSideTerrain[0], unit.placementSideTerrain[1],
+                   unit.placementTerrain[0], unit.placementTerrain[1],
+                   unit.clearanceSize[0], unit.clearanceSize[1],
+                   unit.hillMode, unit.canBeBuiltOn,
+                   unit.foundationTerrainId);
             printf("  creation location %d button %u time %d construction graphic %d transform %d sounds train/transform/construction %d/%d/%d costs",
                    unit.trainLocationId, unit.buttonId, unit.trainTime,
                    unit.constructionGraphic, unit.transformUnit,
@@ -358,7 +365,8 @@ static int cmdUnits(const char *dataDir, const char *fragment) {
             assets.dat().graphic(unit.standingGraphic[0]);
         printf("%4zu %-24s %-24s '%s' type %u class %d line %d graphic %d slp %d "
                "frames %d duration %.3f sequence 0x%02x "
-               "copy/base %d/%d\n",
+               "copy/base %d/%d collision %.2f,%.2f clearance %.2f,%.2f "
+               "terrain %d/%d side %d/%d hill %u restriction %d adjacent %u\n",
                id, unit.name.c_str(), unit.name2.c_str(),
                localized.c_str(),
                unit.type, unit.cls, unit.unitLine,
@@ -366,7 +374,13 @@ static int cmdUnits(const char *dataDir, const char *fragment) {
                graphic ? graphic->frameCount : 0,
                graphic ? graphic->frameDuration : 0,
                graphic ? graphic->sequenceType : 0,
-               unit.copyId, unit.baseId);
+               unit.copyId, unit.baseId,
+               unit.collisionSize[0], unit.collisionSize[1],
+               unit.clearanceSize[0], unit.clearanceSize[1],
+               unit.placementTerrain[0], unit.placementTerrain[1],
+               unit.placementSideTerrain[0], unit.placementSideTerrain[1],
+               unit.hillMode, unit.terrainRestriction,
+               unit.adjacentMode);
     }
     return 0;
 }
@@ -2962,6 +2976,33 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         shot(g, "_stance_menu");
         report("stance-menu", opened, "opened=" + std::to_string(opened));
     }
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t worker =
+            g.spawnObjectForTesting(
+                3, 83, 1, 26.0f, 40.0f);
+        g.selectObjectForTesting(worker);
+        g.lookAtObject(worker);
+        g.update(0.001f, {});
+        InputState in;
+        in.screenW = 960;
+        in.screenH = 544;
+        in.pointerX = 851.0f;
+        in.pointerY = 473.0f;
+        in.selectPressed = true;
+        g.update(0.001f, in);
+        report(
+            "worker-no-stance",
+            !g.actionMenuOpenForTesting(),
+            "opened=" +
+                std::to_string(
+                    g.actionMenuOpenForTesting()));
+    }
     // 5) Group pathing: 16 troopers route through a one-tile gap in a wall
     //    and around a building, arriving without overlaps or stragglers.
     {
@@ -4176,6 +4217,145 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
                 std::to_string(ignoredOutside) +
                 " farmFirst " +
                 std::to_string(farmFirst));
+    }
+    // Building placement uses DAT clearance, terrain requirements and hill
+    // modes across the complete snapped footprint.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        g.setLocalPlayerForTesting(1);
+        for (int y = 74; y <= 90; y++)
+            for (int x = 74; x <= 90; x++)
+                g.setTerrainForTesting(x, y, 0);
+        const auto farmSnap =
+            g.snappedBuildingPositionForTesting(
+                3, 50, 80.2f, 80.2f);
+        const auto centerSnap =
+            g.snappedBuildingPositionForTesting(
+                3, 109, 80.2f, 80.2f);
+        const bool parity =
+            std::fabs(farmSnap[0] - 80.5f) <
+                0.001f &&
+            std::fabs(farmSnap[1] - 80.5f) <
+                0.001f &&
+            std::fabs(centerSnap[0] - 80.0f) <
+                0.001f &&
+            std::fabs(centerSnap[1] - 80.0f) <
+                0.001f;
+        const bool edgeClearance =
+            !g.placementValidForTesting(
+                3, 109, 1.1f, 80.0f) &&
+            !g.placementValidForTesting(
+                3, 665, 1.1f, 80.0f);
+        const bool flatValid =
+            g.placementValidForTesting(
+                3, 109, 80.0f, 80.0f);
+        g.setTerrainForTesting(78, 78, 1);
+        const bool completeFootprint =
+            !g.placementValidForTesting(
+                3, 109, 80.0f, 80.0f);
+        g.setTerrainForTesting(78, 78, 0);
+        g.setCornerElevationForTesting(
+            80, 80, 1);
+        const bool strictHill =
+            !g.placementValidForTesting(
+                3, 109, 80.0f, 80.0f);
+        const bool gentleHill =
+            g.placementValidForTesting(
+                3, 68, 80.0f, 80.0f);
+        const int gentleFailure =
+            g.placementFailureForTesting();
+        g.setCornerElevationForTesting(
+            80, 80, 2);
+        const bool steepHill =
+            !g.placementValidForTesting(
+                3, 68, 80.0f, 80.0f);
+        report(
+            "building-placement-footprint",
+            parity && edgeClearance && flatValid &&
+                completeFootprint && strictHill &&
+                gentleHill && steepHill,
+            "parity " + std::to_string(parity) +
+                " edge " +
+                std::to_string(edgeClearance) +
+                " footprint " +
+                std::to_string(
+                    completeFootprint) +
+                " hills " +
+                std::to_string(strictHill) + "/" +
+                std::to_string(gentleHill) + "/" +
+                std::to_string(steepHill) +
+                " reason " +
+                std::to_string(gentleFailure));
+    }
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        g.setLocalPlayerForTesting(1);
+        for (int y = 76; y <= 84; y++)
+            for (int x = 76; x <= 84; x++)
+                g.setTerrainForTesting(x, y, 1);
+        const bool needsShore =
+            !g.placementValidForTesting(
+                3, 45, 80.5f, 80.5f);
+        for (int tile = 78; tile <= 82;
+             tile++) {
+            g.setTerrainForTesting(tile, 78, 2);
+            g.setTerrainForTesting(tile, 82, 2);
+        }
+        for (int tile = 79; tile <= 81;
+             tile++) {
+            g.setTerrainForTesting(78, tile, 2);
+            g.setTerrainForTesting(82, tile, 2);
+        }
+        const bool shoreValid =
+            g.placementValidForTesting(
+                3, 45, 80.5f, 80.5f);
+        const int shoreFailure =
+            g.placementFailureForTesting();
+        g.setTerrainForTesting(79, 79, 0);
+        const bool needsWaterFootprint =
+            !g.placementValidForTesting(
+                3, 45, 80.5f, 80.5f);
+        report(
+            "shipyard-placement-terrain",
+            needsShore && shoreValid &&
+                needsWaterFootprint,
+            "shore " +
+                std::to_string(needsShore) + "/" +
+                std::to_string(shoreValid) +
+                " water " +
+                std::to_string(
+                    needsWaterFootprint) +
+                " reason " +
+                std::to_string(shoreFailure));
+    }
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        g.setTerrainForTesting(70, 70, 0);
+        const uint32_t foundation =
+            g.spawnFoundationForTesting(
+                3, 70, 1, 70.0f, 70.0f, {});
+        report(
+            "foundation-terrain",
+            foundation != 0 &&
+                g.terrainAtForTesting(70, 70) ==
+                    27,
+            "foundation " +
+                std::to_string(foundation) +
+                " terrain " +
+                std::to_string(
+                    g.terrainAtForTesting(70, 70)));
     }
     printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;
