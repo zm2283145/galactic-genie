@@ -458,6 +458,8 @@ private:
         float carcassDecay = 0.0f;
         float carcassHidden = 0.0f; // not drawn while the dying animation plays
         float huntTimer = 0.0f;
+        uint32_t resourceWorkTargetId = 0;
+        float resourceWorkTime = 0.0f;
         float damageSoundTime = 0.0f; // next fire/damage graphic sound
         int farmStage = -1; // farm terrain applied: 0 build, 1 grown, 2 dead
         std::vector<uint8_t> farmUnderlay; // terrain under a farm foundation

@@ -256,13 +256,14 @@ static int cmdUnit(const char *dataDir, int id) {
                          .unitHeaders[(size_t)unit.id]
                          .tasks)
                     printf("    task %d type %d action %d class %d unit %d "
-                           "terrain %d default %u target %u build %u "
+                           "terrain %d default %u target %u/%u build %u "
                            "resource %d*%d->%d gather %d "
                            "work %.3f/%.3f range %.2f "
-                           "graphics %d/%d/%d/%d\n",
+                           "graphics %d/%d/%d/%d sounds %d/%d\n",
                            task.id, task.taskType, task.actionType,
                            task.classId, task.unitId, task.terrainId,
                            task.isDefault, task.enableTargeting,
+                           task.combatLevelFlag,
                            task.pickForConstruction,
                            task.resourceIn,
                            task.resourceMultiplier,
@@ -274,7 +275,9 @@ static int cmdUnit(const char *dataDir, int id) {
                            task.movingGraphic,
                            task.proceedingGraphic,
                            task.workingGraphic,
-                           task.carryingGraphic);
+                           task.carryingGraphic,
+                           task.resourceGatheringSound,
+                           task.resourceDepositSound);
             }
             const auto *attackGraphic = assets.dat().graphic(unit.attackGraphic);
             const auto *dyingGraphic = assets.dat().graphic(unit.dyingGraphic);
@@ -2358,9 +2361,12 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         !systems.objectActive(destroyLastId) &&
         systems.destroyLastSelectedForTesting() &&
         !systems.objectActive(destroyFirstId);
+    const uint32_t stanceUnitId =
+        systems.spawnObjectForTesting(
+            3, 460, 1, 48.0f, 20.0f);
     bool stanceMenuWorked = false;
     if (systems.selectObjectForTesting(
-            manualWorkerId)) {
+            stanceUnitId)) {
         InputState stanceInput;
         stanceInput.screenW = screenW;
         stanceInput.screenH = screenH;
@@ -2874,17 +2880,23 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         for (float t = 0; t < seconds; t += 1.0f / 30.0f) g.update(1.0f / 30.0f, {});
     };
 
-    // 1) Trees are felled when a worker starts on them.
+    // 1) A worker performs the first carbon work animation before the tree
+    //    falls, then gathers from the felled pile.
     {
         Game g(assets);
         if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
         g.setLocalPlayerForTesting(1);
-        const uint32_t worker = g.spawnObjectForTesting(3, 83, 1, 26.0f, 40.0f);
+        const uint32_t worker = g.spawnObjectForTesting(3, 83, 1, 27.0f, 40.5f);
         const uint32_t tree = g.spawnObjectForTesting(0, 348, 0, 27.5f, 40.5f);
         const bool standing = tree && !g.objectFelled(tree);
         bool ordered = g.issueGatherForTesting(worker, tree);
         g.lookAtObject(tree);
         shot(g, "_tree_before");
+        step(g, 0.5f);
+        const bool delayed =
+            !g.objectFelled(tree) &&
+            g.objectCarriedAmount(worker) <
+                0.001f;
         bool felled = false;
         for (int f = 0; f < 600 && !felled; f++) {
             g.update(1.0f / 30.0f, {});
@@ -2896,8 +2908,9 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         const auto wp = g.objectPosition(worker);
         printf("  worker at %.2f,%.2f carried %.2f gathering %d\n", wp[0], wp[1],
                g.objectCarriedAmount(worker), (int)g.objectGatheringTarget(worker, tree));
-        report("tree-felled", standing && ordered && felled && left > 0.0f,
+        report("tree-felled", standing && ordered && delayed && felled && left > 0.0f,
                "ordered=" + std::to_string(ordered) + " felled=" + std::to_string(felled) +
+                   " delayed=" + std::to_string(delayed) +
                    " remaining=" + std::to_string(left));
     }
 
@@ -4108,7 +4121,7 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
                 3, 83, 2, 40.0f, 30.0f);
         const uint32_t tree =
             g.spawnObjectForTesting(
-                0, 348, 0, 42.0f, 30.0f);
+                0, 348, 0, 40.5f, 30.0f);
         g.update(1.0f / 30.0f, {});
         const bool ordered =
             g.issueGatherForTesting(

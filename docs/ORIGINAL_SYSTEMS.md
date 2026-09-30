@@ -135,6 +135,11 @@ Engine contract:
 - Every player's class-58 units execute worker jobs.
 - Construction, gathering, carrying, and repair graphics come from the
   corresponding DAT worker variant and task.
+- A carbon worker plays the task's initial working interval against the
+  standing tree before the tree becomes its non-obstructing felled carbon
+  pile; carbon collection begins from that pile. The carbon task stores a
+  one-second work value, working/carrying graphics 10441/10432, and its
+  gathering/deposit sounds in the DAT.
 - Class-52 infantry with Trade Federation or Confederacy unit-master
   civilization tags are mechanical droids and can be repaired. The master tag
   is retained after conversion, unlike the owning player's civilization.

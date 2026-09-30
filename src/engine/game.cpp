@@ -4115,6 +4115,10 @@ bool Game::issueGatherCommand(
     worker.garrisonTargetId = 0;
     worker.repairTargetId = 0;
     worker.gatherTargetId = resource.spawnId;
+    worker.resourceWorkTargetId =
+        resource.spawnId;
+    worker.resourceWorkTime = 0.0f;
+    worker.huntTimer = 0.0f;
     worker.dropOffTargetId = 0;
     worker.manualDropOff = false;
     worker.farmMoveTime =
@@ -4539,6 +4543,13 @@ void Game::updateGathering(float dt) {
             worker.state = State::Idle;
             continue;
         }
+        if (worker.resourceWorkTargetId !=
+            resource->spawnId) {
+            worker.resourceWorkTargetId =
+                resource->spawnId;
+            worker.resourceWorkTime = 0.0f;
+            worker.huntTimer = 0.0f;
+        }
         worker.lastGatherClass = resource->unit->cls;
         worker.lastGatherType = resource->resourceType;
         worker.lastGatherX = resource->x;
@@ -4683,23 +4694,30 @@ void Game::updateGathering(float dt) {
             }
             continue;
         }
-        // Standing carbon (class 31) is felled as soon as a worker starts on
-        // it, like the original: the object keeps its resources but drops to
-        // 0 hit points and shows its dying graphic (the felled pile). Felled
-        // trees no longer obstruct and can be built over.
-        if (!resource->felled && resource->unit->cls == 31 &&
-            resource->unit->dyingGraphic >= 0) {
-            resource->felled = true;
-            resource->hitPoints = 0.0f;
-            resource->animTime = 0.0f;
-            depletedResource = true; // rebuild obstruction/adjacency below
-        }
         worker.state = State::Gather;
         worker.path.clear();
         worker.moveGoalActive = false;
         worker.facing = std::atan2(
             resource->y - worker.y,
             resource->x - worker.x);
+        // The worker performs its initial carbon animation before the tree
+        // falls. The felled object keeps its resources, stops obstructing,
+        // and is then gathered as the carbon pile.
+        if (!resource->felled && resource->unit->cls == 31 &&
+            resource->unit->dyingGraphic >= 0) {
+            worker.resourceWorkTime += dt;
+            const float initialWorkTime =
+                task && task->workValue1 > 0.0f
+                    ? task->workValue1
+                    : 1.0f;
+            if (worker.resourceWorkTime < initialWorkTime)
+                continue;
+            resource->felled = true;
+            resource->hitPoints = 0.0f;
+            resource->animTime = 0.0f;
+            worker.resourceWorkTime = 0.0f;
+            depletedResource = true; // rebuild obstruction/adjacency below
+        }
         const float gathered = std::min(
             {resource->resourceAmount,
              capacity - worker.carriedAmount,
