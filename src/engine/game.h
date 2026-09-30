@@ -125,6 +125,9 @@ public:
         return b ? garrisonVolleySize(*b) : 0;
     }
     size_t projectilesLaunchedForTesting() const { return projectilesLaunched_; }
+    // Mean distance of marching members from their moving slots (-1 if no
+    // group is marching).
+    float marchShapeErrorForTesting() const;
     // Drags a wall of unitId from tile (x1,y1) to (x2,y2) for the worker;
     // returns the new foundation ids.
     std::vector<uint32_t> placeWallForTesting(uint32_t workerId, int civilization, int unitId,
@@ -287,6 +290,8 @@ private:
         Garrison,
         Gather,
         Repair,
+        Placement,
+        GatherPoint,
     };
     enum class ActionMenuTab : uint8_t {
         Units,
@@ -381,6 +386,15 @@ private:
         int volleyRemaining = 0;
         float volleyTimer = 0;
         uint32_t volleyTargetId = 0;
+        // Marching formation (group update 0x47e780): the group this unit
+        // marches with, its steering speed and re-path throttle.
+        // Last resource worked, so the worker can move on to the same kind
+        // nearby when it runs out.
+        int lastGatherClass = -1, lastGatherType = -1;
+        float lastGatherX = 0, lastGatherY = 0;
+        uint32_t marchGroupId = 0;
+        float marchSpeed = 0;
+        float marchRepath = 0;
         uint32_t blockerId = 0;     // unit that blocked the last step
         float productionRemaining = 0;
         float constructionRemaining = 0;
@@ -501,6 +515,12 @@ private:
     int graphicSound(int graphicId) const;
     float collisionRadius(const Object &object) const;
     bool workingOn(const Object &unit, uint32_t targetId) const;
+    bool selfShielded(const Object &object) const;
+    Object *nextResourceLike(const Object &worker);
+    // Job acknowledgement: the original plays the attack sound (master
+    // +0x120) of the worker's task variant (forager, lumberjack, miner...).
+    void playJobAcknowledgement(const Object &worker, const Object *target, bool build,
+                                bool repair);
     // Original rollover help (FUN_004d1520): creation/description string
     // + 20000 with <cost>/<hp>/<attack>/... tags expanded. Returns the body
     // (the part after the "Create <b>Name<b> (<cost>)" first line).
@@ -759,6 +779,23 @@ private:
     // Destination of each active group move, so a formation change can
     // re-form the group on the way there instead of stopping it.
     std::unordered_map<uint32_t, std::array<float, 2>> moveGroupDestinations_;
+    // A formation on the march: an invisible leader follows the group path
+    // at the slowest member's speed and leaves a trail; each row's anchor
+    // is its depth back along that trail, and members steer to their slot.
+    struct MarchGroup {
+        uint32_t id = 0;
+        std::vector<uint32_t> members;
+        std::vector<std::array<float, 2>> offsets; // lateral, forward (<= 0)
+        std::vector<std::array<float, 2>> path;
+        size_t pathIndex = 0;
+        float x = 0, y = 0, dirX = 1, dirY = 0;
+        std::vector<std::array<float, 2>> trail; // newest first
+        float spacing = 0.5f;
+        bool straggling = false;
+    };
+    std::vector<MarchGroup> marchGroups_;
+    void updateMarchGroups(float dt);
+    std::array<float, 2> marchTrailPoint(const MarchGroup &group, float depth) const;
     bool actionMenuOpen_ = false;
     uint32_t actionMenuObjectId_ = 0;
     ActionMenuTab actionMenuTab_ = ActionMenuTab::Units;
@@ -770,6 +807,7 @@ private:
     // that picked the item cannot also place it.
     bool placementJustBegun_ = false;
     uint32_t gatherPointBuildingId_ = 0; // "click an area to set gather point" mode
+    bool gatherPointJustBegun_ = false;
 public:
     bool setGatherPointForTesting(uint32_t buildingId, float x, float y, uint32_t targetId = 0) {
         Object *b = findObject(buildingId);

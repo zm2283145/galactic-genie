@@ -187,6 +187,16 @@ bool Assets::init(const std::string &dataDir, std::string *err) {
         return false;
     }
     if (!dat_.load(datPath, err)) return false;
+    // The engine's world axes are the original's swapped (X = original y,
+    // Y = mapSize - original x, as in scenario loading and annex offsets),
+    // so footprint half-sizes swap too. Square footprints are unaffected;
+    // gates (1.0 x 0.5 along their posts) now lie along their posts.
+    for (dat::Civ &civ : dat_.civs)
+        for (dat::Unit &unit : civ.units) {
+            std::swap(unit.collisionSize[0], unit.collisionSize[1]);
+            std::swap(unit.outlineSize[0], unit.outlineSize[1]);
+            std::swap(unit.clearanceSize[0], unit.clearanceSize[1]);
+        }
     log("loaded " + datPath + ": " + std::to_string(dat_.graphics.size()) + " graphics, " +
         std::to_string(dat_.civs.size()) + " civs");
 

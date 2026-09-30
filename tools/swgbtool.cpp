@@ -2897,6 +2897,8 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         g.update(1.0f / 30.0f, {});
         const bool opened = g.objectUnitId(gate) != closedId;
         g.lookAtObject(gate);
+        g.selectObjectForTesting(gate);
+        g.update(0.001f, {});
         shot(g, "_gate_open");
         g.moveObjectForTesting(trooper, gx, gy - 4.0f);
         step(g, 0.25f);
@@ -3212,6 +3214,8 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         const size_t shots1 = g.projectilesLaunchedForTesting();
         const int emptyVolley = g.garrisonVolleyForTesting(cc);
         for (int f = 0; f < 180; f++) g.update(1.0f / 30.0f, {});
+        g.lookAtObject(cc);
+        shot(g, "_garrisoned_cc");
         const int volley = g.garrisonVolleyForTesting(cc);
         const size_t garrisonShots = g.projectilesLaunchedForTesting() - shots1;
         printf("  cc %s\n  enemy %s\n", g.describeObjectForTesting(cc).substr(0, 200).c_str(),
@@ -3252,6 +3256,121 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         g.update(0.001f, in);
         shot(g, "_tooltip");
         report("original-help", opened, "opened=" + std::to_string(opened));
+    }
+    // 13) Resources can be selected and show what is left.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t tree = g.spawnObjectForTesting(0, 348, 0, 44.5f, 16.5f);
+        g.update(1.0f / 30.0f, {});
+        const bool selected = g.selectObjectForTesting(tree);
+        g.lookAtObject(tree);
+        g.update(0.001f, {});
+        {
+            InputState hover;
+            hover.screenW = 960; hover.screenH = 544;
+            hover.cursorVisible = true;
+            hover.pointerX = 126; hover.pointerY = 503;
+            g.update(0.001f, hover);
+        }
+        shot(g, "_resource_panel");
+        report("resource-select", selected && g.objectSelected(tree),
+               "selected=" + std::to_string(selected) + " amount=" +
+                   std::to_string(g.objectResourceAmount(tree)));
+    }
+    // 14) Formations keep their shape while marching.
+    for (int formation = 0; formation < 4; formation++) {
+        static const char *names[] = {"line", "box", "staggered", "flank"};
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        std::vector<uint32_t> troops;
+        for (int i = 0; i < 12; i++)
+            troops.push_back(g.spawnObjectForTesting(3, 460, 1, 40.0f + (i % 4) * 0.9f,
+                                                     11.0f + (i / 4) * 0.9f));
+        g.update(1.0f / 30.0f, {});
+        g.groupMoveForTesting(troops, 52.0f, 24.0f, formation);
+        float worst = 0, sum = 0;
+        int samples = 0, frames = 0;
+        for (; frames < 30 * 60; frames++) {
+            g.update(1.0f / 30.0f, {});
+            const float error = g.marchShapeErrorForTesting();
+            if (frames > 30 * 5 && error >= 0) {
+                worst = std::max(worst, error);
+                sum += error;
+                samples++;
+            }
+            if (frames == 30 * 9) {
+                g.lookAtObject(troops[5]);
+                shot(g, std::string("_march_") + names[formation]);
+            }
+            if (g.movementStats().pendingMoveGoals == 0) break;
+        }
+        const MovementStats ms = g.movementStats();
+        const float mean = samples ? sum / samples : -1.0f;
+        report((std::string("march-") + names[formation]).c_str(),
+               samples > 30 && mean < 0.6f && ms.pendingMoveGoals == 0 && ms.overlappingPairs == 0,
+               "meanSlotError=" + std::to_string(mean) + " worst=" + std::to_string(worst) +
+                   " samples=" + std::to_string(samples) + " time=" + std::to_string(frames / 30.0f) +
+                   " overlaps=" + std::to_string(ms.overlappingPairs));
+    }
+    // 15) Gate appears in the worker build menu from Tech Level 2.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t worker = g.spawnObjectForTesting(3, 83, 1, 44.0f, 16.0f);
+        g.update(1.0f / 30.0f, {});
+        auto hasGate = [&]() {
+            for (int id : g.buildingOptionIds(worker))
+                if (id == 487) return true;
+            return false;
+        };
+        const bool before = hasGate();
+        g.researchTechnology(1, 1);
+        g.update(1.0f / 30.0f, {});
+        const bool after = hasGate();
+        report("gate-buildable", !before && after,
+               "tl1=" + std::to_string(before) + " tl2=" + std::to_string(after));
+    }
+    // 16) A worker moves on to the next tree when one runs out.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        g.spawnObjectForTesting(3, 109, 1, 44.0f, 14.0f);
+        const uint32_t worker = g.spawnObjectForTesting(3, 83, 1, 44.0f, 17.5f);
+        const uint32_t tree1 = g.spawnObjectForTesting(0, 348, 0, 44.5f, 19.5f);
+        const uint32_t tree2 = g.spawnObjectForTesting(0, 348, 0, 46.5f, 19.5f);
+        g.update(1.0f / 30.0f, {});
+        g.issueGatherForTesting(worker, tree1);
+        const float second0 = g.objectResourceAmount(tree2);
+        int f = 0;
+        for (; f < 30 * 900; f++) {
+            g.update(1.0f / 30.0f, {});
+            if (g.objectResourceAmount(tree2) < second0 - 5.0f) break;
+        }
+        printf("  worker at %.2f,%.2f %s\n", g.objectPosition(worker)[0], g.objectPosition(worker)[1], g.describeObjectForTesting(worker).substr(0, 400).c_str());
+        report("gather-continues", g.objectResourceAmount(tree1) <= 0.01f &&
+                                       g.objectResourceAmount(tree2) < second0 - 5.0f,
+               "tree1=" + std::to_string(g.objectResourceAmount(tree1)) + " tree2=" +
+                   std::to_string(g.objectResourceAmount(tree2)) + " t=" + std::to_string(f / 30));
+    }
+    // 17) Self-shielded units charge their own shield (trait 0x40).
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t heavy = g.spawnObjectForTesting(5, 172, 1, 46.0f, 20.0f);
+        const uint32_t plain = g.spawnObjectForTesting(5, 174, 1, 48.0f, 20.0f);
+        for (int f = 0; f < 30 * 10; f++) g.update(1.0f / 30.0f, {});
+        const float heavyShield = g.objectShieldPoints(heavy);
+        const float plainShield = g.objectShieldPoints(plain);
+        report("self-shield", heavyShield > 1.0f && plainShield <= 0.0f,
+               "heavy=" + std::to_string(heavyShield) + "/" +
+                   std::to_string(g.objectMaxShieldPoints(heavy)) + " plain=" +
+                   std::to_string(plainShield));
     }
     printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;

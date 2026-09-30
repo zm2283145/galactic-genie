@@ -66,8 +66,9 @@ public:
                    std::string *fileName = nullptr);
     // Raw WAV from the sounds DRS by resource id (interface sounds such as
     // gatel.wav 50362 / gateu.wav 50363 are loaded by id, not via the dat).
+    // They live in interfac.drs (button1.wav 50300 ... gateu.wav 50363).
     bool readSoundResource(int resourceId, std::vector<uint8_t> &data) {
-        return sounds_.read(resourceId, data);
+        return interfac_.read(resourceId, data) || sounds_.read(resourceId, data);
     }
     Texture *selectionRing();
     bool hasBlendMasks() const { return blendMaskTexture_ != nullptr; }
