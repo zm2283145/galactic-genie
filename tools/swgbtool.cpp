@@ -230,9 +230,11 @@ static int cmdUnit(const char *dataDir, int id) {
                 if (cost.flag && cost.type >= 0)
                     printf(" %d=%d", cost.type, cost.amount);
             printf("; default task header %d, capacity %d, work rate %.3f, "
+                   "line of sight %.2f, search %.2f, "
                    "storage",
                    unit.defaultTaskId, unit.resourceCapacity,
-                   unit.workRate);
+                   unit.workRate, unit.lineOfSight,
+                   unit.searchRadius);
             for (const auto &storage :
                  unit.resourceStorages)
                 if (storage.type >= 0 &&
@@ -3525,18 +3527,27 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         const uint32_t tree1 = g.spawnObjectForTesting(0, 348, 0, 44.5f, 19.5f);
         const uint32_t tree2 = g.spawnObjectForTesting(0, 348, 0, 46.5f, 19.5f);
         g.update(1.0f / 30.0f, {});
+        g.setObjectResourceForTesting(
+            tree1, 3.0f);
+        const float carbon0 =
+            g.resource(1, 1);
         g.issueGatherForTesting(worker, tree1);
         const float second0 = g.objectResourceAmount(tree2);
         int f = 0;
-        for (; f < 30 * 900; f++) {
+        for (; f < 30 * 120; f++) {
             g.update(1.0f / 30.0f, {});
             if (g.objectResourceAmount(tree2) < second0 - 5.0f) break;
         }
         printf("  worker at %.2f,%.2f %s\n", g.objectPosition(worker)[0], g.objectPosition(worker)[1], g.describeObjectForTesting(worker).substr(0, 400).c_str());
         report("gather-continues", g.objectResourceAmount(tree1) <= 0.01f &&
-                                       g.objectResourceAmount(tree2) < second0 - 5.0f,
+                                       g.objectResourceAmount(tree2) < second0 - 5.0f &&
+                                       g.objectCarriedAmount(worker) > 7.0f &&
+                                       g.resource(1, 1) <= carbon0 + 0.01f,
                "tree1=" + std::to_string(g.objectResourceAmount(tree1)) + " tree2=" +
-                   std::to_string(g.objectResourceAmount(tree2)) + " t=" + std::to_string(f / 30));
+                   std::to_string(g.objectResourceAmount(tree2)) +
+                   " carried=" + std::to_string(g.objectCarriedAmount(worker)) +
+                   " bank=" + std::to_string(g.resource(1, 1) - carbon0) +
+                   " t=" + std::to_string(f / 30));
     }
     // 17) Self-shielded units charge their own shield (trait 0x40).
     {
@@ -3574,16 +3585,48 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         const int doneTerrain = g.terrainAtForTesting(44, 20);
         const bool walk = g.positionPassableForTesting(worker, 44.5f, 20.5f);
         const float food0 = g.objectResourceAmount(farm);
-        for (int k = 0; k < 30 * 60; k++) g.update(1.0f / 30.0f, {});
+        const auto farmPosition =
+            g.objectPosition(farm);
+        float minX = 1e9f, maxX = -1e9f;
+        float minY = 1e9f, maxY = -1e9f;
+        bool enteredField = false;
+        for (int k = 0; k < 30 * 20; k++) {
+            g.update(1.0f / 30.0f, {});
+            const auto position =
+                g.objectPosition(worker);
+            minX = std::min(minX, position[0]);
+            maxX = std::max(maxX, position[0]);
+            minY = std::min(minY, position[1]);
+            maxY = std::max(maxY, position[1]);
+            enteredField |=
+                std::abs(
+                    position[0] -
+                    farmPosition[0]) <
+                    1.4f &&
+                std::abs(
+                    position[1] -
+                    farmPosition[1]) <
+                    1.4f;
+        }
+        for (int k = 0; k < 30 * 40; k++)
+            g.update(1.0f / 30.0f, {});
         const float food1 = g.objectResourceAmount(farm);
+        const float farmMovement =
+            std::hypot(
+                maxX - minX, maxY - minY);
         printf("  %s\n", g.describeObjectForTesting(worker).substr(0, 300).c_str());
         g.setObjectResourceForTesting(farm, 0.5f);
         for (int k = 0; k < 30 * 20; k++) g.update(1.0f / 30.0f, {});
         const int deadTerrain = g.terrainAtForTesting(44, 20);
-        report("farm", buildTerrain == 29 && doneTerrain == 7 && walk && food1 < food0 - 1.0f &&
-                           deadTerrain == 8,
+        report("farm", buildTerrain == 29 && doneTerrain == 7 && walk &&
+                           enteredField && farmMovement > 0.40f &&
+                           food1 < food0 - 1.0f && deadTerrain == 8,
                "terrain " + std::to_string(buildTerrain) + "/" + std::to_string(doneTerrain) + "/" +
-                   std::to_string(deadTerrain) + " walk=" + std::to_string(walk) + " food " +
+                   std::to_string(deadTerrain) + " walk=" + std::to_string(walk) +
+                   " field=" + std::to_string(enteredField) +
+                   " center=" + std::to_string(farmPosition[0]) + "," +
+                   std::to_string(farmPosition[1]) +
+                   " movement=" + std::to_string(farmMovement) + " food " +
                    std::to_string(food0) + "->" + std::to_string(food1));
     }
     // 19) Upgrades: build menu shows the upgraded building; HP techs raise
@@ -3967,8 +4010,8 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         report(researched ? "minrange-melee-researched" : "minrange-melee", hit,
                "hit " + std::to_string(hit) + " moved " + std::to_string(moved));
     }
-    // 30) Workers repair mechanical units (strike mech, heavy assault mech),
-    // not troopers.
+    // 30) Workers repair mechanical units and droid infantry, not organic
+    // troopers. Droid identity follows the unit master after conversion.
     {
         Game g(assets);
         if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
@@ -3977,16 +4020,162 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         const uint32_t worker = g.spawnObjectForTesting(1, 83, 1, 40.0f, 30.0f);
         const uint32_t mech = g.spawnObjectForTesting(1, 603, 1, 42.0f, 30.0f);
         const uint32_t trooper = g.spawnObjectForTesting(1, 460, 1, 40.0f, 33.0f);
+        const uint32_t tradeFederationDroid =
+            g.spawnObjectForTesting(
+                5, 172, 1, 43.0f, 32.0f);
+        const uint32_t confederacyDroid =
+            g.spawnObjectForTesting(
+                8, 1552, 1, 43.0f, 34.0f);
         g.update(1.0f / 30.0f, {});
         g.damageObjectForTesting(mech, 100);
         g.damageObjectForTesting(trooper, 10);
+        g.damageObjectForTesting(
+            tradeFederationDroid, 10);
+        g.damageObjectForTesting(
+            confederacyDroid, 10);
         const bool trooperRefused = !g.issueRepairForTesting(worker, trooper);
+        const bool tradeFederationAccepted =
+            g.issueRepairForTesting(
+                worker,
+                tradeFederationDroid);
+        const bool confederacyAccepted =
+            g.issueRepairForTesting(
+                worker,
+                confederacyDroid);
         const bool ordered = g.issueRepairForTesting(worker, mech);
         const float hp0 = g.objectHitPoints(mech);
         for (int f = 0; f < 30 * 20; f++) g.update(1.0f / 30.0f, {});
-        report("repair-mech", trooperRefused && ordered && g.objectHitPoints(mech) > hp0 + 5.0f,
-               "trooperRefused " + std::to_string(trooperRefused) + " ordered " + std::to_string(ordered) +
+        report("repair-mech", trooperRefused &&
+                                  tradeFederationAccepted &&
+                                  confederacyAccepted &&
+                                  ordered &&
+                                  g.objectHitPoints(mech) > hp0 + 5.0f,
+               "trooperRefused " + std::to_string(trooperRefused) +
+                   " tfDroid " + std::to_string(tradeFederationAccepted) +
+                   " confedDroid " + std::to_string(confederacyAccepted) +
+                   " ordered " + std::to_string(ordered) +
                    " hp " + std::to_string(hp0) + "->" + std::to_string(g.objectHitPoints(mech)));
+    }
+    // 31) Worker jobs run for every player. Local ownership controls input
+    // and UI, not scenario or AI simulation.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t worker =
+            g.spawnObjectForTesting(
+                3, 83, 2, 40.0f, 30.0f);
+        const uint32_t tree =
+            g.spawnObjectForTesting(
+                0, 348, 0, 42.0f, 30.0f);
+        g.update(1.0f / 30.0f, {});
+        const bool ordered =
+            g.issueGatherForTesting(
+                worker, tree);
+        const float amount0 =
+            g.objectResourceAmount(tree);
+        for (int f = 0; f < 30 * 30; f++)
+            g.update(1.0f / 30.0f, {});
+        report(
+            "nonlocal-worker",
+            ordered &&
+                g.objectResourceAmount(tree) <
+                    amount0 - 0.01f &&
+                g.objectCarriedAmount(worker) >
+                    0.01f,
+            "ordered " +
+                std::to_string(ordered) +
+                " tree " +
+                std::to_string(amount0) +
+                "->" +
+                std::to_string(
+                    g.objectResourceAmount(tree)) +
+                " carried " +
+                std::to_string(
+                    g.objectCarriedAmount(worker)));
+    }
+    // 32) Continued work uses the worker master's five-tile search radius.
+    // Farms keep their builder ahead of nearby foundations, while ordinary
+    // completed buildings chain only to foundations inside that radius.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t worker =
+            g.spawnObjectForTesting(
+                3, 83, 1, 30.0f, 30.0f);
+        g.update(1.0f / 30.0f, {});
+        const uint32_t completed =
+            g.spawnFoundationForTesting(
+                3, 70, 1, 31.0f, 30.0f,
+                {worker});
+        const uint32_t nearby =
+            g.spawnFoundationForTesting(
+                3, 70, 1, 35.0f, 30.0f,
+                {});
+        g.completeFoundationForTesting(
+            completed);
+        g.update(0.001f, {});
+        const bool chainedNearby =
+            g.objectBuildingTarget(
+                worker, nearby);
+
+        Game far(assets);
+        if (!far.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        far.setLocalPlayerForTesting(1);
+        const uint32_t farWorker =
+            far.spawnObjectForTesting(
+                3, 83, 1, 30.0f, 30.0f);
+        far.update(1.0f / 30.0f, {});
+        const uint32_t farCompleted =
+            far.spawnFoundationForTesting(
+                3, 70, 1, 31.0f, 30.0f,
+                {farWorker});
+        const uint32_t outside =
+            far.spawnFoundationForTesting(
+                3, 70, 1, 38.0f, 30.0f,
+                {});
+        far.completeFoundationForTesting(
+            farCompleted);
+        far.update(0.001f, {});
+        const bool ignoredOutside =
+            !far.objectBuildingTarget(
+                farWorker, outside);
+
+        Game farmPriority(assets);
+        if (!farmPriority.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        farmPriority.setLocalPlayerForTesting(1);
+        const uint32_t farmer =
+            farmPriority.spawnObjectForTesting(
+                3, 83, 1, 30.0f, 30.0f);
+        farmPriority.update(
+            1.0f / 30.0f, {});
+        const uint32_t farm =
+            farmPriority.spawnFoundationForTesting(
+                3, 50, 1, 31.0f, 30.0f,
+                {farmer});
+        const uint32_t otherFoundation =
+            farmPriority.spawnFoundationForTesting(
+                3, 70, 1, 33.0f, 30.0f,
+                {});
+        farmPriority.completeFoundationForTesting(
+            farm);
+        farmPriority.update(0.001f, {});
+        const bool farmFirst =
+            farmPriority.objectGatheringTarget(
+                farmer, farm) &&
+            !farmPriority.objectBuildingTarget(
+                farmer, otherFoundation);
+        report(
+            "worker-continuation",
+            chainedNearby && ignoredOutside &&
+                farmFirst,
+            "near " +
+                std::to_string(chainedNearby) +
+                " outside " +
+                std::to_string(ignoredOutside) +
+                " farmFirst " +
+                std::to_string(farmFirst));
     }
     printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;

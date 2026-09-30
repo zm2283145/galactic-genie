@@ -430,6 +430,9 @@ private:
         float damageSoundTime = 0.0f; // next fire/damage graphic sound
         int farmStage = -1; // farm terrain applied: 0 build, 1 grown, 2 dead
         std::vector<uint8_t> farmUnderlay; // terrain under a farm foundation
+        float farmMoveTime = 0.0f;
+        uint8_t farmMoveStep = 0;
+        bool farmMoveActive = false;
         uint32_t pathGoalId = 0;      // object approached (region goal), 0 = point
         float pathGoalClearance = 0;
         uint8_t repathCount = 0;
@@ -721,6 +724,8 @@ private:
     const dat::Unit *builderUnit(
         const Object &worker) const;
     int builderWorkingGraphic(
+        const Object &worker) const;
+    int repairWorkingGraphic(
         const Object &worker) const;
     bool isGatherable(const Object &object) const;
     const dat::Unit *gathererUnit(

@@ -19,6 +19,7 @@ build and test on Vita.
 | Formations | Layout/update routines at `0x478e30`, `0x479760`, `0x47c280`, `0x47e780`, `0x480060` | Layout verified; automatic line/column switching remains open |
 | Pathfinding | Long-range routines at `0x4982f0`, `0x498820`, `0x4989f0`, `0x499010` | Partially verified and covered |
 | Unit information UI | Panel rows at `0x5d98a0`/`0x5db840`; resource rows at `0x5daf72` | Partially verified |
+| Workers | DAT class 58 and `UNIT-WORKER[A/B]1..11` task variants | Partially verified and covered |
 | AI scripts | Original `.per` parser, facts, actions, and managers | Not implemented |
 
 ## Production exits
@@ -45,3 +46,54 @@ Engine contract:
 - Freeing one position allows exactly the waiting item to complete on a later
   update.
 - Rally orders are issued only after the unit is successfully created.
+
+## Workers
+
+Workers are class 58 units for every player. Worker simulation is not tied to
+the local player; local ownership controls command input and UI availability,
+not gathering, construction, repair, or job variants.
+
+The base worker changes to task-specific hidden variants from the DAT:
+
+- Variant 2 builds through action 101.
+- Variant 3 farms unit 50 through action 5.
+- Variants 4/5/6/8/9/11 gather the resource classes listed by their action-5
+  or action-110 tasks.
+- Variant 7 hunts the live-animal classes listed by action 110.
+- Variant 10 repairs through action 106.
+
+Farm collision is `1.5 x 1.5` tiles and has no obstruction. The farmer variant
+has zero work range against the farm unit, allowing its activity to occupy and
+move between positions on the field instead of remaining parked outside the
+farm footprint.
+
+All base and task-specific worker masters expose a five-tile DAT search radius.
+Continued-work searches use that value rather than a separate hard-coded
+radius. Resource continuation retains the current worker variant: carbon
+collectors may continue to any class supported by the carbon variant, hunters
+to the live-animal classes supported by the hunter variant, and so on. Merely
+sharing a resource type is insufficient (a food gatherer does not
+automatically switch from forage to hunting or farming).
+
+Engine contract:
+
+- Every player's class-58 units execute worker jobs.
+- Construction, gathering, carrying, and repair graphics come from the
+  corresponding DAT worker variant and task.
+- Class-52 infantry with Trade Federation or Confederacy unit-master
+  civilization tags are mechanical droids and can be repaired. The master tag
+  is retained after conversion, unlike the owning player's civilization.
+- Farmers enter the walkable farm footprint and periodically change working
+  position while continuing to gather.
+- A partially loaded worker continues onto the nearest compatible resource in
+  its five-tile search radius without depositing first. It deposits when full
+  or when no compatible resource remains.
+- A completed farm is worked immediately by its builder. A prepaid reseed
+  returns an exhausted farm to construction, then the same worker rebuilds and
+  resumes farming it.
+- After another building completes, its builder may chain to the nearest
+  friendly foundation inside the five-tile search radius. If none exists, a
+  completed drop site may send the builder to the nearest compatible resource
+  inside the same radius.
+- Clone Campaigns assault mechs (class 53) and air transports (class 59) are
+  also repairable.
