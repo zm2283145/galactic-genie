@@ -38,6 +38,9 @@ public:
     // Texture modulated by a colour (single texture unit: cheap on vitaGL,
     // used for UI text).
     virtual void drawTinted(Texture *tex, const Quad &q, uint8_t r, uint8_t g, uint8_t b, uint8_t a) = 0;
+    // Solid line segment of the given thickness (one rotated quad).
+    virtual void drawLine(float x0, float y0, float x1, float y1, float thickness,
+                          uint8_t r, uint8_t g, uint8_t b, uint8_t a) = 0;
     virtual void fillRect(float x, float y, float w, float h, uint8_t r, uint8_t g, uint8_t b, uint8_t a) = 0;
     virtual void endFrame() = 0;
 };

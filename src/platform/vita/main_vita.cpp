@@ -335,7 +335,7 @@ int main() {
                 budgetT = now;
                 const size_t freeBytes = vglMemFree(VGL_MEM_VRAM) + vglMemFree(VGL_MEM_RAM) +
                                          vglMemFree(VGL_MEM_PHYCONT);
-                const size_t reserve = 24u * 1024u * 1024u;
+                const size_t reserve = 40u * 1024u * 1024u;
                 const size_t used = assets.textureBytes();
                 size_t budget = freeBytes >= reserve ? used + (freeBytes - reserve)
                                                      : (used > reserve - freeBytes ? used - (reserve - freeBytes) : 0);
@@ -355,7 +355,7 @@ int main() {
             frames++;
             if (now - statT >= 5000000) {
                 logf("fps=%.1f ms upd/rnd/swap=%.1f/%.1f/%.1f draws=%d quads=%d sprites=%d sheets=%u tex=%.1fMB "
-                     "builds=%u free vram/ram/phy=%.1f/%.1f/%.1fMB menu=%d sel=%zu zoom=%.2f",
+                     "builds=%u free vram/ram/phy=%.1f/%.1f/%.1fMB menu=%d sel=%u zoom=%.2f",
                      frames * 1e6 / (double)(now - statT),
                      frames ? updateUs / 1000.0 / frames : 0.0, frames ? renderUs / 1000.0 / frames : 0.0,
                      frames ? swapUs / 1000.0 / frames : 0.0, renderer.drawCalls(), renderer.quads(),
@@ -364,7 +364,7 @@ int main() {
                      (unsigned)(assets.buildCount() - lastBuilds),
                      vglMemFree(VGL_MEM_VRAM) / 1048576.0, vglMemFree(VGL_MEM_RAM) / 1048576.0,
                      vglMemFree(VGL_MEM_PHYCONT) / 1048576.0, (int)game.actionMenuOpenForTesting(),
-                     game.selectedObjectIds().size(), game.zoom());
+                     (unsigned)game.selectedObjectIds().size(), game.zoom());
                 updateUs = renderUs = swapUs = 0;
                 lastBuilds = assets.buildCount();
                 frames = 0;

@@ -65,6 +65,7 @@ Texture *Assets::selectionRing() {
 }
 
 void Assets::destroySheet(std::unique_ptr<SpriteSheet> &sheet) {
+    sheetCache_.fill(SheetCacheEntry{});
     if (!sheet) return;
     for (Texture *texture : sheet->pages) renderer_->destroyTexture(texture);
     for (Texture *texture : sheet->outlinePages)
@@ -454,34 +455,64 @@ const SpriteFrame *Assets::buildSlopeBlendMask(int mode, int mask, int slope, ui
     return result;
 }
 
+const SpriteSheet *Assets::cachedSheet(uint64_t key) {
+    SheetCacheEntry &entry = sheetCache_[(size_t)((key ^ (key >> 16) ^ (key >> 40)) & 255)];
+    if (entry.key != key) return nullptr;
+    if (entry.stamped != terrainGeneration_) {
+        entry.stamped = terrainGeneration_;
+        sheetUse_[key] = terrainGeneration_;
+    }
+    return entry.sheet;
+}
+
+void Assets::rememberSheet(uint64_t key, const SpriteSheet *sheet) {
+    if (!sheet) return;
+    SheetCacheEntry &entry = sheetCache_[(size_t)((key ^ (key >> 16) ^ (key >> 40)) & 255)];
+    entry.key = key;
+    entry.sheet = sheet;
+    entry.stamped = terrainGeneration_;
+}
+
 const SpriteSheet *Assets::sheet(int32_t slpId, int playerColorBase) {
     uint64_t key = ((uint64_t)(uint32_t)slpId << 16) | (uint16_t)playerColorBase;
+    if (const SpriteSheet *hit = cachedSheet(key)) return hit;
     auto it = sheets_.find(key);
     if (it != sheets_.end()) {
         sheetUse_[key] = terrainGeneration_;
+        rememberSheet(key, it->second.get());
         return it->second.get();
     }
-    return build(graphics_, slpId, playerColorBase, key);
+    const SpriteSheet *built = build(graphics_, slpId, playerColorBase, key);
+    rememberSheet(key, built);
+    return built;
 }
 
 const SpriteSheet *Assets::interfaceSheet(int32_t slpId) {
     const uint64_t key = (1ull << 63) | ((uint64_t)(uint32_t)slpId << 16);
+    if (const SpriteSheet *hit = cachedSheet(key)) return hit;
     auto it = sheets_.find(key);
     if (it != sheets_.end()) {
         sheetUse_[key] = terrainGeneration_;
+        rememberSheet(key, it->second.get());
         return it->second.get();
     }
-    return build(interfac_, slpId, 16, key);
+    const SpriteSheet *built = build(interfac_, slpId, 16, key);
+    rememberSheet(key, built);
+    return built;
 }
 
 const SpriteSheet *Assets::terrainSheet(int32_t slpId) {
     uint64_t key = ((uint64_t)(uint32_t)slpId << 16) | 0xFFFF;
+    if (const SpriteSheet *hit = cachedSheet(key)) return hit;
     auto it = sheets_.find(key);
     if (it != sheets_.end()) {
         sheetUse_[key] = terrainGeneration_;
+        rememberSheet(key, it->second.get());
         return it->second.get();
     }
-    return build(terrain_, slpId, 16, key);
+    const SpriteSheet *built = build(terrain_, slpId, 16, key);
+    rememberSheet(key, built);
+    return built;
 }
 
 bool Assets::SlopeFrameKey::operator<(const SlopeFrameKey &other) const {

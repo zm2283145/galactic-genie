@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "gl_renderer.h"
+#include <cmath>
 
 #if defined(__vita__)
 #include <vitaGL.h>
@@ -157,6 +158,32 @@ void GlRenderer::drawTinted(Texture *tex, const Quad &q, uint8_t r, uint8_t g, u
     auto *gt = static_cast<GlTexture *>(tex);
     push(tex, nullptr, q.x, q.y, q.x + q.w, q.y + q.h, q.u0 * gt->invW, q.v0 * gt->invH, q.u1 * gt->invW,
          q.v1 * gt->invH, 0, 0, 0, 0, r, g, b, a);
+}
+
+void GlRenderer::drawLine(float x0, float y0, float x1, float y1, float thickness,
+                          uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    const float dx = x1 - x0, dy = y1 - y0;
+    const float length = std::sqrt(dx * dx + dy * dy);
+    if (length <= 0.0001f) {
+        fillRect(x0 - thickness * 0.5f, y0 - thickness * 0.5f, thickness, thickness, r, g, b, a);
+        return;
+    }
+    // Perpendicular half-width; extend the ends by half the thickness so
+    // joined segments meet without gaps.
+    const float nx = -dy / length * thickness * 0.5f, ny = dx / length * thickness * 0.5f;
+    const float ex = dx / length * thickness * 0.5f, ey = dy / length * thickness * 0.5f;
+    if (white_ != current_ || currentMask_) {
+        flush();
+        current_ = white_;
+        currentMask_ = nullptr;
+    }
+    const Vertex a0{x0 - ex + nx, y0 - ey + ny, 0, 0, 0, 0, r, g, b, a};
+    const Vertex a1{x0 - ex - nx, y0 - ey - ny, 0, 0, 0, 0, r, g, b, a};
+    const Vertex b0{x1 + ex + nx, y1 + ey + ny, 1, 1, 0, 0, r, g, b, a};
+    const Vertex b1{x1 + ex - nx, y1 + ey - ny, 1, 1, 0, 0, r, g, b, a};
+    verts_.push_back(a0); verts_.push_back(b0); verts_.push_back(a1);
+    verts_.push_back(b0); verts_.push_back(b1); verts_.push_back(a1);
+    quads_++;
 }
 
 void GlRenderer::fillRect(float x, float y, float w, float h, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {

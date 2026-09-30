@@ -297,6 +297,7 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     players_ = {};
     resources_ = {};
     researchedTechs_ = {};
+    techGeneration_++;
     disabledTechs_ = {};
     disabledUnits_ = {};
     triggers_.clear();
@@ -485,6 +486,7 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     players_ = scenario.players;
     resources_ = {};
     researchedTechs_ = {};
+    techGeneration_++;
     disabledTechs_ = {};
     disabledUnits_ = {};
     for (size_t i = 0; i < players_.size(); i++) {
@@ -1254,6 +1256,7 @@ bool Game::researchTechnology(int player, int technologyId) {
         (size_t)technologyId >= assets_.dat().techs.size())
         return false;
     researchedTechs_[(size_t)player].insert(technologyId);
+    techGeneration_++;
     refreshAutomaticTechnologies(player);
     return true;
 }
@@ -2815,6 +2818,7 @@ void Game::refreshAutomaticTechnologies(int player) {
                         player, technology))
                     continue;
             researchedTechs_[(size_t)player].insert((int)id);
+            techGeneration_++;
             changed = true;
         }
     }
@@ -2828,7 +2832,8 @@ void Game::refreshAllAutomaticTechnologies() {
 
 bool Game::unitAvailable(int player, int unitId) const {
     if (player < 0 ||
-        (size_t)player >= researchedTechs_.size())
+        (size_t)player >= researchedTechs_.size() ||
+        (size_t)player >= availableCache_.size() || unitId < 0)
         return false;
     if (!(fullTechTreeCheat_ &&
           player == localPlayer_) &&
@@ -2837,63 +2842,60 @@ bool Game::unitAvailable(int player, int unitId) const {
     // Farm availability cannot depend on its MADE technology because
     // that automatic technology is only granted after a farm exists.
     if (unitId == 50) return true;
-    bool available = false;
-    for (int technologyId :
-         researchedTechs_[(size_t)player]) {
-        if (technologyId < 0 ||
-            (size_t)technologyId >= assets_.dat().techs.size())
-            continue;
-        const dat::Tech &technology =
-            assets_.dat().techs[(size_t)technologyId];
-        if (technology.effectId < 0 ||
-            (size_t)technology.effectId >=
-                assets_.dat().effects.size())
-            continue;
-        for (const dat::EffectCommand &command :
-             assets_.dat().effects[
-                 (size_t)technology.effectId].commands)
-            if (command.type == 2 &&
-                command.a == unitId)
-                available = command.b != 0;
+    // Menus ask this for every unit every frame; walking every researched
+    // tech's effects each time cost ~30% of a frame on the Vita. Cache the
+    // enable/disable (effect type 2) results per tech generation.
+    std::vector<int8_t> &cache = availableCache_[(size_t)player];
+    if (availableCacheGeneration_[(size_t)player] != techGeneration_) {
+        availableCacheGeneration_[(size_t)player] = techGeneration_;
+        cache.assign(4096, 0);
+        for (int technologyId : researchedTechs_[(size_t)player]) {
+            if (technologyId < 0 || (size_t)technologyId >= assets_.dat().techs.size()) continue;
+            const dat::Tech &technology = assets_.dat().techs[(size_t)technologyId];
+            if (technology.effectId < 0 ||
+                (size_t)technology.effectId >= assets_.dat().effects.size())
+                continue;
+            for (const dat::EffectCommand &command :
+                 assets_.dat().effects[(size_t)technology.effectId].commands)
+                if (command.type == 2 && command.a >= 0 && command.a < 4096)
+                    cache[(size_t)command.a] = command.b != 0 ? 1 : 0;
+        }
     }
-    return available;
+    return (size_t)unitId < cache.size() && cache[(size_t)unitId];
 }
 
 const dat::Unit *Game::effectiveUnitForPlayer(
     int player, const dat::Unit *unit) const {
     if (!unit || player < 0 ||
-        (size_t)player >= researchedTechs_.size())
+        (size_t)player >= researchedTechs_.size() ||
+        (size_t)player >= upgradeCache_.size())
         return unit;
+    // Upgrade map (effect type 3, A -> B; the first researched tech that
+    // upgrades A wins), rebuilt only when the researched set changes.
+    std::map<int, int> &upgrades = upgradeCache_[(size_t)player];
+    if (upgradeCacheGeneration_[(size_t)player] != techGeneration_) {
+        upgradeCacheGeneration_[(size_t)player] = techGeneration_;
+        upgrades.clear();
+        for (int technologyId : researchedTechs_[(size_t)player]) {
+            if (technologyId < 0 || (size_t)technologyId >= assets_.dat().techs.size()) continue;
+            const dat::Tech &technology = assets_.dat().techs[(size_t)technologyId];
+            if (technology.effectId < 0 ||
+                (size_t)technology.effectId >= assets_.dat().effects.size())
+                continue;
+            for (const dat::EffectCommand &command :
+                 assets_.dat().effects[(size_t)technology.effectId].commands)
+                if (command.type == 3) upgrades.emplace(command.a, command.b);
+        }
+    }
     int unitId = unit->id;
     const int civilization = civilizationForPlayer(player);
     std::set<int> visited;
     while (visited.insert(unitId).second) {
-        int upgradedId = unitId;
-        for (int technologyId :
-             researchedTechs_[(size_t)player]) {
-            if (technologyId < 0 ||
-                (size_t)technologyId >=
-                    assets_.dat().techs.size())
-                continue;
-            const dat::Tech &technology =
-                assets_.dat().techs[(size_t)technologyId];
-            if (technology.effectId < 0 ||
-                (size_t)technology.effectId >=
-                    assets_.dat().effects.size())
-                continue;
-            for (const dat::EffectCommand &command :
-                 assets_.dat().effects[
-                     (size_t)technology.effectId].commands)
-                if (command.type == 3 &&
-                    command.a == unitId) {
-                    upgradedId = command.b;
-                    break;
-                }
-            if (upgradedId != unitId) break;
-        }
-        if (upgradedId == unitId) break;
-        unitId = upgradedId;
+        const auto found = upgrades.find(unitId);
+        if (found == upgrades.end() || found->second == unitId) break;
+        unitId = found->second;
     }
+    if (unitId == unit->id) return unit;
     return findUnit(civilization, unitId);
 }
 
@@ -4150,19 +4152,32 @@ bool Game::isRepairableBy(
         return false;
     if (target.unit->type == dat::UT_Building)
         return true;
-    if (worker.unit->id < 0 ||
-        (size_t)worker.unit->id >=
-            assets_.dat().unitHeaders.size())
+    // Units: the repairer variant's repair tasks (action 106) list the
+    // mechanical classes it can fix (11-17 mechs/ships, 37-40 ...). The old
+    // check read action 3, which is garrison.
+    const dat::Unit *repairer = repairerUnit(worker);
+    if (!repairer || repairer->id < 0 ||
+        (size_t)repairer->id >= assets_.dat().unitHeaders.size())
         return false;
     for (const dat::Task &task :
-         assets_.dat()
-             .unitHeaders[(size_t)worker.unit->id]
-             .tasks)
-        if (task.actionType == 3 &&
-            (task.classId < 0 ||
-             task.classId == target.unit->cls))
+         assets_.dat().unitHeaders[(size_t)repairer->id].tasks)
+        if (task.actionType == 106 && task.classId >= 0 &&
+            task.classId == target.unit->cls)
             return true;
-    return false;
+    // Clone Campaigns classes missing from that list: assault mechs (53)
+    // and air transports (59) are mechanical too.
+    return target.unit->cls == 53 || target.unit->cls == 59;
+}
+
+const dat::Unit *Game::repairerUnit(const Object &worker) const {
+    if (!worker.unit) return nullptr;
+    std::string name = worker.unit->name;
+    if (name.size() < 2 || name.back() != '1' ||
+        (name[name.size() - 2] != 'A' && name[name.size() - 2] != 'B'))
+        return nullptr;
+    name.pop_back();
+    name += "10";
+    return findUnit(civilizationForPlayer(worker.player), name);
 }
 
 bool Game::issueRepairCommand(
@@ -5563,6 +5578,18 @@ void Game::updateConstruction(float dt) {
         if (building.constructionRemaining > 0)
             continue;
         building.underConstruction = false;
+        // Buildings placed as a construction stand-in (BLDG-FORT-BUILD 1211)
+        // become their stack unit when finished (the Fortress, 82): the
+        // stand-in has no garrison, units or research of its own.
+        if (building.unit->stackUnitId >= 0)
+            if (const dat::Unit *finished = effectiveUnitForPlayer(
+                    building.player,
+                    findUnit(civilizationForPlayer(building.player), building.unit->stackUnitId))) {
+                building.unit = finished;
+                building.maxHitPoints = (float)std::max(
+                    1, (int)std::lround(modifiedUnitAttribute(building, 0, finished->hitPoints)));
+                configureGate(building);
+            }
         building.hitPoints = building.maxHitPoints;
         if (building.unit->cls == 7) syncFarmTerrain(building); // food + grown field
         // Building set_state 0 -> 2 (0x554710) plays master+0x1c8, the
@@ -6125,6 +6152,7 @@ void Game::activateCheat(size_t index, int screenW, int screenH) {
         break;
     case CheatAction::ForceTech:
         fullTechTreeCheat_ = true;
+        techGeneration_++;
         disabledTechs_[(size_t)localPlayer_].clear();
         disabledUnits_[(size_t)localPlayer_].clear();
         refreshAutomaticTechnologies(localPlayer_);
@@ -6841,6 +6869,15 @@ void Game::applyBlast(uint32_t sourceId, int sourcePlayer, float x, float y, uin
                       float width, int level, int fallbackDamage) {
     if (width <= 0 || level >= 3) return;
     const Object *source = findObject(sourceId);
+    // The blast spreads from the struck object's footprint, not just its
+    // centre: troops standing next to a shelled building are caught too.
+    float halfX = 0.0f, halfY = 0.0f;
+    if (const Object *primary = findObject(primaryId); primary && primary->unit) {
+        halfX = std::max(0.0f, primary->unit->collisionSize[0]);
+        halfY = std::max(0.0f, primary->unit->collisionSize[1]);
+        x = primary->x;
+        y = primary->y;
+    }
     std::vector<uint32_t> victims;
     for (const Object &other : objects_) {
         if (!other.active || other.hidden || !other.unit || other.spawnId == primaryId ||
@@ -6849,7 +6886,8 @@ void Game::applyBlast(uint32_t sourceId, int sourcePlayer, float x, float y, uin
             continue;
         const bool enemy = sourcePlayer > 0 && !isFriendlyPlayer(sourcePlayer, other.player);
         if (!enemy && level > 2) continue;
-        const float dx = other.x - x, dy = other.y - y;
+        const float dx = std::max(0.0f, std::abs(other.x - x) - halfX);
+        const float dy = std::max(0.0f, std::abs(other.y - y) - halfY);
         const float reach = width + collisionRadius(other);
         if (dx * dx + dy * dy > reach * reach) continue;
         victims.push_back(other.spawnId);
@@ -7036,10 +7074,16 @@ void Game::updateAttack(Object &source, float dt) {
             return;
     }
     attackPathsComputed_++;
+    // Backing off from a target inside the minimum range is a plain move to
+    // the firing spot: "arrive within max range of the target" would count
+    // as already arrived and the unit would never step back.
+    const bool backingOff =
+        minimumRange(source) > 0 && edgeGap + 0.05f < minimumRange(source);
     source.attackRepathTime =
-        issueMove(source, destinationX, destinationY, target,
-                  std::max(0.05f, source.unit->maxRange - 0.05f))
-            ? 0.5f
+        (backingOff ? issueMove(source, destinationX, destinationY, nullptr, 0.2f)
+                    : issueMove(source, destinationX, destinationY, target,
+                                std::max(0.05f, source.unit->maxRange - 0.05f)))
+            ? (backingOff ? 0.3f : 0.5f)
             : 1.5f;
 }
 
@@ -8779,6 +8823,7 @@ void Game::executeEffect(const ScenarioEffect &effect) {
             (size_t)sourcePlayer <
                 disabledTechs_.size()) {
             disabledTechs_[(size_t)sourcePlayer].erase(technology);
+            techGeneration_++;
             refreshAutomaticTechnologies(sourcePlayer);
         }
         break;
@@ -8789,11 +8834,13 @@ void Game::executeEffect(const ScenarioEffect &effect) {
             !(fullTechTreeCheat_ &&
               sourcePlayer == localPlayer_))
             disabledTechs_[(size_t)sourcePlayer].insert(technology);
+            techGeneration_++;
         break;
     case 34:
         if (sourcePlayer >= 0 &&
             (size_t)sourcePlayer <
                 disabledUnits_.size())
+            techGeneration_++;
             disabledUnits_[(size_t)sourcePlayer].erase(
                 technology);
         break;
@@ -8803,6 +8850,7 @@ void Game::executeEffect(const ScenarioEffect &effect) {
                 disabledUnits_.size() &&
             !(fullTechTreeCheat_ &&
               sourcePlayer == localPlayer_))
+            techGeneration_++;
             disabledUnits_[(size_t)sourcePlayer].insert(
                 technology);
         break;
@@ -10951,11 +10999,26 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 if (pickFrame(*graphic, sheet->frames.size(), projectile.facing,
                               projectile.animTime, 0, frameIndex, flip) &&
                     frameIndex < sheet->frames.size() && sheet->frames[frameIndex].laser) {
+                    // Each marked point is a bolt (the heavy assault mech's
+                    // frames carry two: its twin guns); draw each as a streak
+                    // along the flight direction.
                     const SpriteFrame &f = sheet->frames[frameIndex];
                     const float sign = flip ? -1.0f : 1.0f;
-                    laserBolts.push_back({sx + sign * f.laserX0, sy + f.laserY0,
-                                          sx + sign * f.laserX1, sy + f.laserY1,
-                                          (float)f.laserR, (float)f.laserG, (float)f.laserB});
+                    float ax = 0, ay = 0, bx = 0, by = 0;
+                    toScreen(0.0f, 0.0f, ax, ay);
+                    toScreen(std::cos(projectile.facing), std::sin(projectile.facing), bx, by);
+                    float dirX = bx - ax, dirY = by - ay;
+                    const float dirLength = std::max(0.001f, std::sqrt(dirX * dirX + dirY * dirY));
+                    dirX /= dirLength;
+                    dirY /= dirLength;
+                    const float half = 9.0f / zoom_;
+                    for (const auto &point : {std::array<float, 2>{f.laserX0, f.laserY0},
+                                              std::array<float, 2>{f.laserX1, f.laserY1}}) {
+                        const float px = sx + sign * point[0], py = sy + point[1];
+                        laserBolts.push_back({px - dirX * half, py - dirY * half, px + dirX * half,
+                                              py + dirY * half, (float)f.laserR, (float)f.laserG,
+                                              (float)f.laserB});
+                    }
                     continue;
                 }
             }
@@ -11073,16 +11136,10 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         auto drawEdge = [&](const std::array<float, 2> &from,
                             const std::array<float, 2> &to,
                             float thickness, uint8_t color) {
-            const float dx = to[0] - from[0], dy = to[1] - from[1];
-            const int steps =
-                std::max(1, (int)std::ceil(std::max(std::abs(dx), std::abs(dy))));
+            // One rotated quad per edge (the per-pixel squares this used to
+            // draw cost ~1700 quads for a selected building on the Vita).
             const uint8_t cr = color ? lineR : 0, cg = color ? lineG : 0, cb = color ? lineB : 0;
-            for (int step = 0; step <= steps; step++) {
-                const float amount = (float)step / steps;
-                r.fillRect(from[0] + dx * amount - thickness * 0.5f,
-                           from[1] + dy * amount - thickness * 0.5f,
-                           thickness, thickness, cr, cg, cb, 255);
-            }
+            r.drawLine(from[0], from[1], to[0], to[1], thickness, cr, cg, cb, 255);
         };
         if (object.unit->type != dat::UT_Building) {
             const float radiusX =
@@ -11292,24 +11349,8 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             [&](const std::array<float, 2> &from,
                 const std::array<float, 2> &to,
                 float thickness) {
-                const float dx = to[0] - from[0];
-                const float dy = to[1] - from[1];
-                const int steps = std::max(
-                    1, (int)std::ceil(
-                           std::max(std::abs(dx),
-                                    std::abs(dy))));
-                for (int step = 0; step <= steps;
-                     step++) {
-                    const float amount =
-                        (float)step / steps;
-                    r.fillRect(
-                        from[0] + dx * amount -
-                            thickness * 0.5f,
-                        from[1] + dy * amount -
-                            thickness * 0.5f,
-                        thickness, thickness,
-                        red, green, 30, alpha);
-                }
+                r.drawLine(from[0], from[1], to[0], to[1], thickness,
+                           red, green, 30, alpha);
             };
         for (size_t point = 0;
              point < footprint.size(); point++)
@@ -11425,24 +11466,12 @@ void Game::render(Renderer &r, int screenW, int screenH) {
 
     // Laser bolts: a soft wide glow and a bright core along the segment.
     for (const auto &bolt : laserBolts) {
-        const float dx = bolt[2] - bolt[0], dy = bolt[3] - bolt[1];
-        const float length = std::sqrt(dx * dx + dy * dy);
-        const int steps = std::max(1, (int)(length * zoom_ / 1.5f));
         const uint8_t cr = (uint8_t)bolt[4], cg = (uint8_t)bolt[5], cb = (uint8_t)bolt[6];
         const uint8_t hr = (uint8_t)std::min(255.0f, bolt[4] * 0.5f + 128.0f);
         const uint8_t hg = (uint8_t)std::min(255.0f, bolt[5] * 0.5f + 128.0f);
         const uint8_t hb = (uint8_t)std::min(255.0f, bolt[6] * 0.5f + 128.0f);
-        const float glow = 6.0f / zoom_, core = 3.0f / zoom_;
-        for (int i = 0; i <= steps; i++) {
-            const float t = (float)i / steps;
-            const float px = bolt[0] + dx * t, py = bolt[1] + dy * t;
-            r.fillRect(px - glow * 0.5f, py - glow * 0.5f, glow, glow, cr, cg, cb, 90);
-        }
-        for (int i = 0; i <= steps; i++) {
-            const float t = (float)i / steps;
-            const float px = bolt[0] + dx * t, py = bolt[1] + dy * t;
-            r.fillRect(px - core * 0.5f, py - core * 0.5f, core, core, hr, hg, hb, 255);
-        }
+        r.drawLine(bolt[0], bolt[1], bolt[2], bolt[3], 6.0f / zoom_, cr, cg, cb, 90);
+        r.drawLine(bolt[0], bolt[1], bolt[2], bolt[3], 3.0f / zoom_, hr, hg, hb, 255);
     }
     for (const auto &point : blasterGlowPoints) {
         const float glowWidth = 6.0f / zoom_;

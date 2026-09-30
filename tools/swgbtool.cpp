@@ -3766,8 +3766,122 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         for (int f = 0; f < 30 * 25 && g.objectActive(close) && g.objectHitPoints(close) >= hpC; f++)
             g.update(1.0f / 30.0f, {});
         const bool firedClose = !g.objectActive(close) || g.objectHitPoints(close) < hpC;
-        report("blast-minrange", splashed && firedClose,
-               "splash " + std::to_string(splashed) + " closeHit " + std::to_string(firedClose));
+        // Shelling a building also hits troops standing beside it.
+        const uint32_t hut = g.spawnObjectForTesting(3, 70, 2, 40.0f, 40.0f);
+        const uint32_t guard = g.spawnObjectForTesting(3, 460, 2, 41.9f, 40.0f);
+        g.setAttackModeForTesting(guard, 3);
+        g.moveObjectForTesting(mech, 40.0f, 34.0f);
+        const float hpG = g.objectHitPoints(guard);
+        g.issueAttackForTesting(mech, hut);
+        for (int f = 0; f < 30 * 20 && g.objectActive(guard) && g.objectHitPoints(guard) >= hpG; f++)
+            g.update(1.0f / 30.0f, {});
+        const bool besideHit = !g.objectActive(guard) || g.objectHitPoints(guard) < hpG;
+        report("blast-minrange", splashed && firedClose && besideHit,
+               "splash " + std::to_string(splashed) + " closeHit " + std::to_string(firedClose) +
+                   " besideBuilding " + std::to_string(besideHit));
+    }
+    // 28) A worker-built fortress at Tech Level 3 opens its menu (Empire),
+    // on the Vita's compact test map.
+    {
+        Game g(assets);
+        if (!g.initCompactTestMap(0x5A17u, 64, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        g.researchTechnology(1, 1);
+        g.researchTechnology(1, 2);
+        g.setResourceForTesting(1, 1, 5000); g.setResourceForTesting(1, 2, 5000);
+        g.setResourceForTesting(1, 3, 5000); g.setResourceForTesting(1, 0, 5000);
+        const uint32_t worker = g.spawnObjectForTesting(1, 83, 1, 30.0f, 12.0f);
+        g.update(1.0f / 30.0f, {});
+        float fx0 = -1, fy0 = -1;
+        for (int y = 8; y < 56 && fx0 < 0; y += 2)
+            for (int x = 8; x < 56 && fx0 < 0; x += 2) {
+                bool clear = true;
+                for (int dy = -3; dy <= 3 && clear; dy++)
+                    for (int dx = -3; dx <= 3 && clear; dx++)
+                        clear = g.positionPassableForTesting(worker, x + dx + 0.5f, y + dy + 0.5f) &&
+                                g.terrainAtForTesting(x + dx, y + dy) != 1;
+                if (clear) { fx0 = x + 0.5f; fy0 = y + 0.5f; }
+            }
+        g.moveObjectForTesting(worker, fx0 - 4.0f, fy0);
+        const uint32_t fort = g.spawnFoundationForTesting(1, 1211, 1, fx0, fy0, {worker}); // the build-menu Fortress
+        for (int f = 0; f < 30 * 400; f++) {
+            g.update(1.0f / 30.0f, {});
+            bool building = false;
+            for (uint32_t id : g.underConstructionObjectIds()) building |= id == fort;
+            if (!building) break;
+        }
+        std::string ids;
+        for (int id : g.productionOptionIds(fort)) ids += std::to_string(id) + ",";
+        std::string research;
+        for (int id : g.researchOptionIds(fort)) research += std::to_string(id) + ",";
+        g.clearSelectionForTesting();
+        g.selectObjectForTesting(fort);
+        InputState tri; tri.screenW = 960; tri.screenH = 544; tri.cycleAttackMode = true;
+        g.update(0.001f, tri);
+        const bool open = g.actionMenuOpenForTesting();
+        g.lookAtObject(fort);
+        shot(g, "_fort_tl3");
+        if (open) { g.update(0.001f, tri); }
+        const bool garrisoned = g.garrisonForTesting(worker, fort);
+        for (int f = 0; f < 30 * 10; f++) g.update(1.0f / 30.0f, {});
+        report("fortress-tl3", open && !ids.empty() && g.objectUnitId(fort) == 82 && garrisoned &&
+                                   g.garrisonedCount(fort) == 1,
+               "unit " + std::to_string(g.objectUnitId(fort)) + " open " + std::to_string(open) + " units [" + ids +
+                   "] research [" + research + "]");
+    }
+    // 29) Empire heavy assault mech (min range 3, 1 after Walker Research)
+    // attacked by a worker: it backs off and shoots back.
+    for (int researched = 0; researched < 2; researched++) {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        g.setDiplomacyForTesting(1, 2, 3);
+        g.setDiplomacyForTesting(2, 1, 3);
+        if (researched) g.researchTechnology(1, 164);
+        const uint32_t mech = g.spawnObjectForTesting(1, 603, 1, 40.0f, 30.0f);
+        const uint32_t worker = g.spawnObjectForTesting(3, 83, 2, 41.0f, 30.0f);
+        g.update(1.0f / 30.0f, {});
+        g.issueAttackForTesting(worker, mech);
+        const float hp0 = g.objectHitPoints(worker);
+        const auto p0 = g.objectPosition(mech);
+        float moved = 0;
+        (void)hp0;
+        printf("   min range %.2f\n", g.minimumRangeForTesting(mech));
+        int f = 0;
+        for (; f < 30 * 60 && g.objectActive(worker); f++) {
+            g.update(1.0f / 30.0f, {});
+            const auto p = g.objectPosition(mech);
+            moved = std::max(moved, std::hypot(p[0] - p0[0], p[1] - p0[1]));
+            if (f % 150 == 0)
+                printf("   t=%d mech %.2f,%.2f hp %.0f sp %.0f worker %.2f,%.2f hp %.0f\n", f / 30, p[0], p[1],
+                       g.objectHitPoints(mech), g.objectShieldPoints(mech), g.objectPosition(worker)[0],
+                       g.objectPosition(worker)[1], g.objectHitPoints(worker));
+        }
+        const bool hit = !g.objectActive(worker);
+        printf("  mech %s\n", g.describeObjectForTesting(mech).substr(0, 220).c_str());
+        report(researched ? "minrange-melee-researched" : "minrange-melee", hit,
+               "hit " + std::to_string(hit) + " moved " + std::to_string(moved));
+    }
+    // 30) Workers repair mechanical units (strike mech, heavy assault mech),
+    // not troopers.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        for (int r = 0; r < 4; r++) g.setResourceForTesting(1, r, 1000);
+        const uint32_t worker = g.spawnObjectForTesting(1, 83, 1, 40.0f, 30.0f);
+        const uint32_t mech = g.spawnObjectForTesting(1, 603, 1, 42.0f, 30.0f);
+        const uint32_t trooper = g.spawnObjectForTesting(1, 460, 1, 40.0f, 33.0f);
+        g.update(1.0f / 30.0f, {});
+        g.damageObjectForTesting(mech, 100);
+        g.damageObjectForTesting(trooper, 10);
+        const bool trooperRefused = !g.issueRepairForTesting(worker, trooper);
+        const bool ordered = g.issueRepairForTesting(worker, mech);
+        const float hp0 = g.objectHitPoints(mech);
+        for (int f = 0; f < 30 * 20; f++) g.update(1.0f / 30.0f, {});
+        report("repair-mech", trooperRefused && ordered && g.objectHitPoints(mech) > hp0 + 5.0f,
+               "trooperRefused " + std::to_string(trooperRefused) + " ordered " + std::to_string(ordered) +
+                   " hp " + std::to_string(hp0) + "->" + std::to_string(g.objectHitPoints(mech)));
     }
     printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;
@@ -3789,6 +3903,7 @@ struct CountingRenderer : SoftRenderer {
     void drawMasked(Texture *t, const Quad &q, Texture *m, const Quad &) override { note(t, m, q); }
     void drawMaskedTinted(Texture *t, const Quad &q, Texture *m, const Quad &, uint8_t, uint8_t, uint8_t, uint8_t) override { note(t, m, q); }
     void drawTinted(Texture *t, const Quad &q, uint8_t, uint8_t, uint8_t, uint8_t) override { note(t, nullptr, q); }
+    void drawLine(float x0, float y0, float x1, float y1, float t, uint8_t, uint8_t, uint8_t, uint8_t) override { note((Texture *)1, nullptr, Quad{x0, y0, std::abs(x1 - x0) + t, std::abs(y1 - y0) + t, 0, 0, 0, 0}); }
     void fillRect(float x, float y, float w, float h, uint8_t, uint8_t, uint8_t, uint8_t) override { note((Texture *)1, nullptr, Quad{x, y, w, h, 0, 0, 0, 0}); }
 };
 
@@ -3830,8 +3945,10 @@ static int cmdBenchUi(const char *dataDir) {
     g.update(0.001f, in);
     printf("menu open %d\n", g.actionMenuOpenForTesting());
     measure("worker menu");
+    g.update(0.001f, in); // close
     g.clearSelectionForTesting();
     g.selectObjectForTesting(cc);
+    measure("cc selected");
     g.update(0.001f, in);
     measure("cc menu");
     in = {}; in.screenW = 960; in.screenH = 544; in.actionTabRight = true;

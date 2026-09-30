@@ -2,6 +2,7 @@
 // Asset manager: owns the DRS archives, palette and dat, and turns SLPs into
 // GPU texture atlases on demand.
 #pragma once
+#include <array>
 #include <algorithm>
 
 #include "../core/blendomatic.h"
@@ -137,6 +138,17 @@ private:
     bool selectionRingAttempted_ = false;
     std::vector<std::vector<SpriteFrame>> blendMasks_;
     size_t textureBytes_ = 0;
+    // Direct-mapped front cache for sheet lookups (the renderer asks for the
+    // same few sheets per tile/sprite every frame; std::map lookups plus the
+    // use-stamp map write were ~10% of a frame).
+    struct SheetCacheEntry {
+        uint64_t key = ~0ull;
+        const SpriteSheet *sheet = nullptr;
+        uint64_t stamped = 0;
+    };
+    std::array<SheetCacheEntry, 256> sheetCache_{};
+    const SpriteSheet *cachedSheet(uint64_t key);
+    void rememberSheet(uint64_t key, const SpriteSheet *sheet);
     size_t buildCount_ = 0;
     size_t terrainTextureBudget_ = SIZE_MAX;
     uint64_t terrainGeneration_ = 0;

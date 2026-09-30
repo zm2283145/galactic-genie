@@ -266,6 +266,7 @@ public:
         if (Object *o = findObject(spawnId)) o->attackMode = (AttackMode)mode;
     }
     size_t projectileCountForTesting() const { return projectiles_.size(); }
+    float minimumRangeForTesting(uint32_t id) const { const Object *o = findObject(id); return o ? minimumRange(*o) : -1.0f; }
     void clearSelectionForTesting() { clearSelection(); }
     int terrainAtForTesting(int x, int y) const { return terrainAt(x, y); }
     void setObjectResourceForTesting(uint32_t spawnId, float amount) {
@@ -519,6 +520,7 @@ private:
                       int32_t garrisonedInId = -1, bool triggerAddressable = true);
     Object *findObject(uint32_t spawnId);
     bool isFlatFootprint(const Object &object) const;
+    const dat::Unit *repairerUnit(const Object &worker) const;
     Object *objectAtScreenRaw(float screenX, float screenY, int screenW, int screenH, bool includeGatherables);
     void applyBlast(uint32_t sourceId, int sourcePlayer, float x, float y, uint32_t primaryId,
                     float width, int level, int fallbackDamage);
@@ -933,6 +935,12 @@ private:
     size_t cheatMenuSelection_ = 0;
     bool forceBuildCheat_ = false;
     bool fullTechTreeCheat_ = false;
+    // Researched-tech derived caches (see unitAvailable/effectiveUnitForPlayer).
+    uint64_t techGeneration_ = 1;
+    mutable std::array<std::vector<int8_t>, 17> availableCache_{};
+    mutable std::array<uint64_t, 17> availableCacheGeneration_{};
+    mutable std::array<std::map<int, int>, 17> upgradeCache_{};
+    mutable std::array<uint64_t, 17> upgradeCacheGeneration_{};
     bool forceExploreCheat_ = false;
     bool forceSightCheat_ = false;
     bool garrisonCursorActive_ = false;

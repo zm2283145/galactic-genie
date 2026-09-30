@@ -110,6 +110,17 @@ void SoftRenderer::drawTinted(Texture *tex, const Quad &q, uint8_t r, uint8_t g,
     }
 }
 
+void SoftRenderer::drawLine(float x0, float y0, float x1, float y1, float thickness,
+                            uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    const float dx = x1 - x0, dy = y1 - y0;
+    const int steps = std::max(1, (int)std::ceil(std::max(std::abs(dx), std::abs(dy)) * scale_));
+    for (int i = 0; i <= steps; i++) {
+        const float t = (float)i / steps;
+        fillRect(x0 + dx * t - thickness * 0.5f, y0 + dy * t - thickness * 0.5f, thickness, thickness,
+                 r, g, b, a);
+    }
+}
+
 void SoftRenderer::drawMasked(Texture *tex, const Quad &q, Texture *mask, const Quad &maskQ) {
     drawCalls_++;
     auto *t = static_cast<SoftTexture *>(tex);
