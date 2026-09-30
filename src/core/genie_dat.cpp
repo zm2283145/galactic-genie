@@ -381,7 +381,7 @@ void readUnit(R &r, Unit &u) {
         u.reloadTime = r.f32();
         u.projectileUnitId = r.i16();
         u.accuracyPercent = r.i16();
-        r.u8(); // break off combat
+        u.breakOffCombat = r.u8();
         u.frameDelay = r.i16();
         r.array(u.graphicDisplacement, 3);
         u.blastAttackLevel = r.u8();

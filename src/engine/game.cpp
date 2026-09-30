@@ -27,9 +27,10 @@ constexpr size_t kCursorNormal = 0;
 constexpr size_t kCursorCommand = 2;
 constexpr size_t kCursorAttack = 11;
 constexpr size_t kCursorMove = 5;
-constexpr size_t kCursorGarrison = 12;
+constexpr size_t kCursorGarrison = 13;
 constexpr size_t kCursorGather = 6;
 constexpr size_t kCursorRepair = 9;
+constexpr size_t kCursorAttackGround = 10;
 constexpr size_t kCursorPlacement = 7;
 constexpr size_t kCursorGatherPoint = 18;
 constexpr int kCommandIconSlp = 50721;
@@ -37,10 +38,14 @@ constexpr size_t kCommandGarrisonIcon = 1;
 constexpr size_t kCommandEjectIcon = 2;
 constexpr size_t kCommandRepairIcon = 28; // exe: repair button (help 4927)
 constexpr size_t kCommandDestroyIcon = 59; // exe: kill/destroy button (help 4941)
+constexpr size_t kCommandAttackGroundIcon = 60; // exe 0x503aca: action 0x17, help 4923
 constexpr size_t kCommandLockGateIcon = 47;
 constexpr size_t kCommandUnlockGateIcon = 48;
 constexpr size_t kCommandPowerStatusIcon = 49;
 constexpr size_t kCommandShieldStatusIcon = 10;
+constexpr int kInterfaceButtonSound = 50300; // button1.wav
+constexpr int kInterfaceCancelSound = 50301; // button2.wav
+constexpr int kInterfaceCannotDoSound = 50303; // cantdo.wav
 // Stance buttons (exe 0x503800): Aggressive, Defensive, Stand Ground, No
 // Attack. The pressed (active) variants are drawn for the current stance.
 constexpr size_t kStanceIcons[4] = {9, 10, 11, 50};
@@ -1907,6 +1912,36 @@ bool Game::canAttackTarget(
     }
 }
 
+// The command-panel test reached through the selected object's virtual method
+// at battlegrounds_x1.exe 0x503aca. Attack Ground is exposed by combat units
+// with a projectile and a non-zero blast radius. This data-driven check also
+// includes the Blockade Runner, Star Destroyer, and Death Star cheat units.
+bool Game::canAttackGround(
+    const Object &source) const {
+    if (!canAttack(source) || !source.unit ||
+        source.unit->type == dat::UT_Building ||
+        source.unit->blastWidth <= 0.0f)
+        return false;
+    const int projectileId =
+        (int)std::lround(
+            modifiedUnitAttribute(
+                source, 16,
+                source.unit->projectileUnitId));
+    return projectileId >= 0 &&
+           findUnit(
+               civilizationForPlayer(source.player),
+               projectileId);
+}
+
+bool Game::selectedCanAttackGround() const {
+    for (const Object &object : objects_)
+        if (object.selected &&
+            object.player == localPlayer_ &&
+            canAttackGround(object))
+            return true;
+    return false;
+}
+
 void Game::attackApproachPoint(
     const Object &source, const Object &target,
     float angle, float centerDistance,
@@ -2278,6 +2313,8 @@ bool Game::hasSelectedAttacker() const {
 void Game::clearSelection() {
     for (Object &object : objects_) object.selected = false;
     selectionOrder_.clear();
+    attackGroundCursorActive_ = false;
+    unitCommandCursorActive_ = false;
 }
 
 void Game::selectObject(Object &object, bool first) {
@@ -2569,13 +2606,13 @@ bool Game::handleSelectionPanelClick(float screenX, float screenY,
     const bool canEnterGarrisonMode =
         std::any_of(
             selected.begin(), selected.end(),
-            [](const Object *object) {
+            [&](const Object *object) {
                 return object && object->active &&
                        !object->hidden && object->unit &&
                        object->unit->speed > 0 &&
                        object->unit->type !=
                            dat::UT_Building &&
-                       object->unit->flyMode == 0;
+                       hasAnyGarrisonTask(*object);
             });
     const bool canEnterRepairMode =
         std::any_of(
@@ -2584,6 +2621,12 @@ bool Game::handleSelectionPanelClick(float screenX, float screenY,
                 return object &&
                        isWorker(*object);
             });
+    Object *selectedCommandUnit = nullptr;
+    for (Object *object : selected)
+        if (object && !unitCommands(*object).empty()) {
+            selectedCommandUnit = object;
+            break;
+        }
     Object *selectedAttacker = nullptr;
     // Workers and buildings have no stances in the original.
     for (Object *object : selected)
@@ -2603,6 +2646,8 @@ bool Game::handleSelectionPanelClick(float screenX, float screenY,
         garrisonCursorActive_ =
             !garrisonCursorActive_;
         repairCursorActive_ = false;
+        attackGroundCursorActive_ = false;
+        unitCommandCursorActive_ = false;
         actionMenuOpen_ = false;
         actionMenuObjectId_ = 0;
         statusMessage_ =
@@ -2610,6 +2655,10 @@ bool Game::handleSelectionPanelClick(float screenX, float screenY,
                 ? "SELECT A BUILDING TO GARRISON"
                 : "GARRISON CANCELLED";
         statusTime_ = 3.0f;
+        playInterfaceFeedback(
+            garrisonCursorActive_
+                ? kInterfaceButtonSound
+                : kInterfaceCancelSound);
         return true;
     }
     if (canEnterRepairMode &&
@@ -2620,6 +2669,8 @@ bool Game::handleSelectionPanelClick(float screenX, float screenY,
         repairCursorActive_ =
             !repairCursorActive_;
         garrisonCursorActive_ = false;
+        attackGroundCursorActive_ = false;
+        unitCommandCursorActive_ = false;
         actionMenuOpen_ = false;
         actionMenuObjectId_ = 0;
         statusMessage_ =
@@ -2627,6 +2678,10 @@ bool Game::handleSelectionPanelClick(float screenX, float screenY,
                 ? "SELECT A UNIT OR BUILDING TO REPAIR"
                 : "REPAIR CANCELLED";
         statusTime_ = 3.0f;
+        playInterfaceFeedback(
+            repairCursorActive_
+                ? kInterfaceButtonSound
+                : kInterfaceCancelSound);
         return true;
     }
     if (screenX >= commandsX + 116.0f &&
@@ -2635,6 +2690,8 @@ bool Game::handleSelectionPanelClick(float screenX, float screenY,
         screenY < panelY + 64.0f) {
         garrisonCursorActive_ = false;
         repairCursorActive_ = false;
+        attackGroundCursorActive_ = false;
+        unitCommandCursorActive_ = false;
         actionMenuOpen_ = false;
         actionMenuObjectId_ = 0;
         destroyLastSelected();
@@ -2655,6 +2712,30 @@ bool Game::handleSelectionPanelClick(float screenX, float screenY,
         actionMenuScroll_ = 0;
         garrisonCursorActive_ = false;
         repairCursorActive_ = false;
+        attackGroundCursorActive_ = false;
+        unitCommandCursorActive_ = false;
+        playInterfaceFeedback(
+            kInterfaceButtonSound);
+        return true;
+    }
+    if (selectedCommandUnit &&
+        screenX >= commandsX + 220.0f &&
+        screenX < commandsX + 266.0f &&
+        screenY >= panelY + 18.0f &&
+        screenY < panelY + 64.0f) {
+        actionMenuOpen_ = true;
+        actionMenuObjectId_ =
+            selectedCommandUnit->spawnId;
+        actionMenuTab_ =
+            ActionMenuTab::Commands;
+        actionMenuSelection_ = 0;
+        actionMenuScroll_ = 0;
+        garrisonCursorActive_ = false;
+        repairCursorActive_ = false;
+        attackGroundCursorActive_ = false;
+        unitCommandCursorActive_ = false;
+        playInterfaceFeedback(
+            kInterfaceButtonSound);
         return true;
     }
     if (selected.size() == 1) {
@@ -3098,10 +3179,38 @@ void Game::applyUnitUpgrades(int player) {
         rebuildAdjacency();
 }
 
-std::vector<int> Game::researchOptions(
+const std::vector<int> &Game::researchOptions(
     const Object &building) const {
-    std::vector<int> options;
-    if (building.gate) return options;
+    uint64_t queueSignature =
+        building.productionQueue.size();
+    for (const ProductionItem &item :
+         building.productionQueue) {
+        queueSignature ^=
+            (uint64_t)(uint32_t)
+                (item.technologyId + 2) +
+            0x9e3779b97f4a7c15ULL +
+            (queueSignature << 6) +
+            (queueSignature >> 2);
+    }
+    ResearchMenuCacheEntry &cache =
+        researchMenuCache_[building.spawnId];
+    const int unitId =
+        building.unit ? building.unit->id : -1;
+    if (cache.techGeneration ==
+            techGeneration_ &&
+        cache.queueSignature ==
+            queueSignature &&
+        cache.unitId == unitId)
+        return cache.options;
+
+    cache.techGeneration = techGeneration_;
+    cache.queueSignature = queueSignature;
+    cache.unitId = unitId;
+    cache.options.clear();
+    cache.hasTab = false;
+    if (building.gate)
+        return cache.options;
+
     const int player = building.player;
     const int civilization = civilizationForPlayer(player);
     for (size_t id = 0; id < assets_.dat().techs.size();
@@ -3128,10 +3237,12 @@ std::vector<int> Game::researchOptions(
                 queued = true;
                 break;
             }
-        if (!queued) options.push_back((int)id);
+        if (!queued)
+            cache.options.push_back((int)id);
     }
     std::stable_sort(
-        options.begin(), options.end(),
+        cache.options.begin(),
+        cache.options.end(),
         [&](int a, int b) {
             const dat::Tech &left =
                 assets_.dat().techs[(size_t)a];
@@ -3141,28 +3252,54 @@ std::vector<int> Game::researchOptions(
                 return left.buttonId < right.buttonId;
             return a < b;
         });
-    return options;
+
+    if (building.underConstruction ||
+        !building.unit ||
+        building.unit->type != dat::UT_Building) {
+        cache.hasTab =
+            !cache.options.empty();
+        return cache.options;
+    }
+    if (!cache.options.empty()) {
+        cache.hasTab = true;
+        return cache.options;
+    }
+    for (const ProductionItem &item :
+         building.productionQueue)
+        if (item.technologyId >= 0) {
+            cache.hasTab = true;
+            return cache.options;
+        }
+    for (const dat::Tech &technology :
+         assets_.dat().techs)
+        if (technology.researchTime > 0 &&
+            technology.buttonId != 0 &&
+            technology.effectId >= 0 &&
+            (technology.civ < 0 ||
+             technology.civ == civilization) &&
+            buildingMatchesLocation(
+                building,
+                technology.locationId) &&
+            !assets_
+                 .localizedString(
+                     technology.languageDllName)
+                 .empty()) {
+            cache.hasTab = true;
+            break;
+        }
+    return cache.options;
 }
 
 // The research page stays available for a building that has researches at
 // all, even when every one is researched or queued (the original always
 // shows the page; it may just be empty).
 bool Game::hasResearchTab(const Object &building) const {
-    if (building.gate || building.underConstruction ||
-        building.unit->type != dat::UT_Building)
-        return !researchOptions(building).empty();
-    if (!researchOptions(building).empty()) return true;
-    for (const ProductionItem &item : building.productionQueue)
-        if (item.technologyId >= 0) return true;
-    const int civilization = civilizationForPlayer(building.player);
-    for (const dat::Tech &technology : assets_.dat().techs)
-        if (technology.researchTime > 0 && technology.buttonId != 0 &&
-            technology.effectId >= 0 &&
-            (technology.civ < 0 || technology.civ == civilization) &&
-            buildingMatchesLocation(building, technology.locationId) &&
-            !assets_.localizedString(technology.languageDllName).empty())
-            return true;
-    return false;
+    researchOptions(building);
+    const auto found =
+        researchMenuCache_.find(
+            building.spawnId);
+    return found != researchMenuCache_.end() &&
+           found->second.hasTab;
 }
 
 // Gather point (0x502580 / command 0x78 executor 0x5bcb30): offered on a
@@ -3184,6 +3321,312 @@ std::vector<Game::BuildingCommand> Game::buildingCommands(const Object &building
         if (building.rallyActive) commands.push_back(BuildingCommand::RemoveGatherPoint);
     }
     return commands;
+}
+
+std::vector<Game::UnitCommand> Game::unitCommands(
+    const Object &unit) const {
+    std::vector<UnitCommand> commands;
+    if (!unit.active || !unit.unit ||
+        unit.unit->type < dat::UT_Bird ||
+        unit.unit->type == dat::UT_Building ||
+        unit.unit->speed <= 0)
+        return commands;
+    commands = {
+        UnitCommand::Stop,
+        UnitCommand::Patrol,
+        UnitCommand::Guard,
+        UnitCommand::Follow,
+    };
+    if (selectedCanAttackGround())
+        commands.push_back(
+            UnitCommand::AttackGround);
+    return commands;
+}
+
+int Game::unitCommandIcon(
+    UnitCommand command) const {
+    switch (command) {
+    case UnitCommand::Stop: return 3;
+    case UnitCommand::Patrol: return 6;
+    case UnitCommand::Guard: return 7;
+    case UnitCommand::Follow: return 8;
+    case UnitCommand::AttackGround:
+        return (int)kCommandAttackGroundIcon;
+    }
+    return 3;
+}
+
+std::string Game::unitCommandTitle(
+    UnitCommand command) const {
+    int languageId = 4105;
+    const char *fallback = "Stop";
+    switch (command) {
+    case UnitCommand::Stop: break;
+    case UnitCommand::Patrol:
+        languageId = 4138;
+        fallback = "Patrol";
+        break;
+    case UnitCommand::Guard:
+        languageId = 4136;
+        fallback = "Guard";
+        break;
+    case UnitCommand::Follow:
+        languageId = 4137;
+        fallback = "Follow";
+        break;
+    case UnitCommand::AttackGround:
+        languageId = 4123;
+        fallback = "Attack Ground";
+        break;
+    }
+    const std::string &localized =
+        assets_.localizedString(languageId);
+    return localized.empty()
+               ? std::string(fallback)
+               : localized;
+}
+
+std::string Game::unitCommandHelp(
+    UnitCommand command) const {
+    int languageId = 4905;
+    const char *fallback =
+        "Stops the selected units.";
+    switch (command) {
+    case UnitCommand::Stop: break;
+    case UnitCommand::Patrol:
+        languageId = 4938;
+        fallback =
+            "Patrol between the current position and a selected location.";
+        break;
+    case UnitCommand::Guard:
+        languageId = 4936;
+        fallback =
+            "Guard a friendly unit or building and engage nearby enemies.";
+        break;
+    case UnitCommand::Follow:
+        languageId = 4937;
+        fallback =
+            "Follow a friendly unit without guarding it.";
+        break;
+    case UnitCommand::AttackGround:
+        languageId = 4923;
+        fallback =
+            "Attack a selected ground location.";
+        break;
+    }
+    std::string help =
+        assets_.localizedString(languageId);
+    if (help.empty()) return fallback;
+    const size_t split = help.find('\n');
+    return split == std::string::npos
+               ? help
+               : help.substr(split + 1);
+}
+
+void Game::clearUnitCommandOrder(
+    Object &unit) {
+    unit.patrolActive = false;
+    unit.guardTargetId = 0;
+    unit.followTargetId = 0;
+}
+
+void Game::stopUnit(Object &unit) {
+    if (isWorker(unit))
+        clearConstructionAssignment(unit);
+    clearUnitCommandOrder(unit);
+    unit.gatherTargetId = 0;
+    unit.dropOffTargetId = 0;
+    unit.repairTargetId = 0;
+    unit.garrisonTargetId = 0;
+    unit.attackTargetId = 0;
+    unit.attackAutomatic = false;
+    unit.attackGroundActive = false;
+    unit.attackShotPending = false;
+    unit.moveGoalActive = false;
+    unit.moveGroupId = 0;
+    unit.marchGroupId = 0;
+    unit.path.clear();
+    unit.pathIndex = 0;
+    unit.targetX = unit.homeX = unit.x;
+    unit.targetY = unit.homeY = unit.y;
+    unit.wander = false;
+    unit.state = State::Idle;
+    unit.animTime = 0;
+}
+
+void Game::executeUnitCommand(
+    UnitCommand command) {
+    if (command == UnitCommand::Stop) {
+        Object *acknowledgement = nullptr;
+        for (Object *unit :
+             selectedObjectsInOrder(true)) {
+            stopUnit(*unit);
+            if (!acknowledgement)
+                acknowledgement = unit;
+        }
+        if (acknowledgement)
+            playUnitAcknowledgement(
+                *acknowledgement, false);
+        statusMessage_ = "STOPPED";
+        statusTime_ = 2.0f;
+        playInterfaceFeedback(
+            kInterfaceButtonSound);
+        return;
+    }
+    if (command ==
+        UnitCommand::AttackGround) {
+        attackGroundCursorActive_ = true;
+        attackGroundJustBegun_ = true;
+        unitCommandCursorActive_ = false;
+        statusMessage_ =
+            "SELECT A GROUND LOCATION TO ATTACK";
+    } else {
+        pendingUnitCommand_ = command;
+        unitCommandCursorActive_ = true;
+        unitCommandJustBegun_ = true;
+        attackGroundCursorActive_ = false;
+        statusMessage_ =
+            command == UnitCommand::Patrol
+                ? "SELECT A PATROL LOCATION"
+                : command ==
+                          UnitCommand::Guard
+                      ? "SELECT A UNIT OR BUILDING TO GUARD"
+                      : "SELECT A UNIT TO FOLLOW";
+    }
+    garrisonCursorActive_ = false;
+    repairCursorActive_ = false;
+    statusTime_ = 3.0f;
+    playInterfaceFeedback(
+        kInterfaceButtonSound);
+}
+
+void Game::updateUnitCommandOrder(
+    Object &unit, float dt) {
+    (void)dt;
+    if (!unit.active || unit.hidden ||
+        unit.garrisonedInId >= 0 ||
+        !unit.unit || unit.unit->speed <= 0)
+        return;
+    if (unit.attackTargetId != 0 ||
+        unit.attackGroundActive)
+        return;
+
+    if (unit.guardTargetId != 0) {
+        Object *guarded =
+            findObject(unit.guardTargetId);
+        if (!guarded || !guarded->active ||
+            guarded->hidden ||
+            !isFriendlyPlayer(
+                unit.player,
+                guarded->player)) {
+            unit.guardTargetId = 0;
+            return;
+        }
+        Object *enemy = nullptr;
+        float bestDistance = 64.0f;
+        if (unit.attackMode !=
+            AttackMode::Passive)
+            for (Object &candidate : objects_) {
+                if (!candidate.active ||
+                    candidate.hidden ||
+                    !isEnemy(unit, candidate) ||
+                    !canAttackTarget(
+                        unit, candidate))
+                    continue;
+                const float dx =
+                    candidate.x - guarded->x;
+                const float dy =
+                    candidate.y - guarded->y;
+                const float distance =
+                    dx * dx + dy * dy;
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    enemy = &candidate;
+                }
+            }
+        if (enemy) {
+            unit.homeX = guarded->x;
+            unit.homeY = guarded->y;
+            issueAttack(
+                unit, *enemy,
+                std::atan2(
+                    unit.y - enemy->y,
+                    unit.x - enemy->x),
+                true);
+            return;
+        }
+        const float dx =
+            guarded->x - unit.x;
+        const float dy =
+            guarded->y - unit.y;
+        if (dx * dx + dy * dy > 12.25f &&
+            (unit.state == State::Idle ||
+             !unit.moveGoalActive)) {
+            issueMove(
+                unit, guarded->x,
+                guarded->y, guarded, 2.5f);
+            unit.wander = false;
+        }
+        return;
+    }
+
+    if (unit.followTargetId != 0) {
+        Object *followed =
+            findObject(unit.followTargetId);
+        if (!followed || !followed->active ||
+            followed->hidden ||
+            !isFriendlyPlayer(
+                unit.player,
+                followed->player)) {
+            unit.followTargetId = 0;
+            return;
+        }
+        const float dx =
+            followed->x - unit.x;
+        const float dy =
+            followed->y - unit.y;
+        if (dx * dx + dy * dy > 20.25f &&
+            (unit.state == State::Idle ||
+             !unit.moveGoalActive)) {
+            issueMove(
+                unit, followed->x,
+                followed->y,
+                followed, 3.5f);
+            unit.wander = false;
+        }
+        return;
+    }
+
+    if (!unit.patrolActive) return;
+    const float goalX =
+        unit.patrolTowardEnd
+            ? unit.patrolEndX
+            : unit.patrolStartX;
+    const float goalY =
+        unit.patrolTowardEnd
+            ? unit.patrolEndY
+            : unit.patrolStartY;
+    const float dx = goalX - unit.x;
+    const float dy = goalY - unit.y;
+    if (dx * dx + dy * dy < 0.64f) {
+        unit.patrolTowardEnd =
+            !unit.patrolTowardEnd;
+        unit.moveGoalActive = false;
+    }
+    if (unit.state == State::Idle &&
+        !unit.moveGoalActive) {
+        const float nextX =
+            unit.patrolTowardEnd
+                ? unit.patrolEndX
+                : unit.patrolStartX;
+        const float nextY =
+            unit.patrolTowardEnd
+                ? unit.patrolEndY
+                : unit.patrolStartY;
+        issueMove(unit, nextX, nextY);
+        unit.moveGoalActive = true;
+        unit.wander = false;
+    }
 }
 
 int Game::buildingCommandIcon(const Object &building, BuildingCommand command) const {
@@ -3238,6 +3681,7 @@ void Game::executeBuildingCommand(Object &building, BuildingCommand command) {
         setGateLocked(building, !building.locked);
         break;
     case BuildingCommand::SetGatherPoint: {
+        attackGroundCursorActive_ = false;
         gatherPointBuildingId_ = building.spawnId;
         gatherPointJustBegun_ = true;
         const std::string &message = assets_.localizedString(3084);
@@ -3285,17 +3729,12 @@ void Game::setGatherPoint(Object &building, float screenX, float screenY, int sc
 // Spawned unit follows the gather point (0x56e390): the building itself
 // means garrison, a resource means gather (workers), an enemy means
 // attack, otherwise walk to the point.
-void Game::sendToGatherPoint(const Object &building, Object &unit) {
+void Game::sendToGatherPoint(Object &building, Object &unit) {
     if (!building.rallyActive) return;
     Object *target = building.rallyTargetId ? findObject(building.rallyTargetId) : nullptr;
     if (target && !target->active) target = nullptr;
-    if (target && target->spawnId == building.spawnId) {
-        if (building.unit->garrisonCapacity > 0) {
-            unit.garrisonTargetId = building.spawnId;
-            approach(unit, building, 0.35f);
-        }
+    if (target && issueGarrisonOrder(unit, *target))
         return;
-    }
     if (target && isWorker(unit) && isGatherable(*target) && issueGatherCommand(unit, *target))
         return;
     if (target && target->player != unit.player &&
@@ -3323,13 +3762,13 @@ bool Game::queueFarmReseed(const Object &building, const dat::Unit &farm) {
         statusMessage_ = assets_.localizedString(3039); // queue is full
         if (statusMessage_.empty()) statusMessage_ = "THE RESEED FARM QUEUE IS FULL";
         statusTime_ = 3.0f;
+        playInterfaceFeedback(kInterfaceCannotDoSound);
         return false;
     }
     for (const dat::ResourceCost &cost : farm.costs)
         if (cost.flag && cost.type >= 0 && cost.amount > 0 &&
             resource(player, cost.type) + 0.001f < cost.amount) {
-            statusMessage_ = "NOT ENOUGH RESOURCES";
-            statusTime_ = 3.0f;
+            showResourceShortage(cost.type);
             return false;
         }
     for (const dat::ResourceCost &cost : farm.costs)
@@ -3339,6 +3778,42 @@ bool Game::queueFarmReseed(const Object &building, const dat::Unit &farm) {
     statusMessage_ = "FARMS QUEUED FOR RESEEDING: " + std::to_string(queued);
     statusTime_ = 2.0f;
     return true;
+}
+
+void Game::playInterfaceFeedback(int soundId) {
+    if (playInterfaceSound_)
+        playInterfaceSound_(soundId);
+}
+
+void Game::showCannotDo(
+    int languageId,
+    const std::string &fallback) {
+    statusMessage_ =
+        languageId >= 0
+            ? assets_.localizedString(languageId)
+            : std::string();
+    if (statusMessage_.empty())
+        statusMessage_ = fallback;
+    statusTime_ = 3.0f;
+    playInterfaceFeedback(
+        kInterfaceCannotDoSound);
+}
+
+void Game::showResourceShortage(
+    int resourceType) {
+    static constexpr int languageIds[] = {
+        3001, 3002, 3003, 3004,
+    };
+    const int languageId =
+        resourceType >= 0 &&
+                resourceType <
+                    (int)std::size(
+                        languageIds)
+            ? languageIds[resourceType]
+            : -1;
+    showCannotDo(
+        languageId,
+        "NOT ENOUGH RESOURCES");
 }
 
 bool Game::queueUnitForTesting(uint32_t buildingId, int unitId) {
@@ -4200,11 +4675,14 @@ bool Game::issueGatherCommand(
     // Player-owned resources (farms) are worked by their owner only.
     if (resource.player > 0 && resource.player != worker.player)
         return false;
+    clearUnitCommandOrder(worker);
     clearConstructionAssignment(worker);
     worker.gatherTargetId = 0;
     worker.dropOffTargetId = 0;
     worker.attackTargetId = 0;
     worker.attackAutomatic = false;
+    worker.attackGroundActive = false;
+    worker.attackShotPending = false;
     worker.garrisonTargetId = 0;
     worker.repairTargetId = 0;
     worker.gatherTargetId = resource.spawnId;
@@ -4282,6 +4760,7 @@ bool Game::issueDropOffCommand(
         !building.unit ||
         building.unit->type != dat::UT_Building)
         return false;
+    clearUnitCommandOrder(worker);
     // Only a building that takes something the worker holds (the command
     // center takes everything, processing centers their own resource).
     bool accepts = false;
@@ -4294,6 +4773,8 @@ bool Game::issueDropOffCommand(
     clearConstructionAssignment(worker);
     worker.attackTargetId = 0;
     worker.attackAutomatic = false;
+    worker.attackGroundActive = false;
+    worker.attackShotPending = false;
     worker.garrisonTargetId = 0;
     worker.repairTargetId = 0;
     worker.dropOffTargetId = building.spawnId;
@@ -4374,11 +4855,14 @@ bool Game::issueRepairCommand(
     Object &worker, Object &target) {
     if (!isRepairableBy(worker, target))
         return false;
+    clearUnitCommandOrder(worker);
     clearConstructionAssignment(worker);
     worker.gatherTargetId = 0;
     worker.dropOffTargetId = 0;
     worker.attackTargetId = 0;
     worker.attackAutomatic = false;
+    worker.attackGroundActive = false;
+    worker.attackShotPending = false;
     worker.garrisonTargetId = 0;
     worker.repairTargetId = target.spawnId;
     worker.wander = false;
@@ -4470,6 +4954,8 @@ void Game::updateRepairing(float dt) {
             statusMessage_ =
                 "NOT ENOUGH RESOURCES TO REPAIR";
             statusTime_ = 3.0f;
+            playInterfaceFeedback(
+                kInterfaceCannotDoSound);
             continue;
         }
         for (const dat::ResourceCost &cost :
@@ -4869,12 +5355,30 @@ uint8_t Game::garrisonCategory(
         return 0;
     switch (unit.unit->cls) {
     case 58: return 1; // workers
+    case 49:
     case 52: return 2; // infantry
+    case 47: return 4; // mounted troopers
     case 50:
     case 51: return 8; // Jedi/Sith
     case 1: return 16; // livestock (Animal Nursery, garrison type 16)
     default: return 0;
     }
+}
+
+bool Game::hasAnyGarrisonTask(
+    const Object &unit) const {
+    if (!unit.unit || unit.unit->id < 0 ||
+        (size_t)unit.unit->id >=
+            assets_.dat().unitHeaders.size())
+        return false;
+    for (const dat::Task &task :
+         assets_.dat()
+             .unitHeaders[
+                 (size_t)unit.unit->id]
+             .tasks)
+        if (task.actionType == 3)
+            return true;
+    return false;
 }
 
 // The unit's own task list decides where it may garrison: action 3 with the
@@ -5044,30 +5548,12 @@ bool Game::findProductionExit(
 }
 
 bool Game::issueGarrisonCommand(Object &building) {
-    size_t reserved =
-        garrisonedCount(building, true);
-    const size_t capacity =
-        building.unit->garrisonCapacity;
     size_t assigned = 0;
     for (Object *unit : selectedObjectsInOrder(false)) {
-        if (!unit || !canGarrison(*unit, building) ||
-            reserved >= capacity)
+        if (!unit ||
+            !issueGarrisonOrder(
+                *unit, building))
             continue;
-        if (isWorker(*unit))
-            clearConstructionAssignment(*unit);
-        unit->attackTargetId = 0;
-        unit->attackAutomatic = false;
-        unit->garrisonTargetId = building.spawnId;
-        float targetX = 0.0f;
-        float targetY = 0.0f;
-        interactionPoint(*unit, building, 0.35f,
-                         targetX, targetY);
-        if (!issueMove(*unit, targetX, targetY, &building, 0.35f)) {
-            unit->garrisonTargetId = 0;
-            continue;
-        }
-        unit->wander = false;
-        reserved++;
         assigned++;
     }
     if (assigned > 0) {
@@ -5079,12 +5565,56 @@ bool Game::issueGarrisonCommand(Object &building) {
         statusTime_ = 3.0f;
         return true;
     }
-    statusMessage_ =
-        reserved >= capacity
-            ? "GARRISON IS FULL"
-            : "NO ELIGIBLE UNITS SELECTED";
-    statusTime_ = 3.0f;
+    const size_t reserved =
+        garrisonedCount(building, true);
+    if (reserved >=
+        building.unit->garrisonCapacity)
+        showCannotDo(
+            isTransport(building)
+                ? 3066
+                : 3065,
+            "GARRISON IS FULL");
+    else
+        showCannotDo(
+            -1,
+            "NO ELIGIBLE UNITS SELECTED");
     return false;
+}
+
+bool Game::issueGarrisonOrder(
+    Object &unit, Object &container) {
+    if (!canGarrison(unit, container) ||
+        garrisonedCount(container, true) >=
+            container.unit->garrisonCapacity)
+        return false;
+    clearUnitCommandOrder(unit);
+    if (isWorker(unit))
+        clearConstructionAssignment(unit);
+    unit.gatherTargetId = 0;
+    unit.dropOffTargetId = 0;
+    unit.repairTargetId = 0;
+    unit.attackTargetId = 0;
+    unit.attackAutomatic = false;
+    unit.attackGroundActive = false;
+    unit.attackShotPending = false;
+    unit.garrisonTargetId =
+        container.spawnId;
+    unit.moveGoalActive = false;
+    unit.moveGroupId = 0;
+    unit.moveSpeedLimit = 0.0f;
+    float targetX = 0.0f;
+    float targetY = 0.0f;
+    interactionPoint(
+        unit, container, 0.35f,
+        targetX, targetY);
+    if (!issueMove(
+            unit, targetX, targetY,
+            &container, 0.35f)) {
+        unit.garrisonTargetId = 0;
+        return false;
+    }
+    unit.wander = false;
+    return true;
 }
 
 void Game::updateGarrisoning() {
@@ -5294,6 +5824,8 @@ bool Game::openSelectedActionMenu() {
     actionMenuObjectId_ = subject->spawnId;
     actionMenuSelection_ = 0;
     actionMenuScroll_ = 0;
+    playInterfaceFeedback(
+        kInterfaceButtonSound);
     return true;
 }
 
@@ -5332,6 +5864,8 @@ bool Game::cancelProductionItem(Object &building,
                 : building.productionQueue.front().duration;
     statusMessage_ = "QUEUE ITEM CANCELLED";
     statusTime_ = 2.0f;
+    playInterfaceFeedback(
+        kInterfaceCancelSound);
     return true;
 }
 
@@ -5353,8 +5887,15 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
         screenY >= kActionMenuTop + kActionMenuHeight)
         return true;
     if (screenY < kActionMenuY) {
+        const bool mobileCommands =
+            actionMenuTab_ ==
+                ActionMenuTab::Commands &&
+            subject->unit->type !=
+                dat::UT_Building;
         if (actionMenuTab_ ==
             ActionMenuTab::Stances) {
+            return true;
+        } else if (mobileCommands) {
             return true;
         } else if (isWorker(*subject)) {
             const int tab = std::max(
@@ -5369,12 +5910,17 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
                           : ActionMenuTab::Defense;
         } else {
             std::vector<ActionMenuTab> tabs;
-            if (!productionOptions(*subject).empty())
-                tabs.push_back(ActionMenuTab::Units);
-            if (hasResearchTab(*subject))
-                tabs.push_back(ActionMenuTab::Research);
-            if (!buildingCommands(*subject).empty())
+            if (subject->unit->type !=
+                dat::UT_Building) {
                 tabs.push_back(ActionMenuTab::Commands);
+            } else {
+                if (!productionOptions(*subject).empty())
+                    tabs.push_back(ActionMenuTab::Units);
+                if (hasResearchTab(*subject))
+                    tabs.push_back(ActionMenuTab::Research);
+                if (!buildingCommands(*subject).empty())
+                    tabs.push_back(ActionMenuTab::Commands);
+            }
             if (tabs.empty()) return true;
             const int tab = std::max(
                 0, std::min(
@@ -5392,12 +5938,16 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
     if (actionMenuTab_ ==
         ActionMenuTab::Stances) {
         optionCount = 4;
+    } else if (actionMenuTab_ ==
+               ActionMenuTab::Commands) {
+        optionCount =
+            subject->unit->type ==
+                    dat::UT_Building
+                ? buildingCommands(*subject).size()
+                : unitCommands(*subject).size();
     } else if (isWorker(*subject)) {
         optionCount =
             buildingOptions(*subject, actionMenuTab_).size();
-    } else if (actionMenuTab_ ==
-               ActionMenuTab::Commands) {
-        optionCount = buildingCommands(*subject).size();
     } else if (actionMenuTab_ ==
                ActionMenuTab::Units) {
         optionCount = productionOptions(*subject).size();
@@ -5451,6 +6001,31 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
             (AttackMode)optionIndex);
         actionMenuOpen_ = false;
         actionMenuObjectId_ = 0;
+        playInterfaceFeedback(
+            kInterfaceButtonSound);
+        return true;
+    }
+
+    if (actionMenuTab_ == ActionMenuTab::Commands) {
+        if (subject->unit->type ==
+            dat::UT_Building) {
+            const std::vector<BuildingCommand> commands =
+                buildingCommands(*subject);
+            if (optionIndex >= commands.size())
+                return true;
+            executeBuildingCommand(
+                *subject,
+                commands[optionIndex]);
+        } else {
+            const std::vector<UnitCommand> commands =
+                unitCommands(*subject);
+            if (optionIndex >= commands.size())
+                return true;
+            executeUnitCommand(
+                commands[optionIndex]);
+        }
+        actionMenuOpen_ = false;
+        actionMenuObjectId_ = 0;
         return true;
     }
 
@@ -5462,15 +6037,6 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
             *subject, *options[optionIndex]);
     }
 
-    if (actionMenuTab_ == ActionMenuTab::Commands) {
-        const std::vector<BuildingCommand> commands = buildingCommands(*subject);
-        if (optionIndex >= commands.size()) return true;
-        executeBuildingCommand(*subject, commands[optionIndex]);
-        actionMenuOpen_ = false;
-        actionMenuObjectId_ = 0;
-        return true;
-    }
-
     if (actionMenuTab_ != ActionMenuTab::Research) {
         const std::vector<const dat::Unit *> options = productionOptions(*subject);
         if (optionIndex < options.size() && options[optionIndex]->cls == 7) {
@@ -5480,8 +6046,9 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
     }
 
     if (subject->productionQueue.size() >= 5) {
-        statusMessage_ = "PRODUCTION QUEUE FULL";
-        statusTime_ = 3.0f;
+        showCannotDo(
+            3088,
+            "PRODUCTION QUEUE FULL");
         return true;
     }
 
@@ -5503,6 +6070,8 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
                           " IS LOCKED";
             statusMessage_ = message;
             statusTime_ = 3.0f;
+            playInterfaceFeedback(
+                kInterfaceCannotDoSound);
             return true;
         }
         for (const dat::Tech::Cost &cost : technology.costs) {
@@ -5511,8 +6080,7 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
                 continue;
             if (resource(localPlayer_, cost.type) + 0.001f <
                 cost.amount) {
-                statusMessage_ = "NOT ENOUGH RESOURCES";
-                statusTime_ = 3.0f;
+                showResourceShortage(cost.type);
                 return true;
             }
         }
@@ -5536,8 +6104,7 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
                 continue;
             if (resource(localPlayer_, cost.type) + 0.001f <
                 cost.amount) {
-                statusMessage_ = "NOT ENOUGH RESOURCES";
-                statusTime_ = 3.0f;
+                showResourceShortage(cost.type);
                 return true;
             }
         }
@@ -5555,11 +6122,14 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
     if (subject->productionQueue.size() == 1)
         subject->productionRemaining = item.duration;
     statusTime_ = 2.0f;
+    playInterfaceFeedback(
+        kInterfaceButtonSound);
     return true;
 }
 
 bool Game::beginBuildingPlacement(
     Object &worker, const dat::Unit &building) {
+    attackGroundCursorActive_ = false;
     placementUnit_ = &building;
     placementBuilderId_ = worker.spawnId;
     placementJustBegun_ = true;
@@ -5570,6 +6140,8 @@ bool Game::beginBuildingPlacement(
         "PLACE " + unitDisplayName(building) +
         " WITH X; O CANCELS";
     statusTime_ = 4.0f;
+    playInterfaceFeedback(
+        kInterfaceButtonSound);
     return true;
 }
 
@@ -5597,6 +6169,7 @@ bool Game::assignBuilder(Object &worker,
         !building.underConstruction ||
         building.player != worker.player)
         return false;
+    clearUnitCommandOrder(worker);
     clearConstructionAssignment(worker);
     float targetX = 0.0f;
     float targetY = 0.0f;
@@ -5837,6 +6410,8 @@ bool Game::placeWallLine(int x1, int y1, int x2, int y2) {
     if (foundations.empty()) {
         statusMessage_ = outOfMoney ? "NOT ENOUGH RESOURCES" : "WALL CANNOT BE PLACED HERE";
         statusTime_ = 3.0f;
+        playInterfaceFeedback(
+            kInterfaceCannotDoSound);
         return true;
     }
     Object *acknowledgement = nullptr;
@@ -6047,6 +6622,8 @@ bool Game::placeBuildingWorld(float worldX, float worldY) {
     if (!placementValid(*placementUnit_, worldX, worldY, &replacedWalls)) {
         statusMessage_ = "BUILDING CANNOT BE PLACED HERE";
         statusTime_ = 3.0f;
+        playInterfaceFeedback(
+            kInterfaceCannotDoSound);
         return true;
     }
     for (const dat::ResourceCost &cost :
@@ -6056,8 +6633,7 @@ bool Game::placeBuildingWorld(float worldX, float worldY) {
             continue;
         if (resource(localPlayer_, cost.type) + 0.001f <
             cost.amount) {
-            statusMessage_ = "NOT ENOUGH RESOURCES";
-            statusTime_ = 3.0f;
+            showResourceShortage(cost.type);
             return true;
         }
     }
@@ -6520,6 +7096,7 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
     float targetX, targetY;
     screenToWorld(screenX, screenY, screenW, screenH, targetX, targetY);
     for (Object *object : selected) {
+        clearUnitCommandOrder(*object);
         if (isWorker(*object))
             clearConstructionAssignment(*object);
         object->gatherTargetId = 0;
@@ -6894,11 +7471,46 @@ void Game::setSelectedAttackMode(
     statusTime_ = 2.0f;
 }
 
+bool Game::issueAttackGround(
+    Object &source, float x, float y) {
+    if (!canAttackGround(source))
+        return false;
+    clearUnitCommandOrder(source);
+    source.gatherTargetId = 0;
+    source.dropOffTargetId = 0;
+    source.garrisonTargetId = 0;
+    source.repairTargetId = 0;
+    source.attackTargetId = 0;
+    source.attackAutomatic = false;
+    source.attackShotPending = false;
+    source.attackGroundActive = true;
+    source.attackGroundX =
+        std::max(0.0f, std::min(
+                           (float)mapSize_, x));
+    source.attackGroundY =
+        std::max(0.0f, std::min(
+                           (float)mapSize_, y));
+    source.attackRepathTime = 0;
+    source.attackStallTime = 0;
+    source.moveGoalActive = false;
+    source.moveGroupId = 0;
+    source.moveSpeedLimit = 0;
+    source.path.clear();
+    source.pathIndex = 0;
+    source.blockedTime = 0;
+    source.state = State::Idle;
+    source.animTime = 0;
+    source.wander = false;
+    return true;
+}
+
 void Game::issueAttack(Object &source, Object &target, float approachAngle,
                        bool automatic, float approachDistance) {
     if (!isEnemy(source, target) ||
         !canAttackTarget(source, target))
         return;
+    if (!automatic)
+        clearUnitCommandOrder(source);
     source.gatherTargetId = 0;
     source.dropOffTargetId = 0;
     if (approachDistance <= 0) {
@@ -6976,6 +7588,8 @@ void Game::issueAttack(Object &source, Object &target, float approachAngle,
         }
     }
     source.attackTargetId = target.spawnId;
+    source.attackGroundActive = false;
+    source.attackShotPending = false;
     source.attackRepathTime = 0;
     source.attackApproachAngle = approachAngle;
     source.attackApproachDistance = approachDistance;
@@ -7034,6 +7648,7 @@ float Game::automaticPursuitLeash(const Object &source) const {
 void Game::finishAttack(Object &source, bool returnToPost) {
     source.attackTargetId = 0;
     source.attackAutomatic = false;
+    source.attackShotPending = false;
     source.path.clear();
     source.pathIndex = 0;
     source.blockedTime = 0;
@@ -7458,6 +8073,115 @@ void Game::launchProjectile(const Object &source, const Object &target, int dama
     playWorldUnitSound(source, soundId);
 }
 
+void Game::launchGroundProjectile(
+    const Object &source,
+    float targetX, float targetY) {
+    const int projectileId =
+        (int)std::lround(
+            modifiedUnitAttribute(
+                source, 16,
+                source.unit->projectileUnitId));
+    const int civilization =
+        civilizationForPlayer(source.player);
+    const dat::Unit *primary =
+        findUnit(civilization, projectileId);
+    if (!primary ||
+        primary->standingGraphic[0] < 0)
+        return;
+    const int projectileCount =
+        std::max(
+            1,
+            source.unit->maxTotalProjectiles > 0
+                ? std::min(
+                      (int)source.unit->maxTotalProjectiles,
+                      (int)std::lround(
+                          source.unit->totalProjectiles))
+                : (int)std::lround(
+                      source.unit->totalProjectiles));
+    for (int bolt = 0;
+         bolt < projectileCount; bolt++) {
+        const dat::Unit *projectileUnit =
+            bolt > 0 &&
+                    source.unit
+                            ->secondaryProjectileUnit >= 0
+                ? findUnit(
+                      civilization,
+                      source.unit
+                          ->secondaryProjectileUnit)
+                : primary;
+        if (!projectileUnit ||
+            projectileUnit->standingGraphic[0] < 0)
+            continue;
+        const float lateral =
+            bolt == 0
+                ? 0.0f
+                : ((bolt & 1) ? -0.5f : 0.5f) *
+                      source.unit
+                          ->projectileSpawningArea[0];
+        const float forward =
+            std::max(
+                0.1f,
+                source.unit
+                    ->graphicDisplacement[1]) +
+            (bolt > 0
+                 ? 0.5f *
+                       source.unit
+                           ->projectileSpawningArea[1]
+                 : 0.0f);
+        const float side =
+            source.unit
+                ->graphicDisplacement[0] +
+            lateral;
+        Projectile projectile;
+        projectile.unit = projectileUnit;
+        projectile.player = source.player;
+        projectile.x =
+            source.x +
+            std::cos(source.facing) * forward -
+            std::sin(source.facing) * side;
+        projectile.y =
+            source.y +
+            std::sin(source.facing) * forward +
+            std::cos(source.facing) * side;
+        projectile.z =
+            std::max(
+                0.0f,
+                source.unit
+                    ->graphicDisplacement[2]);
+        projectile.targetZ = 0.15f;
+        projectile.facing = source.facing;
+        projectile.sourceId = source.spawnId;
+        projectile.damage =
+            std::max(
+                1,
+                (int)source.unit
+                    ->displayedAttack);
+        projectile.groundAimed = true;
+        projectile.aimX = targetX;
+        projectile.aimY = targetY;
+        projectile.blastWidth =
+            std::max(
+                source.unit->blastWidth,
+                projectileUnit->blastWidth);
+        projectile.blastLevel =
+            source.unit->blastWidth > 0
+                ? source.unit
+                      ->blastAttackLevel
+                : projectileUnit
+                      ->blastAttackLevel;
+        projectiles_.push_back(projectile);
+        projectilesLaunched_++;
+    }
+    int soundId =
+        graphicSound(
+            primary->standingGraphic[0]);
+    if (soundId < 0)
+        soundId =
+            graphicSound(
+                source.unit->attackGraphic);
+    playWorldUnitSound(source, soundId);
+}
+
 // FUN_0055e8a0: how much a unit adds to a building's volley. Troopers,
 // grenadiers, Jedi and workers count 2.5; other ranged units their pierce
 // damage per second; melee units nothing.
@@ -7534,6 +8258,14 @@ void Game::launchVolleyBolt(Object &source, const Object &target) {
     projectile.groundAimed = true;
     projectile.aimX = target.x + ox;
     projectile.aimY = target.y + oy;
+    projectile.blastWidth =
+        std::max(
+            source.unit->blastWidth,
+            projectileUnit->blastWidth);
+    projectile.blastLevel =
+        source.unit->blastWidth > 0
+            ? source.unit->blastAttackLevel
+            : projectileUnit->blastAttackLevel;
     projectiles_.push_back(projectile);
     projectilesLaunched_++;
     playWorldUnitSound(source, graphicSound(projectileUnit->standingGraphic[0]));
@@ -7544,14 +8276,21 @@ void Game::updateProjectiles(float dt) {
     while (index < projectiles_.size()) {
         Projectile &projectile = projectiles_[index];
         Object *target = findObject(projectile.targetId);
-        if (!target || !target->active) {
+        if ((!target || !target->active) &&
+            !projectile.groundAimed) {
             projectiles_[index] = projectiles_.back();
             projectiles_.pop_back();
             continue;
         }
 
-        const float destX = projectile.groundAimed ? projectile.aimX : target->x;
-        const float destY = projectile.groundAimed ? projectile.aimY : target->y;
+        const float destX =
+            projectile.groundAimed
+                ? projectile.aimX
+                : target->x;
+        const float destY =
+            projectile.groundAimed
+                ? projectile.aimY
+                : target->y;
         const float dx = destX - projectile.x;
         const float dy = destY - projectile.y;
         const float dz = projectile.targetZ - projectile.z;
@@ -7561,13 +8300,25 @@ void Game::updateProjectiles(float dt) {
         if (distance <= step || distance <= 0.0001f) {
             const int damage = projectile.damage;
             const bool groundAimed = projectile.groundAimed;
-            const float hitX = destX - target->x, hitY = destY - target->y;
+            const float hitX =
+                target ? destX - target->x : 0.0f;
+            const float hitY =
+                target ? destY - target->y : 0.0f;
             const Projectile landed = projectile;
-            const uint32_t targetId = target->spawnId;
+            const uint32_t targetId =
+                target ? target->spawnId : 0;
             projectiles_[index] = projectiles_.back();
             projectiles_.pop_back();
-            const float reach = collisionRadius(*target) + 0.15f;
-            if (!groundAimed || hitX * hitX + hitY * hitY <= reach * reach)
+            const float reach =
+                target
+                    ? collisionRadius(*target) + 0.15f
+                    : 0.0f;
+            const bool struckTarget =
+                target &&
+                (!groundAimed ||
+                 hitX * hitX + hitY * hitY <=
+                     reach * reach);
+            if (struckTarget)
                 damageObject(*target, damage, landed.sourceId);
             // Impact: the projectile's dying graphic is its hit effect (the
             // heavy assault mech's PROJ-MH3T* use 5007, a small explosion,
@@ -7590,7 +8341,9 @@ void Game::updateProjectiles(float dt) {
             }
             if (landed.blastWidth > 0)
                 applyBlast(landed.sourceId, landed.player, destX, destY,
-                           groundAimed ? 0 : targetId, landed.blastWidth, landed.blastLevel, damage);
+                           struckTarget ? targetId : 0,
+                           landed.blastWidth,
+                           landed.blastLevel, damage);
             continue;
         }
         projectile.x += dx * step / distance;
@@ -7651,6 +8404,132 @@ void Game::updateRemains(float dt) {
         remains_.end());
 }
 
+bool Game::attackReleaseReady(
+    Object &source) {
+    if (!source.attackShotPending) {
+        source.attackShotPending = true;
+        source.animTime = 0.0f;
+    }
+    float releaseTime = 0.0f;
+    if (source.unit->frameDelay > 0) {
+        const dat::Graphic *attackGraphic =
+            assets_.dat().graphic(
+                source.unit->attackGraphic);
+        if (attackGraphic &&
+            attackGraphic->frameDuration > 0)
+            releaseTime =
+                source.unit->frameDelay *
+                attackGraphic->frameDuration;
+    }
+    if (source.animTime + 0.0001f <
+        releaseTime)
+        return false;
+    source.attackShotPending = false;
+    return true;
+}
+
+bool Game::attackAnimationPlaying(
+    const Object &source) const {
+    const dat::Graphic *attackGraphic =
+        assets_.dat().graphic(
+            source.unit->attackGraphic);
+    if (!attackGraphic ||
+        attackGraphic->frameCount <= 0 ||
+        attackGraphic->frameDuration <= 0)
+        return false;
+    return source.animTime <
+           attackGraphic->frameCount *
+               attackGraphic->frameDuration;
+}
+
+void Game::updateAttackGround(
+    Object &source, float dt) {
+    if (!canAttackGround(source)) {
+        source.attackGroundActive = false;
+        source.path.clear();
+        source.pathIndex = 0;
+        source.state = State::Idle;
+        source.attackShotPending = false;
+        return;
+    }
+
+    const float dx =
+        source.attackGroundX - source.x;
+    const float dy =
+        source.attackGroundY - source.y;
+    const float distance =
+        std::sqrt(dx * dx + dy * dy);
+    if (distance > 0.0001f)
+        source.facing = std::atan2(dy, dx);
+    const float maximumRange =
+        std::max(
+            0.0f,
+            modifiedUnitAttribute(
+                source, 12,
+                source.unit->maxRange));
+    const float minimum =
+        minimumRange(source);
+    if (distance <= maximumRange + 0.1f &&
+        distance + 0.05f >= minimum) {
+        source.path.clear();
+        source.pathIndex = 0;
+        source.blockedTime = 0;
+        source.state =
+            source.attackCooldown <= 0 ||
+                    source.attackShotPending ||
+                    attackAnimationPlaying(source)
+                ? State::Attack
+                : State::Idle;
+        if (source.attackCooldown <= 0 &&
+            attackReleaseReady(source)) {
+            launchGroundProjectile(
+                source,
+                source.attackGroundX,
+                source.attackGroundY);
+            source.attackCooldown =
+                std::max(
+                    0.1f,
+                    modifiedUnitAttribute(
+                        source, 10,
+                        source.unit->reloadTime));
+        }
+        return;
+    }
+
+    if (source.unit->speed <= 0 ||
+        source.unit->type == dat::UT_Building) {
+        source.attackShotPending = false;
+        source.state = State::Idle;
+        return;
+    }
+
+    source.attackShotPending = false;
+    const float desiredDistance =
+        std::max(
+            minimum + 0.2f,
+            maximumRange * 0.8f);
+    const float awayX =
+        distance > 0.0001f ? -dx / distance : 1.0f;
+    const float awayY =
+        distance > 0.0001f ? -dy / distance : 0.0f;
+    const float destinationX =
+        source.attackGroundX +
+        awayX * desiredDistance;
+    const float destinationY =
+        source.attackGroundY +
+        awayY * desiredDistance;
+    if (source.attackRepathTime > 0 &&
+        source.state == State::Walk &&
+        source.pathIndex < source.path.size())
+        return;
+    source.attackRepathTime =
+        issueMove(
+            source, destinationX,
+            destinationY)
+            ? 0.5f
+            : 1.5f;
+}
+
 void Game::updateAttack(Object &source, float dt) {
     source.attackCooldown = std::max(0.0f, source.attackCooldown - dt);
     if (source.volleyRemaining > 0) {
@@ -7673,6 +8552,10 @@ void Game::updateAttack(Object &source, float dt) {
     }
     source.attackRepathTime -= dt;
     source.autoAcquireTime -= dt;
+    if (source.attackGroundActive) {
+        updateAttackGround(source, dt);
+        return;
+    }
     if (!source.attackTargetId) {
         if (source.autoAcquireTime <= 0) {
             source.autoAcquireTime =
@@ -7734,8 +8617,14 @@ void Game::updateAttack(Object &source, float dt) {
         source.blockedTime = 0;
         source.attackStallTime = 0;
         source.attackBestDistance = distance;
-        source.state = State::Attack;
-        if (source.attackCooldown <= 0) {
+        source.state =
+            source.attackCooldown <= 0 ||
+                    source.attackShotPending ||
+                    attackAnimationPlaying(source)
+                ? State::Attack
+                : State::Idle;
+        if (source.attackCooldown <= 0 &&
+            attackReleaseReady(source)) {
             const int damage = attackDamage(source, *target);
             if (source.unit->type == dat::UT_Building &&
                 source.unit->maxTotalProjectiles > 0) {
@@ -7747,9 +8636,32 @@ void Game::updateAttack(Object &source, float dt) {
                 source.volleyRemaining = std::max(0, volley - 1);
                 source.volleyTimer = 0.0f;
                 source.volleyTargetId = target->spawnId;
-            } else if (source.unit->projectileUnitId >= 0)
+            } else if (source.unit->projectileUnitId >= 0) {
                 launchProjectile(source, *target, damage);
-            else {
+                const int projectileCount =
+                    source.unit->type ==
+                            dat::UT_Building
+                        ? 1
+                        : std::max(
+                              1,
+                              source.unit
+                                          ->maxTotalProjectiles >
+                                      0
+                                  ? std::min(
+                                        (int)source.unit
+                                            ->maxTotalProjectiles,
+                                        (int)std::lround(
+                                            source.unit
+                                                ->totalProjectiles))
+                                  : (int)std::lround(
+                                        source.unit
+                                            ->totalProjectiles));
+                for (int bolt = 1;
+                     bolt < projectileCount;
+                     bolt++)
+                    launchVolleyBolt(
+                        source, *target);
+            } else {
                 const int soundId = graphicSound(source.unit->attackGraphic);
                 playWorldUnitSound(source, soundId);
                 const float tx = target->x, ty = target->y;
@@ -7763,7 +8675,6 @@ void Game::updateAttack(Object &source, float dt) {
                 0.1f, modifiedUnitAttribute(
                           source, 10,
                           source.unit->reloadTime));
-            source.animTime = 0;
             if (!target->active) {
                 const bool returnToPost =
                     source.attackAutomatic &&
@@ -7774,6 +8685,7 @@ void Game::updateAttack(Object &source, float dt) {
         return;
     }
 
+    source.attackShotPending = false;
     const float contact = collisionRadius(source) + collisionRadius(*target) + 0.08f;
     float desiredDistance =
         source.attackApproachDistance > 0
@@ -8842,6 +9754,8 @@ void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float ta
     for (Object *object : independentTargets) {
         object->attackTargetId = 0;
         object->attackAutomatic = false;
+        object->attackGroundActive = false;
+        object->attackShotPending = false;
         object->moveGroupId = 0;
         object->moveSpeedLimit = 0;
         object->homeX = object->moveAnchorX = targetX;
@@ -9193,6 +10107,8 @@ void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float ta
         if (object->hidden || object->unit->speed <= 0) continue;
         object->attackTargetId = 0;
         object->attackAutomatic = false;
+        object->attackGroundActive = false;
+        object->attackShotPending = false;
         object->moveGroupId = moveGroupId;
         object->moveSpeedLimit = groupSpeed;
         const float lateral = formationOffsets[slot].first;
@@ -9681,27 +10597,30 @@ void Game::executeEffect(const ScenarioEffect &effect) {
             (size_t)sourcePlayer <
                 disabledTechs_.size() &&
             !(fullTechTreeCheat_ &&
-              sourcePlayer == localPlayer_))
+              sourcePlayer == localPlayer_)) {
             disabledTechs_[(size_t)sourcePlayer].insert(technology);
             techGeneration_++;
+        }
         break;
     case 34:
         if (sourcePlayer >= 0 &&
             (size_t)sourcePlayer <
-                disabledUnits_.size())
+                disabledUnits_.size()) {
             techGeneration_++;
             disabledUnits_[(size_t)sourcePlayer].erase(
                 technology);
+        }
         break;
     case 35:
         if (sourcePlayer >= 0 &&
             (size_t)sourcePlayer <
                 disabledUnits_.size() &&
             !(fullTechTreeCheat_ &&
-              sourcePlayer == localPlayer_))
+              sourcePlayer == localPlayer_)) {
             techGeneration_++;
             disabledUnits_[(size_t)sourcePlayer].insert(
                 technology);
+        }
         break;
     case 36:
         for (Object *object : effectTargets(effect)) object->flashTime = 7.0f;
@@ -9889,6 +10808,71 @@ std::string Game::describeObjectForTesting(uint32_t spawnId) const {
     return text;
 }
 
+bool Game::issuePatrolForTesting(
+    uint32_t spawnId, float x, float y) {
+    Object *unit = findObject(spawnId);
+    if (!unit || unitCommands(*unit).empty())
+        return false;
+    clearUnitCommandOrder(*unit);
+    unit->patrolActive = true;
+    unit->patrolTowardEnd = true;
+    unit->patrolStartX = unit->x;
+    unit->patrolStartY = unit->y;
+    unit->patrolEndX = x;
+    unit->patrolEndY = y;
+    unit->attackTargetId = 0;
+    unit->attackGroundActive = false;
+    unit->moveGoalActive =
+        issueMove(*unit, x, y);
+    unit->wander = false;
+    return unit->moveGoalActive;
+}
+
+bool Game::issueGuardForTesting(
+    uint32_t spawnId,
+    uint32_t targetId) {
+    Object *unit = findObject(spawnId);
+    Object *target = findObject(targetId);
+    if (!unit || !target ||
+        unit == target ||
+        !isFriendlyPlayer(
+            unit->player,
+            target->player) ||
+        unitCommands(*unit).empty())
+        return false;
+    clearUnitCommandOrder(*unit);
+    unit->guardTargetId = targetId;
+    updateUnitCommandOrder(*unit, 0.0f);
+    return true;
+}
+
+bool Game::issueFollowForTesting(
+    uint32_t spawnId,
+    uint32_t targetId) {
+    Object *unit = findObject(spawnId);
+    Object *target = findObject(targetId);
+    if (!unit || !target ||
+        unit == target ||
+        !isFriendlyPlayer(
+            unit->player,
+            target->player) ||
+        unitCommands(*unit).empty())
+        return false;
+    clearUnitCommandOrder(*unit);
+    unit->followTargetId = targetId;
+    updateUnitCommandOrder(*unit, 0.0f);
+    return true;
+}
+
+bool Game::stopUnitForTesting(
+    uint32_t spawnId) {
+    Object *unit = findObject(spawnId);
+    if (!unit || unitCommands(*unit).empty())
+        return false;
+    stopUnit(*unit);
+    return true;
+}
+
 void Game::groupMoveForTesting(const std::vector<uint32_t> &spawnIds,
                                float x, float y, int formation) {
     std::vector<Object *> targets;
@@ -9921,6 +10905,8 @@ void Game::update(float dt, const InputState &in) {
     // Placement armed by the build menu last frame may now take clicks.
     placementJustBegun_ = false;
     gatherPointJustBegun_ = false;
+    attackGroundJustBegun_ = false;
+    unitCommandJustBegun_ = false;
     statusTime_ = std::max(0.0f, statusTime_ - dt);
     if (statusTime_ <= 0) statusMessage_.clear();
     if (!currentInstruction_.empty()) {
@@ -9963,6 +10949,12 @@ void Game::update(float dt, const InputState &in) {
         Object *subject = findObject(actionMenuObjectId_);
         if (actionMenuTab_ ==
             ActionMenuTab::Stances) {
+        } else if (
+            subject &&
+            actionMenuTab_ ==
+                ActionMenuTab::Commands &&
+            subject->unit->type !=
+                dat::UT_Building) {
         } else if (subject && isWorker(*subject)) {
             const int direction =
                 in.actionTabRight ? 1 : -1;
@@ -9982,12 +10974,17 @@ void Game::update(float dt, const InputState &in) {
                           : ActionMenuTab::Defense;
         } else if (subject) {
             std::vector<ActionMenuTab> tabs;
-            if (!productionOptions(*subject).empty())
-                tabs.push_back(ActionMenuTab::Units);
-            if (hasResearchTab(*subject))
-                tabs.push_back(ActionMenuTab::Research);
-            if (!buildingCommands(*subject).empty())
+            if (subject->unit->type !=
+                dat::UT_Building) {
                 tabs.push_back(ActionMenuTab::Commands);
+            } else {
+                if (!productionOptions(*subject).empty())
+                    tabs.push_back(ActionMenuTab::Units);
+                if (hasResearchTab(*subject))
+                    tabs.push_back(ActionMenuTab::Research);
+                if (!buildingCommands(*subject).empty())
+                    tabs.push_back(ActionMenuTab::Commands);
+            }
             if (!tabs.empty()) {
                 auto current = std::find(
                     tabs.begin(), tabs.end(),
@@ -10014,14 +11011,21 @@ void Game::update(float dt, const InputState &in) {
         if (actionMenuTab_ ==
             ActionMenuTab::Stances)
             optionCount = 4;
+        else if (subject &&
+                 actionMenuTab_ ==
+                     ActionMenuTab::Commands)
+            optionCount =
+                subject->unit->type ==
+                        dat::UT_Building
+                    ? buildingCommands(
+                          *subject)
+                          .size()
+                    : unitCommands(*subject)
+                          .size();
         else if (subject && isWorker(*subject))
             optionCount =
                 buildingOptions(
                     *subject, actionMenuTab_).size();
-        else if (subject &&
-                 actionMenuTab_ ==
-                     ActionMenuTab::Commands)
-            optionCount = 1;
         else if (subject &&
                  actionMenuTab_ ==
                      ActionMenuTab::Units)
@@ -10100,6 +11104,8 @@ void Game::update(float dt, const InputState &in) {
             actionMenuControlConsumed = true;
             actionMenuOpen_ = false;
             actionMenuObjectId_ = 0;
+            playInterfaceFeedback(
+                kInterfaceCancelSound);
         }
     }
 
@@ -10237,7 +11243,7 @@ void Game::update(float dt, const InputState &in) {
             created->initialFrame = 0;
             const uint32_t createdId = created->spawnId;
             classifyObject(objects_.size() - 1);
-            const Object *building = findObject(spawned.buildingId);
+            Object *building = findObject(spawned.buildingId);
             Object *unit = findObject(createdId);
             if (building && unit) sendToGatherPoint(*building, *unit);
         }
@@ -10501,12 +11507,14 @@ void Game::update(float dt, const InputState &in) {
                            in.screenW, in.screenH);
         if (!building ||
             building->player != localPlayer_ ||
-            building->unit->type != dat::UT_Building ||
             building->unit->garrisonCapacity == 0 ||
             building->underConstruction) {
             statusMessage_ =
-                "CANNOT GARRISON IN THAT BUILDING";
+                "CANNOT GARRISON IN THAT TARGET";
             statusTime_ = 3.0f;
+            if (playInterfaceSound_)
+                playInterfaceSound_(
+                    kInterfaceCannotDoSound);
         } else if (issueGarrisonCommand(*building)) {
             garrisonCursorActive_ = false;
             flashCommandTarget(*building);
@@ -10558,10 +11566,186 @@ void Game::update(float dt, const InputState &in) {
         }
         repairHandled = true;
     }
+    bool unitCommandHandled = false;
+    if (unitCommandCursorActive_ &&
+        unitCommandJustBegun_) {
+        unitCommandHandled = true;
+    } else if (!consumeWorldInput &&
+        !placementHandled &&
+        !garrisonHandled &&
+        !repairHandled &&
+        unitCommandCursorActive_ &&
+        in.commandPressed) {
+        unitCommandCursorActive_ = false;
+        statusMessage_ =
+            "COMMAND CANCELLED";
+        statusTime_ = 2.0f;
+        playInterfaceFeedback(
+            kInterfaceCancelSound);
+        unitCommandHandled = true;
+    } else if (
+        !consumeWorldInput &&
+        !placementHandled &&
+        !garrisonHandled &&
+        !repairHandled &&
+        unitCommandCursorActive_ &&
+        (in.selectPressed ||
+         in.pointerTap) &&
+        in.pointerY <
+            in.screenH -
+                kSelectionPanelHeight) {
+        std::vector<Object *> selected =
+            selectedObjectsInOrder(true);
+        Object *acknowledgement = nullptr;
+        bool issued = false;
+        if (pendingUnitCommand_ ==
+            UnitCommand::Patrol) {
+            float targetX = 0.0f;
+            float targetY = 0.0f;
+            screenToWorld(
+                in.pointerX, in.pointerY,
+                in.screenW, in.screenH,
+                targetX, targetY);
+            for (Object *unit : selected) {
+                clearUnitCommandOrder(*unit);
+                unit->patrolActive = true;
+                unit->patrolTowardEnd = true;
+                unit->patrolStartX = unit->x;
+                unit->patrolStartY = unit->y;
+                unit->patrolEndX = targetX;
+                unit->patrolEndY = targetY;
+                unit->attackGroundActive = false;
+                unit->attackTargetId = 0;
+                unit->moveGoalActive =
+                    issueMove(
+                        *unit, targetX,
+                        targetY);
+                unit->wander = false;
+                issued =
+                    unit->moveGoalActive ||
+                    issued;
+                if (!acknowledgement)
+                    acknowledgement = unit;
+            }
+            commandMarkerX_ = targetX;
+            commandMarkerY_ = targetY;
+            commandMarkerTime_ = 0.65f;
+        } else {
+            Object *target =
+                objectAtScreen(
+                    in.pointerX,
+                    in.pointerY,
+                    in.screenW,
+                    in.screenH);
+            if (target && target->active &&
+                !target->hidden &&
+                isFriendlyPlayer(
+                    localPlayer_,
+                    target->player)) {
+                for (Object *unit : selected) {
+                    if (unit == target) continue;
+                    clearUnitCommandOrder(*unit);
+                    unit->attackGroundActive =
+                        false;
+                    unit->attackTargetId = 0;
+                    unit->moveGoalActive = false;
+                    if (pendingUnitCommand_ ==
+                        UnitCommand::Guard)
+                        unit->guardTargetId =
+                            target->spawnId;
+                    else
+                        unit->followTargetId =
+                            target->spawnId;
+                    updateUnitCommandOrder(
+                        *unit, 0.0f);
+                    if (!acknowledgement)
+                        acknowledgement = unit;
+                    issued = true;
+                }
+                flashCommandTarget(*target);
+            }
+        }
+        if (issued) {
+            if (acknowledgement)
+                playUnitAcknowledgement(
+                    *acknowledgement,
+                    false);
+            statusMessage_ =
+                pendingUnitCommand_ ==
+                        UnitCommand::Patrol
+                    ? "PATROLLING"
+                    : pendingUnitCommand_ ==
+                              UnitCommand::Guard
+                          ? "GUARDING"
+                          : "FOLLOWING";
+            statusTime_ = 2.0f;
+            unitCommandCursorActive_ =
+                false;
+        } else {
+            showCannotDo(
+                -1,
+                pendingUnitCommand_ ==
+                        UnitCommand::Patrol
+                    ? "CANNOT PATROL THERE"
+                    : "SELECT A FRIENDLY TARGET");
+        }
+        unitCommandHandled = true;
+    }
+    bool attackGroundHandled =
+        unitCommandHandled;
+    if (attackGroundCursorActive_ &&
+        attackGroundJustBegun_) {
+        attackGroundHandled = true;
+    } else if (!consumeWorldInput &&
+        !placementHandled &&
+        !garrisonHandled &&
+        !repairHandled &&
+        !unitCommandHandled &&
+        attackGroundCursorActive_ &&
+        in.commandPressed) {
+        attackGroundCursorActive_ = false;
+        statusMessage_ = "ATTACK GROUND CANCELLED";
+        statusTime_ = 2.0f;
+        attackGroundHandled = true;
+    } else if (
+        !consumeWorldInput &&
+        !placementHandled &&
+        !garrisonHandled &&
+        !repairHandled &&
+        !unitCommandHandled &&
+        attackGroundCursorActive_ &&
+        (in.selectPressed || in.pointerTap) &&
+        in.pointerY <
+            in.screenH -
+                kSelectionPanelHeight) {
+        float targetX = 0.0f;
+        float targetY = 0.0f;
+        screenToWorld(
+            in.pointerX, in.pointerY,
+            in.screenW, in.screenH,
+            targetX, targetY);
+        Object *acknowledgement = nullptr;
+        for (Object *source :
+             selectedObjectsInOrder(true))
+            if (issueAttackGround(
+                    *source, targetX, targetY) &&
+                !acknowledgement)
+                acknowledgement = source;
+        if (acknowledgement) {
+            playUnitAcknowledgement(
+                *acknowledgement, true);
+            commandMarkerX_ = targetX;
+            commandMarkerY_ = targetY;
+            commandMarkerTime_ = 0.65f;
+        }
+        attackGroundCursorActive_ = false;
+        attackGroundHandled = true;
+    }
     if (!consumeWorldInput &&
         !actionMenuControlConsumed &&
         !placementHandled &&
         !garrisonHandled && !repairHandled &&
+        !attackGroundHandled &&
         in.selectPressed) {
         if (actionMenuOpen_)
             handleActionMenuClick(
@@ -10576,10 +11760,13 @@ void Game::update(float dt, const InputState &in) {
         !actionMenuControlConsumed &&
         !placementHandled &&
         !garrisonHandled && !repairHandled &&
+        !attackGroundHandled &&
         in.cycleAttackMode) {
         if (actionMenuOpen_) {
             actionMenuOpen_ = false;
             actionMenuObjectId_ = 0;
+            playInterfaceFeedback(
+                kInterfaceCancelSound);
         } else if (!openSelectedActionMenu()) {
             cycleSelectedAttackMode();
         }
@@ -10588,10 +11775,13 @@ void Game::update(float dt, const InputState &in) {
         !actionMenuControlConsumed &&
         !placementHandled &&
         !garrisonHandled && !repairHandled &&
+        !attackGroundHandled &&
         in.commandPressed) {
         if (actionMenuOpen_) {
             actionMenuOpen_ = false;
             actionMenuObjectId_ = 0;
+            playInterfaceFeedback(
+                kInterfaceCancelSound);
         } else {
             commandAtScreen(in.pointerX, in.pointerY,
                             in.screenW, in.screenH);
@@ -10601,6 +11791,7 @@ void Game::update(float dt, const InputState &in) {
         !actionMenuControlConsumed &&
         !placementHandled &&
         !garrisonHandled && !repairHandled &&
+        !attackGroundHandled &&
         in.pointerTap) {
         if (actionMenuOpen_) {
             handleActionMenuClick(
@@ -10667,6 +11858,16 @@ void Game::update(float dt, const InputState &in) {
              cursorVisible_ &&
              repairCursorActive_)
         cursorMode_ = CursorMode::Repair;
+    else if (!consumeWorldInput &&
+             cursorVisible_ &&
+             attackGroundCursorActive_)
+        cursorMode_ = CursorMode::AttackGround;
+    else if (!consumeWorldInput &&
+             cursorVisible_ &&
+             unitCommandCursorActive_ &&
+             pendingUnitCommand_ ==
+                 UnitCommand::Patrol)
+        cursorMode_ = CursorMode::Move;
     else if (!consumeWorldInput && cursorVisible_ &&
         !boxSelectActive_ && hasSelectedUnit()) {
         Object *hovered =
@@ -10808,11 +12009,14 @@ void Game::update(float dt, const InputState &in) {
         o.animTime += dt;
         o.approachRetry = std::max(0.0f, o.approachRetry - dt);
         o.flashTime = std::max(0.0f, o.flashTime - dt);
+        updateUnitCommandOrder(o, dt);
         // Passengers and garrisoned units don't fight from inside (a
         // building's garrison fire is the building's own volley).
         if (o.garrisonedInId >= 0) {
             o.attackTargetId = 0;
             o.attackAutomatic = false;
+            o.attackGroundActive = false;
+            o.attackShotPending = false;
         } else {
             updateAttack(o, dt);
         }
@@ -11431,6 +12635,8 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         assets_.interfaceSheet(kCommandIconSlp);
     const Object *panelObject = nullptr;
     const Object *selectedAttacker = nullptr;
+    const Object *selectedCommandUnit =
+        nullptr;
     size_t panelSelectionCount = 0;
     float panelHitPoints = 0, panelMaxHitPoints = 0;
     float panelShieldPoints = 0;
@@ -11450,6 +12656,9 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         panelShieldPoints += object->shieldPoints;
         panelMaxShieldPoints +=
             object->maxShieldPoints;
+        if (!selectedCommandUnit &&
+            !unitCommands(*object).empty())
+            selectedCommandUnit = object;
         if (isWorker(*object) ||
             !canAttack(*object) ||
             object->unit->type ==
@@ -13099,7 +14308,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                     [&](const Object *object) {
                         return object && object->active &&
                                !object->hidden &&
-                               garrisonCategory(*object) != 0;
+                               hasAnyGarrisonTask(*object);
                     });
             const bool showRepairCommand =
                 std::any_of(
@@ -13284,6 +14493,68 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                         commandsX +
                             224.0f * invZoom);
             }
+            if (selectedCommandUnit) {
+                const float buttonX =
+                    commandsX + 220.0f * invZoom;
+                const float buttonY =
+                    panelY + 18.0f * invZoom;
+                r.fillRect(
+                    buttonX, buttonY,
+                    46.0f * invZoom,
+                    46.0f * invZoom,
+                    actionMenuOpen_ &&
+                            actionMenuTab_ ==
+                                ActionMenuTab::Commands
+                        ? 24
+                        : 22,
+                    actionMenuOpen_ &&
+                            actionMenuTab_ ==
+                                ActionMenuTab::Commands
+                        ? 96
+                        : 54,
+                    actionMenuOpen_ &&
+                            actionMenuTab_ ==
+                                ActionMenuTab::Commands
+                        ? 116
+                        : 72,
+                    255);
+                if (commandIcons &&
+                    (size_t)unitCommandIcon(
+                        UnitCommand::Stop) <
+                        commandIcons->frames.size()) {
+                    const SpriteFrame &icon =
+                        commandIcons->frames[
+                            (size_t)unitCommandIcon(
+                                UnitCommand::Stop)];
+                    const float scale =
+                        std::min(
+                            40.0f / icon.w,
+                            40.0f / icon.h) *
+                        invZoom;
+                    r.draw(
+                        icon.tex,
+                        {buttonX +
+                             3.0f * invZoom,
+                         buttonY +
+                             3.0f * invZoom,
+                         icon.w * scale,
+                         icon.h * scale,
+                         icon.u, icon.v,
+                         icon.u + icon.w,
+                         icon.v + icon.h});
+                }
+                drawBitmapText(
+                    r, {"UNIT", "COMMANDS"},
+                    buttonX,
+                    panelY + 68.0f * invZoom,
+                    0.68f * invZoom,
+                    165, 225, 235);
+                commandsTextX =
+                    std::max(
+                        commandsTextX,
+                        commandsX +
+                            276.0f * invZoom);
+            }
             const bool showCommandHelp =
                 commandsTextX <
                 (screenW - 100.0f) * invZoom;
@@ -13379,7 +14650,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
 
     if (localPlayer_ > 0) {
         static constexpr int resourceIds[] = {0, 1, 3, 2};
-        static constexpr size_t resourceFrames[] = {2, 0, 1, 3};
+        static constexpr size_t resourceFrames[] = {2, 0, 3, 1};
         const SpriteSheet *resourceIcons =
             assets_.interfaceSheet(50732);
         const float invZoom = 1.0f / zoom_;
@@ -13625,7 +14896,12 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 actionMenuTab_ ==
                 ActionMenuTab::Stances;
             const bool worker =
-                !stanceMenu && isWorker(*subject);
+                !stanceMenu &&
+                !(actionMenuTab_ ==
+                      ActionMenuTab::Commands &&
+                  subject->unit->type !=
+                      dat::UT_Building) &&
+                isWorker(*subject);
             const std::vector<const dat::Unit *> units =
                 worker
                     ? buildingOptions(*subject,
@@ -13645,11 +14921,31 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 !worker &&
                 actionMenuTab_ ==
                     ActionMenuTab::Commands;
+            const bool unitCommandOption =
+                commandOption &&
+                subject->unit->type !=
+                    dat::UT_Building;
+            const std::vector<BuildingCommand>
+                buildingCommandOptions =
+                    commandOption &&
+                            !unitCommandOption
+                        ? buildingCommands(
+                              *subject)
+                        : std::vector<
+                              BuildingCommand>{};
+            const std::vector<UnitCommand>
+                unitCommandOptions =
+                    unitCommandOption
+                        ? unitCommands(*subject)
+                        : std::vector<
+                              UnitCommand>{};
             const size_t optionCount =
                 stanceMenu
                     ? 4
                     : commandOption
-                    ? buildingCommands(*subject).size()
+                    ? unitCommandOption
+                          ? unitCommandOptions.size()
+                          : buildingCommandOptions.size()
                     : units.empty()
                           ? technologies.size()
                           : units.size();
@@ -13708,17 +15004,24 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                     "DEFENSE  R",
                 };
             } else {
-                if (!productionOptions(*subject).empty()) {
+                if (unitCommandOption) {
+                    tabs.push_back(
+                        ActionMenuTab::Commands);
+                    tabLabels.push_back(
+                        "UNIT COMMANDS");
+                } else if (!productionOptions(*subject).empty()) {
                     tabs.push_back(
                         ActionMenuTab::Units);
                     tabLabels.push_back("L  UNITS");
                 }
-                if (hasResearchTab(*subject)) {
+                if (!unitCommandOption &&
+                    hasResearchTab(*subject)) {
                     tabs.push_back(
                         ActionMenuTab::Research);
                     tabLabels.push_back("RESEARCH");
                 }
-                if (!buildingCommands(*subject).empty()) {
+                if (!unitCommandOption &&
+                    !buildingCommandOptions.empty()) {
                     tabs.push_back(
                         ActionMenuTab::Commands);
                     tabLabels.push_back("COMMANDS  R");
@@ -13847,8 +15150,18 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                                     ? (int)((size_t)subject->attackMode == option
                                                 ? kStanceActiveIcons[option & 3]
                                                 : kStanceIcons[option & 3])
-                              : option < buildingCommands(*subject).size()
-                                    ? buildingCommandIcon(*subject, buildingCommands(*subject)[option])
+                              : unitCommandOption &&
+                                        option <
+                                            unitCommandOptions.size()
+                                    ? unitCommandIcon(
+                                          unitCommandOptions[
+                                              option])
+                              : option <
+                                        buildingCommandOptions.size()
+                                    ? buildingCommandIcon(
+                                          *subject,
+                                          buildingCommandOptions[
+                                              option])
                                     : (int)kCommandEjectIcon;
                 if (icons && iconId >= 0 &&
                     (size_t)iconId <
@@ -13940,10 +15253,21 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             else if (selectedTechnology >= 0)
                 title = technologyDisplayName(
                     selectedTechnology);
-            else if (commandOption &&
-                     actionMenuSelection_ < buildingCommands(*subject).size())
+            else if (
+                unitCommandOption &&
+                actionMenuSelection_ <
+                    unitCommandOptions.size())
+                title = unitCommandTitle(
+                    unitCommandOptions[
+                        actionMenuSelection_]);
+            else if (
+                commandOption &&
+                actionMenuSelection_ <
+                    buildingCommandOptions.size())
                 title = buildingCommandTitle(
-                    *subject, buildingCommands(*subject)[actionMenuSelection_]);
+                    *subject,
+                    buildingCommandOptions[
+                        actionMenuSelection_]);
             if (title.size() > 38)
                 title.resize(38);
             drawBitmapText(
@@ -14094,10 +15418,22 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                         wrapped.begin(),
                         wrapped.end());
                 }
-            } else if (commandOption &&
-                       actionMenuSelection_ < buildingCommands(*subject).size()) {
+            } else if (
+                unitCommandOption &&
+                actionMenuSelection_ <
+                    unitCommandOptions.size()) {
+                detailLines.push_back(
+                    unitCommandHelp(
+                        unitCommandOptions[
+                            actionMenuSelection_]));
+            } else if (
+                commandOption &&
+                actionMenuSelection_ <
+                    buildingCommandOptions.size()) {
                 detailLines.push_back(buildingCommandHelp(
-                    *subject, buildingCommands(*subject)[actionMenuSelection_]));
+                    *subject,
+                    buildingCommandOptions[
+                        actionMenuSelection_]));
             }
             if (detailLines.size() > 11)
                 detailLines.resize(11);
@@ -14692,6 +16028,8 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         if (cursorMode_ == CursorMode::Placement) frameIndex = kCursorPlacement;
         if (cursorMode_ == CursorMode::GatherPoint) frameIndex = kCursorGatherPoint;
         if (cursorMode_ == CursorMode::Attack) frameIndex = kCursorAttack;
+        if (cursorMode_ == CursorMode::AttackGround)
+            frameIndex = kCursorAttackGround;
         if (cursorMode_ == CursorMode::Garrison)
             frameIndex = kCursorGarrison;
         if (cursorMode_ == CursorMode::Gather)
@@ -14704,6 +16042,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             const bool centered =
                 cursorMode_ == CursorMode::Move ||
                 cursorMode_ == CursorMode::Attack ||
+                cursorMode_ == CursorMode::AttackGround ||
                 cursorMode_ == CursorMode::Garrison ||
                 cursorMode_ == CursorMode::Gather ||
                 cursorMode_ == CursorMode::Repair ||

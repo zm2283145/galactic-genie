@@ -24,6 +24,8 @@ build and test on Vita.
 | Workers | DAT class 58 and `UNIT-WORKER[A/B]1..11` task variants | Partially verified and covered |
 | Combat target eligibility | Attack-task validation at `0x5b9930`; class filter at `0x41c530`; DAT effect 129 | Verified and covered |
 | Building attack approach | DAT rectangular collision footprints; attack action and path goal state | Covered; exact original slot ordering remains open |
+| Attack Ground | Command-panel construction at `0x503aca`; opcode `0x6b`; DAT blast/projectile fields | Verified and covered |
+| Firing presentation | DAT attack graphic, frame delay, projectile totals, secondary projectile, and impact data | Partially verified and covered |
 | AI scripts | Original `.per` parser, facts, actions, and managers | Not implemented |
 
 ## Production exits
@@ -97,12 +99,30 @@ Engine contract:
 
 `mcursors.shp` resource 51000 contains distinct semantic frames. Frame 2 is
 the valid-order confirmation marker; frame 5 is move, 6 gather/drop-off, 7
-building placement, 9 repair, 11 attack, 12 garrison, and 18 set gather point.
+building placement, 9 repair, 10 Attack Ground, 11 attack, 13 garrison, and 18
+set gather point.
 Frames 2/3/4 are not interchangeable generic action cursors. The repair and
 destroy command-panel icons remain frames 28 and 59 of command sheet 50721,
 as constructed by the executable with help strings 4927 and 4941.
 Attack stances are offered only to eligible combat units; workers and
 buildings do not show the stance button or stance status.
+
+The executable builds the ordinary mobile-unit commands together at
+`0x503aca`: Stop uses command-sheet frame 3, panel action 5, and help string
+4905; Patrol uses frame 6, action `0x26`, and help 4938; Guard uses frame 7,
+action `0x24`, and help 4936; Follow uses frame 8, action `0x25`, and help
+4937. Attack Ground remains frame 60/action `0x17`. The Vita presentation
+keeps those original icons and localized strings in one command grid so the
+five commands remain accessible without shrinking their touch targets.
+
+Patrol alternates between the unit's order-time position and the selected
+point, temporarily engaging enemies permitted by its stance before resuming.
+Guard follows a friendly object, acquires threats around that object, and
+returns to it after combat. Follow maintains spacing from a friendly object
+without adding Guard's protected-object acquisition. Stop clears movement,
+combat, work, garrison approach, patrol, guard, follow, and pending fire.
+Explicit replacement orders clear patrol/guard/follow; automatic stance
+attacks do not.
 
 ## Combat targeting and building approach
 
@@ -145,6 +165,66 @@ Engine contract:
   are used by simulation as well as the information panel.
 - Crowds attacking large or rectangular buildings occupy distinct passable
   perimeter points and retry blocked points without stacking.
+
+## Attack Ground and firing presentation
+
+The executable constructs Attack Ground at `0x503aca` as panel action `0x17`
+with command-sheet frame 60, name string 4123, help string 4923, and network
+command `0x6b`. Its packet contains the selected object IDs and a world-space
+X/Y point. The command uses `mcursors.shp` frame 10 rather than the ordinary
+attack cursor.
+
+Eligibility is data-driven: a mobile combat unit must have a valid projectile
+and a non-zero DAT `blastWidth`. This includes bombers, Grenade Troopers,
+Assault Mechs, artillery, Air Cruisers, their hero/scenario variants, Ewok
+Glider 1273, Ewok Catapult 1275, and cheat units Blockade Runner 1580, Star
+Destroyer 1586, and Death Star 1587. Killer Ewok 1204, Bongo Marauder 1314,
+Decimator 545, ordinary direct-fire units, and buildings do not qualify.
+
+An Attack Ground order retains the point instead of synthesizing an object
+target. The unit enters maximum range, backs out to its researched minimum
+range when necessary, faces the point, and repeats its attack until another
+order replaces it. Targetless projectiles retain their DAT flight, impact
+graphic, impact sound, blast width, and blast level. Selection changes,
+explicit cancellation, and replacement commands leave targeting mode
+cleanly.
+
+Projectile release begins the DAT attack graphic and waits
+`frameDelay * attackGraphic.frameDuration`. The attack graphic completes once
+instead of looping for the whole reload interval. Mobile units with
+`totalProjectiles > 1` launch the clamped DAT count, using
+`secondaryProjectileUnit` for additional bolts where supplied. Heavy
+Artillery therefore launches projectile 656 followed by 369; the existing
+building/garrison volley path remains separately sequenced.
+
+Engine contract:
+
+- Every unit with original blast-projectile eligibility shows command icon 60
+  and accepts a ground point with cursor frame 10.
+- Ground-point orders do not require or retain a live object target.
+- Range, minimum range, reload, projectile substitution, attack graphics,
+  launch sounds, impact graphics, impact sounds, and blast behavior remain
+  DAT-driven.
+- Projectile release occurs at the DAT frame delay for ordinary attacks and
+  Attack Ground, and multi-projectile mobile units launch their DAT count.
+
+## Garrison rally targets and interface feedback
+
+Action-3 tasks in the produced unit's own header determine compatible
+garrison containers, including ships (class 17), buildings (18), Assault
+Mechs (53), and air transports (59). Building `garrisonType` masks retain the
+Genie categories: workers 1, infantry (including Grenade Troopers) 2, mounted
+troopers 4, Force users 8, and livestock 16. Dedicated garrison targeting and
+production rally points both use the same compatibility and capacity
+reservation path. A rally target may therefore be a different compatible
+building or a mobile transport; incoming units reserve capacity before they
+arrive. The original boarding cursor is `mcursors.shp` frame 13.
+
+The original interface sound table maps `button1.wav`, `button2.wav`, and
+`cantdo.wav` to resources 50300, 50301, and 50303. Successful menu choices use
+50300, cancel/back uses 50301, and rejected actions such as full queues,
+resource shortages, and invalid/full garrison targets use 50303. Resource
+shortages use strings 3001-3004 and production queue full uses string 3088.
 
 ## Workers
 

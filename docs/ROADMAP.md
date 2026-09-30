@@ -118,7 +118,10 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   removes one object per press in reverse selection order. Eligible buildings show their garrisoned
   unit portraits; a portrait ejects only that unit while Eject All remains available. Attack-capable
   selections expose a dedicated original-style stance grid while Triangle still cycles stances
-  directly. Choosing a formation immediately rearranges idle combat units.
+  directly. Mobile units expose the original Stop, Patrol, Guard, Follow, and Attack Ground
+  icons in a dedicated command grid; patrol resumes after stance-aware combat, Guard protects
+  and returns to a friendly target, Follow maintains spacing, and Stop clears the active order.
+  Choosing a formation immediately rearranges idle combat units.
   Multiple selected workers can open the same three categorized building pages and share the resulting
   construction order and placement preview. Empty buildings do not
   expose an action-menu hint. Selection status distinguishes the local player,
@@ -129,8 +132,8 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   A persistent resource, population, and Tech Level bar is shown at the top, including age-research
   progress. A scrollable L + R + Select test menu exposes
   the original base-game and Clone Campaigns cheats, including resource grants, unit spawns, instant
-  production/construction, victory/player defeat, and hidden DAT cheat technologies. General worker
-  guard/patrol buttons, minimap, and pause menu remain.
+  production/construction, victory/player defeat, and hidden DAT cheat technologies.
+  Minimap and pause menu remain.
 - Audio: selection, move, and attack acknowledgements plus camera-relative weapon-fire, impact, and
   death effects are implemented. The original Ogg soundtrack streams from storage, ducks beneath
   scenario dialogue, and mixes with terrain-specific world ambience. Garrison/ejection, gate

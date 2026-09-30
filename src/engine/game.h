@@ -288,6 +288,19 @@ public:
                    ? -1
                    : projectiles_.front().unit->id;
     }
+    int projectileUnitForTesting(size_t index) const {
+        return index >= projectiles_.size() ||
+                       !projectiles_[index].unit
+                   ? -1
+                   : projectiles_[index].unit->id;
+    }
+    bool attackShotPendingForTesting(
+        uint32_t spawnId) const {
+        const Object *object =
+            findObject(spawnId);
+        return object &&
+               object->attackShotPending;
+    }
     uint32_t attackTargetForTesting(
         uint32_t spawnId) const {
         const Object *object =
@@ -295,6 +308,65 @@ public:
         return object
                    ? object->attackTargetId
                    : 0;
+    }
+    bool canAttackGroundForTesting(
+        uint32_t spawnId) const {
+        const Object *object =
+            findObject(spawnId);
+        return object &&
+               canAttackGround(*object);
+    }
+    bool issueAttackGroundForTesting(
+        uint32_t spawnId, float x, float y) {
+        Object *object = findObject(spawnId);
+        return object &&
+               issueAttackGround(
+                   *object, x, y);
+    }
+    bool attackGroundActiveForTesting(
+        uint32_t spawnId) const {
+        const Object *object =
+            findObject(spawnId);
+        return object &&
+               object->attackGroundActive;
+    }
+    bool attackGroundCursorActiveForTesting() const {
+        return attackGroundCursorActive_;
+    }
+    bool issuePatrolForTesting(
+        uint32_t spawnId, float x, float y);
+    bool issueGuardForTesting(
+        uint32_t spawnId,
+        uint32_t targetId);
+    bool issueFollowForTesting(
+        uint32_t spawnId,
+        uint32_t targetId);
+    bool stopUnitForTesting(uint32_t spawnId);
+    bool patrolActiveForTesting(
+        uint32_t spawnId) const {
+        const Object *object =
+            findObject(spawnId);
+        return object &&
+               object->patrolActive;
+    }
+    uint32_t guardTargetForTesting(
+        uint32_t spawnId) const {
+        const Object *object =
+            findObject(spawnId);
+        return object
+                   ? object->guardTargetId
+                   : 0;
+    }
+    uint32_t followTargetForTesting(
+        uint32_t spawnId) const {
+        const Object *object =
+            findObject(spawnId);
+        return object
+                   ? object->followTargetId
+                   : 0;
+    }
+    bool selectedCanAttackGroundForTesting() const {
+        return selectedCanAttackGround();
     }
     float minimumRangeForTesting(uint32_t id) const { const Object *o = findObject(id); return o ? minimumRange(*o) : -1.0f; }
     void clearSelectionForTesting() { clearSelection(); }
@@ -386,6 +458,7 @@ private:
         Garrison,
         Gather,
         Repair,
+        AttackGround,
         Placement,
         GatherPoint,
     };
@@ -404,6 +477,13 @@ private:
         Defensive,
         StandGround,
         Passive,
+    };
+    enum class UnitCommand : uint8_t {
+        Stop,
+        Patrol,
+        Guard,
+        Follow,
+        AttackGround,
     };
 
     struct ProductionItem {
@@ -456,6 +536,18 @@ private:
         float moveAnchorX = 0, moveAnchorY = 0;
         AttackMode attackMode = AttackMode::Aggressive;
         bool attackAutomatic = false;
+        bool attackShotPending = false;
+        bool attackGroundActive = false;
+        float attackGroundX = 0;
+        float attackGroundY = 0;
+        bool patrolActive = false;
+        bool patrolTowardEnd = true;
+        float patrolStartX = 0;
+        float patrolStartY = 0;
+        float patrolEndX = 0;
+        float patrolEndY = 0;
+        uint32_t guardTargetId = 0;
+        uint32_t followTargetId = 0;
         bool moveGoalActive = false;
         bool wander = true;
         bool drawShadows = true;
@@ -600,10 +692,14 @@ private:
     int gatherClass(const Object &target) const {
         return target.carcassClass >= 0 ? target.carcassClass : (target.unit ? target.unit->cls : -1);
     }
+    bool hasAnyGarrisonTask(const Object &unit) const;
     bool hasGarrisonTask(const Object &unit, const Object &container) const;
     bool isTransport(const Object &object) const;
     bool isFoodProcessingCenter(const Object &building) const;
     bool queueFarmReseed(const Object &building, const dat::Unit &farm);
+    void playInterfaceFeedback(int soundId);
+    void showCannotDo(int languageId, const std::string &fallback);
+    void showResourceShortage(int resourceType);
     int carryTypeForSite(const Object &worker) const;
     bool siteAcceptsType(const Object &worker, const Object &building, int type) const;
     bool hasCarry(const Object &worker) const;
@@ -651,6 +747,11 @@ private:
     bool canAttack(const Object &object) const;
     bool canAttackTarget(
         const Object &source, const Object &target) const;
+    bool canAttackGround(
+        const Object &source) const;
+    bool selectedCanAttackGround() const;
+    bool issueAttackGround(
+        Object &source, float x, float y);
     void attackApproachPoint(
         const Object &source, const Object &target,
         float angle, float centerDistance,
@@ -690,13 +791,21 @@ private:
     void launchVolleyBolt(Object &source, const Object &target);
     enum class BuildingCommand : uint8_t { Eject, ToggleGate, SetGatherPoint, RemoveGatherPoint };
     std::vector<BuildingCommand> buildingCommands(const Object &building) const;
+    std::vector<UnitCommand> unitCommands(const Object &unit) const;
+    int unitCommandIcon(UnitCommand command) const;
+    std::string unitCommandTitle(UnitCommand command) const;
+    std::string unitCommandHelp(UnitCommand command) const;
+    void executeUnitCommand(UnitCommand command);
+    void clearUnitCommandOrder(Object &unit);
+    void stopUnit(Object &unit);
+    void updateUnitCommandOrder(Object &unit, float dt);
     int buildingCommandIcon(const Object &building, BuildingCommand command) const;
     std::string buildingCommandTitle(const Object &building, BuildingCommand command) const;
     std::string buildingCommandHelp(const Object &building, BuildingCommand command) const;
     void executeBuildingCommand(Object &building, BuildingCommand command);
     bool canSetGatherPoint(const Object &building) const;
     void setGatherPoint(Object &building, float screenX, float screenY, int screenW, int screenH);
-    void sendToGatherPoint(const Object &building, Object &unit);
+    void sendToGatherPoint(Object &building, Object &unit);
     struct WallTile {
         int x, y, frame;
     };
@@ -752,7 +861,7 @@ private:
         const Object &building) const;
     bool buildingMatchesLocation(
         const Object &building, int locationId) const;
-    std::vector<int> researchOptions(
+    const std::vector<int> &researchOptions(
         const Object &building) const;
     std::string technologyDisplayName(
         int technologyId) const;
@@ -834,6 +943,8 @@ private:
     size_t garrisonedCount(const Object &building,
                            bool includeIncoming) const;
     bool issueGarrisonCommand(Object &building);
+    bool issueGarrisonOrder(
+        Object &unit, Object &container);
     void updateGarrisoning();
     bool ejectGarrisonedUnit(
         Object &building, Object &unit,
@@ -860,9 +971,18 @@ private:
     float automaticAcquisitionRadius(const Object &source) const;
     float automaticPursuitLeash(const Object &source) const;
     void updateAttack(Object &source, float dt);
+    void updateAttackGround(
+        Object &source, float dt);
+    bool attackReleaseReady(
+        Object &source);
+    bool attackAnimationPlaying(
+        const Object &source) const;
     const dat::Unit *projectileUnitForTarget(
         const Object &source, const Object &target) const;
     void launchProjectile(const Object &source, const Object &target, int damage);
+    void launchGroundProjectile(
+        const Object &source,
+        float targetX, float targetY);
     void updateProjectiles(float dt);
     void updateRemains(float dt);
     void damageObject(Object &object, int damage, uint32_t attackerId);
@@ -1031,10 +1151,26 @@ private:
     mutable std::array<uint64_t, 17> availableCacheGeneration_{};
     mutable std::array<std::map<int, int>, 17> upgradeCache_{};
     mutable std::array<uint64_t, 17> upgradeCacheGeneration_{};
+    struct ResearchMenuCacheEntry {
+        uint64_t techGeneration = 0;
+        uint64_t queueSignature = 0;
+        int unitId = -1;
+        std::vector<int> options;
+        bool hasTab = false;
+    };
+    mutable std::unordered_map<
+        uint32_t, ResearchMenuCacheEntry>
+        researchMenuCache_;
     bool forceExploreCheat_ = false;
     bool forceSightCheat_ = false;
     bool garrisonCursorActive_ = false;
     bool repairCursorActive_ = false;
+    bool attackGroundCursorActive_ = false;
+    bool attackGroundJustBegun_ = false;
+    bool unitCommandCursorActive_ = false;
+    bool unitCommandJustBegun_ = false;
+    UnitCommand pendingUnitCommand_ =
+        UnitCommand::Stop;
     float ambienceTime_ = 2.0f;
     uint32_t ambienceSequence_ = 0;
     std::string statusMessage_;

@@ -32,11 +32,13 @@ static int usage() {
             "  swgbtool terrain <DataDir> <terrainId>\n"
             "  swgbtool restriction <DataDir> <restrictionId>\n"
             "  swgbtool unit <DataDir> <unitId>\n"
+            "  swgbtool string <DataDir> <firstId> [lastId]\n"
             "  swgbtool units <DataDir> <name-fragment>\n"
             "  swgbtool graphics <DataDir> <name-fragment>\n"
             "  swgbtool tech <DataDir> <techId>\n"
             "  swgbtool techs <DataDir> <name-fragment>\n"
             "  swgbtool effect-refs <DataDir> <value>\n"
+            "  swgbtool attack-ground-candidates <DataDir>\n"
             "  swgbtool options <DataDir> <civId> <buildingId>\n"
             "  swgbtool sound <DataDir> <soundId>\n"
             "  swgbtool drs    <file.drs>\n"
@@ -158,6 +160,67 @@ static int cmdTerrain(const char *dataDir, int id) {
                id, terrain.name.c_str(), terrain.name2.c_str(), terrain.slp, terrain.terrainToDraw,
                terrain.blendType, terrain.blendPriority, terrain.terrainDimensions[0],
                terrain.terrainDimensions[1]);
+        return 0;
+}
+
+static int cmdString(const char *dataDir, int firstId, int lastId) {
+        SoftRenderer renderer;
+        Assets assets(&renderer);
+        std::string err;
+        if (!assets.init(dataDir, &err)) {
+            fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+        for (int id = firstId; id <= lastId; id++) {
+            const std::string &text = assets.localizedString(id);
+            if (!text.empty())
+                printf("%d: %s\n", id, text.c_str());
+        }
+        return 0;
+}
+
+static int cmdAttackGroundCandidates(const char *dataDir) {
+        SoftRenderer renderer;
+        Assets assets(&renderer);
+        std::string err;
+        if (!assets.init(dataDir, &err)) {
+            fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+        const size_t civilization =
+            assets.dat().civs.size() > 1 ? 1 : 0;
+        const auto &units =
+            assets.dat().civs[civilization].units;
+        for (const dat::Unit &unit : units) {
+            if (!unit.exists ||
+                unit.type < dat::UT_Combatant ||
+                unit.projectileUnitId < 0 ||
+                unit.attackGraphic < 0 ||
+                (unit.blastWidth <= 0 &&
+                 unit.accuracyPercent >= 100 &&
+                 unit.accuracyDispersion <= 0 &&
+                 !unit.specialAbility))
+                continue;
+            printf(
+                "%d '%s' type %u class %d hidden %u hero %u "
+                "blast %.2f/%u accuracy %d dispersion %.2f "
+                "projectile %d/%d count %.2f/%u area %.2f,%.2f,%.2f "
+                "special %u break %u\n",
+                unit.id, unit.name.c_str(), unit.type,
+                unit.cls, unit.hideInEditor, unit.heroMode,
+                unit.blastWidth, unit.blastAttackLevel,
+                unit.accuracyPercent,
+                unit.accuracyDispersion,
+                unit.projectileUnitId,
+                unit.secondaryProjectileUnit,
+                unit.totalProjectiles,
+                unit.maxTotalProjectiles,
+                unit.projectileSpawningArea[0],
+                unit.projectileSpawningArea[1],
+                unit.projectileSpawningArea[2],
+                unit.specialAbility,
+                unit.breakOffCombat);
+        }
         return 0;
 }
 
@@ -2690,6 +2753,14 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
     const bool walkerLockedBeforeResearch =
         !targeting.canAttackTargetForTesting(
             assaultMech, fighter);
+    targeting.setAttackModeForTesting(
+        groundTrooper, 3);
+    targeting.setAttackModeForTesting(
+        antiAirMobile, 3);
+    targeting.setAttackModeForTesting(
+        enemyTrooper, 3);
+    targeting.setAttackModeForTesting(
+        fighter, 3);
     const bool walkerResearchApplied =
         targeting.researchTechnologyForTesting(
             1, 164) &&
@@ -2699,7 +2770,7 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
             assaultMech, fighter);
     targeting.lookAtObject(assaultMech);
     for (int frame = 0;
-         frame < 90 &&
+         frame < 300 &&
          targeting.projectileCountForTesting() ==
              0;
          frame++)
@@ -2712,6 +2783,146 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
     const bool invalidAutomaticTargetIgnored =
         targeting.attackTargetForTesting(
             groundTrooper) != fighter;
+
+    Game attackGround(assets);
+    if (!attackGround.init(7, 96, &err)) {
+        fprintf(stderr, "%s\n", err.c_str());
+        return 1;
+    }
+    attackGround.setLocalPlayerForTesting(1);
+    attackGround.setDiplomacyForTesting(1, 2, 3);
+    attackGround.setDiplomacyForTesting(2, 1, 3);
+    const uint32_t heavyArtillery =
+        attackGround.spawnObjectForTesting(
+            1, 192, 1, 48.0f, 48.0f);
+    const uint32_t blastTarget =
+        attackGround.spawnObjectForTesting(
+            3, 460, 2, 56.0f, 48.0f);
+    const float blastHealthBefore =
+        attackGround.objectHitPoints(blastTarget);
+    const int eligibleAttackGroundUnits[] = {
+        108, 192, 249, 292, 1273, 1275,
+        1580, 1586, 1587,
+    };
+    const int ineligibleAttackGroundUnits[] = {
+        460, 545, 1204, 1314,
+    };
+    bool attackGroundEligibility = true;
+    float candidateY = 52.0f;
+    for (int unitId : eligibleAttackGroundUnits) {
+        const uint32_t id =
+            attackGround.spawnObjectForTesting(
+                1, unitId, 1, 40.0f,
+                candidateY);
+        attackGroundEligibility =
+            attackGroundEligibility &&
+            id != 0 &&
+            attackGround.canAttackGroundForTesting(id);
+        candidateY += 1.0f;
+    }
+    for (int unitId : ineligibleAttackGroundUnits) {
+        const uint32_t id =
+            attackGround.spawnObjectForTesting(
+                1, unitId, 1, 44.0f,
+                candidateY);
+        attackGroundEligibility =
+            attackGroundEligibility &&
+            id != 0 &&
+            !attackGround.canAttackGroundForTesting(id);
+        candidateY += 1.0f;
+    }
+    attackGround.clearSelectionForTesting();
+    attackGround.selectObjectForTesting(
+        heavyArtillery);
+    InputState attackGroundButton;
+    attackGroundButton.screenW = screenW;
+    attackGroundButton.screenH = screenH;
+    attackGroundButton.pointerX =
+        screenW - 300.0f + 230.0f;
+    attackGroundButton.pointerY =
+        screenH - 82.0f;
+    attackGroundButton.selectPressed = true;
+    attackGround.update(
+        0.001f, attackGroundButton);
+    attackGroundButton = {};
+    attackGroundButton.screenW = screenW;
+    attackGroundButton.screenH = screenH;
+    attackGroundButton.pointerX =
+        176.0f + 12.0f +
+        4.0f * 52.0f + 26.0f;
+    attackGroundButton.pointerY =
+        164.0f + 26.0f;
+    attackGroundButton.selectPressed = true;
+    attackGround.update(
+        0.001f, attackGroundButton);
+    const bool attackGroundButtonWorked =
+        attackGround
+            .attackGroundCursorActiveForTesting();
+    attackGround.clearSelectionForTesting();
+    const bool attackGroundSelectionCancelled =
+        !attackGround
+             .attackGroundCursorActiveForTesting();
+    const bool attackGroundOrderIssued =
+        attackGround.issueAttackGroundForTesting(
+            heavyArtillery, 56.0f, 48.0f);
+    attackGround.update(1.0f / 30.0f, {});
+    const bool heavyArtilleryVolley =
+        attackGround.projectileCountForTesting() ==
+            2 &&
+        attackGround.projectileUnitForTesting(0) ==
+            656 &&
+        attackGround.projectileUnitForTesting(1) ==
+            369;
+    for (int frame = 0; frame < 330; frame++)
+        attackGround.update(1.0f / 30.0f, {});
+    const bool attackGroundDamagedPoint =
+        attackGround.objectHitPoints(
+            blastTarget) <
+        blastHealthBefore;
+    const bool attackGroundRepeated =
+        attackGround.combatStats()
+                .projectilesLaunched >=
+            4;
+    const uint32_t replacementTarget =
+        attackGround.spawnObjectForTesting(
+            3, 460, 2, 54.0f, 50.0f);
+    const bool attackGroundReplaced =
+        attackGround.issueAttackForTesting(
+            heavyArtillery,
+            replacementTarget) &&
+        !attackGround.attackGroundActiveForTesting(
+            heavyArtillery);
+
+    Game delayedAttack(assets);
+    if (!delayedAttack.init(7, 96, &err)) {
+        fprintf(stderr, "%s\n", err.c_str());
+        return 1;
+    }
+    delayedAttack.setLocalPlayerForTesting(1);
+    const uint32_t delayedMech =
+        delayedAttack.spawnObjectForTesting(
+            1, 603, 1, 48.0f, 48.0f);
+    const bool delayedOrderIssued =
+        delayedAttack.issueAttackGroundForTesting(
+            delayedMech, 55.0f, 48.0f);
+    delayedAttack.update(1.0f / 30.0f, {});
+    const bool attackReleaseDelayed =
+        delayedOrderIssued &&
+        delayedAttack.attackShotPendingForTesting(
+            delayedMech) &&
+        delayedAttack.projectileCountForTesting() ==
+            0;
+    for (int frame = 0;
+         frame < 300 &&
+         delayedAttack.combatStats()
+                 .projectilesLaunched == 0;
+         frame++)
+        delayedAttack.update(
+            1.0f / 30.0f, {});
+    const bool delayedProjectileReleased =
+        delayedAttack.combatStats()
+                .projectilesLaunched >
+            0;
 
     Game buildingAttack(assets);
     if (!buildingAttack.init(7, 96, &err)) {
@@ -2934,6 +3145,20 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         attackersStillEngaged,
         minimumSeparation,
         maximumY - minimumY);
+    printf(
+        "attack ground: eligibility/button/cancel/order %d/%d/%d/%d, "
+        "volley/damage/repeat/replace %d/%d/%d/%d, "
+        "delay/pending-release %d/%d\n",
+        attackGroundEligibility ? 1 : 0,
+        attackGroundButtonWorked ? 1 : 0,
+        attackGroundSelectionCancelled ? 1 : 0,
+        attackGroundOrderIssued ? 1 : 0,
+        heavyArtilleryVolley ? 1 : 0,
+        attackGroundDamagedPoint ? 1 : 0,
+        attackGroundRepeated ? 1 : 0,
+        attackGroundReplaced ? 1 : 0,
+        attackReleaseDelayed ? 1 : 0,
+        delayedProjectileReleased ? 1 : 0);
     const bool heardBlaster =
         std::find(acknowledgementSounds.begin(), acknowledgementSounds.end(), 71) !=
         acknowledgementSounds.end();
@@ -2993,6 +3218,16 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         !walkerResearchApplied ||
         !walkerAirProjectile ||
         !invalidAutomaticTargetIgnored ||
+        !attackGroundEligibility ||
+        !attackGroundButtonWorked ||
+        !attackGroundSelectionCancelled ||
+        !attackGroundOrderIssued ||
+        !heavyArtilleryVolley ||
+        !attackGroundDamagedPoint ||
+        !attackGroundRepeated ||
+        !attackGroundReplaced ||
+        !attackReleaseDelayed ||
+        !delayedProjectileReleased ||
         !buildingAttackSlotsWorked ||
         !automaticGatheringAssigned ||
         !automaticConstructionChained ||
@@ -4576,6 +4811,148 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
                 std::to_string(
                     g.terrainAtForTesting(70, 70)));
     }
+    // Unit command state persists through movement/combat and Stop clears it.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        g.setDiplomacyForTesting(1, 2, 3);
+        g.setDiplomacyForTesting(2, 1, 3);
+        const uint32_t patrol =
+            g.spawnObjectForTesting(
+                3, 460, 1, 30.0f, 30.0f);
+        const bool patrolIssued =
+            g.issuePatrolForTesting(
+                patrol, 36.0f, 30.0f);
+        for (int frame = 0; frame < 30 * 7; frame++)
+            g.update(1.0f / 30.0f, {});
+        const float patrolDistance =
+            std::abs(
+                g.objectPosition(patrol)[0] -
+                30.0f);
+        const bool stopped =
+            g.stopUnitForTesting(patrol);
+        const auto stoppedAt =
+            g.objectPosition(patrol);
+        for (int frame = 0; frame < 30 * 2; frame++)
+            g.update(1.0f / 30.0f, {});
+        const bool stopHeld =
+            !g.patrolActiveForTesting(patrol) &&
+            std::abs(
+                g.objectPosition(patrol)[0] -
+                stoppedAt[0]) < 0.2f;
+
+        const uint32_t guarded =
+            g.spawnObjectForTesting(
+                3, 460, 1, 45.0f, 30.0f);
+        const uint32_t guard =
+            g.spawnObjectForTesting(
+                3, 460, 1, 42.0f, 30.0f);
+        const uint32_t enemy =
+            g.spawnObjectForTesting(
+                3, 460, 2, 49.0f, 30.0f);
+        const float enemyHp =
+            g.objectHitPoints(enemy);
+        const bool guardIssued =
+            g.issueGuardForTesting(
+                guard, guarded);
+        for (int frame = 0; frame < 30 * 8; frame++)
+            g.update(1.0f / 30.0f, {});
+        const bool guardEngaged =
+            g.objectHitPoints(enemy) < enemyHp &&
+            g.guardTargetForTesting(guard) ==
+                guarded;
+
+        const uint32_t leader =
+            g.spawnObjectForTesting(
+                3, 460, 1, 24.0f, 45.0f);
+        const uint32_t follower =
+            g.spawnObjectForTesting(
+                3, 460, 1, 16.0f, 45.0f);
+        const bool followIssued =
+            g.issueFollowForTesting(
+                follower, leader);
+        for (int frame = 0; frame < 30 * 5; frame++)
+            g.update(1.0f / 30.0f, {});
+        const auto leaderPosition =
+            g.objectPosition(leader);
+        const auto followerPosition =
+            g.objectPosition(follower);
+        const float followDx =
+            leaderPosition[0] -
+            followerPosition[0];
+        const float followDy =
+            leaderPosition[1] -
+            followerPosition[1];
+        const bool followed =
+            followDx * followDx +
+                    followDy * followDy <
+                25.0f &&
+            g.followTargetForTesting(follower) ==
+                leader;
+        report(
+            "unit-commands",
+            patrolIssued && patrolDistance > 1.0f &&
+                stopped && stopHeld &&
+                guardIssued && guardEngaged &&
+                followIssued && followed,
+            "patrol " +
+                std::to_string(patrolDistance) +
+                " stop " +
+                std::to_string(stopHeld) +
+                " guard " +
+                std::to_string(guardEngaged) +
+                " follow " +
+                std::to_string(followed));
+    }
+    // A production rally target may be any compatible building or transport.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t producer =
+            g.spawnObjectForTesting(
+                3, 87, 1, 30.0f, 16.0f);
+        const uint32_t building =
+            g.spawnObjectForTesting(
+                3, 109, 1, 40.0f, 16.0f);
+        g.setGatherPointForTesting(
+            producer, 40.0f, 16.0f,
+            building);
+        const bool buildingQueued =
+            g.queueUnitForTesting(
+                producer, 460);
+        for (int frame = 0; frame < 30 * 25; frame++)
+            g.update(1.0f / 30.0f, {});
+        const bool ralliedToBuilding =
+            g.garrisonedCount(building) == 1;
+
+        const uint32_t transport =
+            g.spawnObjectForTesting(
+                3, 249, 1, 46.0f, 16.0f);
+        g.setGatherPointForTesting(
+            producer, 46.0f, 16.0f,
+            transport);
+        const bool transportQueued =
+            g.queueUnitForTesting(
+                producer, 460);
+        for (int frame = 0; frame < 30 * 35; frame++)
+            g.update(1.0f / 30.0f, {});
+        const bool ralliedToTransport =
+            g.garrisonedCount(transport) == 1;
+        report(
+            "production-garrison-rally",
+            buildingQueued &&
+                ralliedToBuilding &&
+                transportQueued &&
+                ralliedToTransport,
+            "building " +
+                std::to_string(
+                    ralliedToBuilding) +
+                " transport " +
+                std::to_string(
+                    ralliedToTransport));
+    }
     printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }
@@ -4659,6 +5036,10 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "terrain") && argc >= 4) return cmdTerrain(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "restriction") && argc >= 4) return cmdRestriction(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "unit") && argc >= 4) return cmdUnit(argv[2], atoi(argv[3]));
+    if (!strcmp(cmd, "string") && argc >= 4)
+        return cmdString(
+            argv[2], atoi(argv[3]),
+            argc >= 5 ? atoi(argv[4]) : atoi(argv[3]));
     if (!strcmp(cmd, "units") && argc >= 4) return cmdUnits(argv[2], argv[3]);
     if (!strcmp(cmd, "graphics") && argc >= 4)
         return cmdGraphics(argv[2], argv[3]);
@@ -4667,6 +5048,8 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "effect-refs") && argc >= 4)
         return cmdEffectRefs(
             argv[2], atoi(argv[3]));
+    if (!strcmp(cmd, "attack-ground-candidates"))
+        return cmdAttackGroundCandidates(argv[2]);
     if (!strcmp(cmd, "options") && argc >= 5)
         return cmdOptions(argv[2], atoi(argv[3]), atoi(argv[4]));
     if (!strcmp(cmd, "sound") && argc >= 4) return cmdSound(argv[2], atoi(argv[3]));

@@ -225,6 +225,7 @@ struct Unit {
     int16_t defenseTerrainBonus = -1;
     float maxRange = 0, blastWidth = 0, reloadTime = 0;
     int16_t projectileUnitId = -1, accuracyPercent = 0;
+    uint8_t breakOffCombat = 0;
     int16_t frameDelay = 0;
     float graphicDisplacement[3] = {};
     uint8_t blastAttackLevel = 0;
