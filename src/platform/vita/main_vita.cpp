@@ -82,6 +82,10 @@ int main() {
 
     GLboolean fallback = vglInitExtended(0, kScreenW, kScreenH, 0x20000, SCE_GXM_MULTISAMPLE_NONE);
     logf("vglInitExtended done (resolution fallback=%d)", (int)fallback);
+    logf("vitaGL memory total vram/ram/phy/all=%.1f/%.1f/%.1f/%.1fMB free all=%.1fMB",
+         vglMemTotal(VGL_MEM_VRAM) / 1048576.0, vglMemTotal(VGL_MEM_RAM) / 1048576.0,
+         vglMemTotal(VGL_MEM_PHYCONT) / 1048576.0, vglMemTotal(VGL_MEM_ALL) / 1048576.0,
+         vglMemFree(VGL_MEM_ALL) / 1048576.0);
 
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
     sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
@@ -188,6 +192,7 @@ int main() {
         int menuStickY = 0;
         uint64_t last = sceKernelGetProcessTimeWide();
         uint64_t budgetT = 0;
+        uint64_t updateUs = 0, renderUs = 0, swapUs = 0;
         size_t lastBuilds = 0;
         uint64_t statT = last;
         int frames = 0;
@@ -324,29 +329,43 @@ int main() {
                 touching = false;
             }
 
-            // Sprite cache budget follows the GPU memory actually free: a
-            // fixed 64 MB cap made busy scenes evict and rebuild sheets every
-            // frame (the drops to 4-13 fps).
+            // Sprite cache budget: vglMemFree(VGL_MEM_ALL) reports 0 here, so
+            // use the per-pool figures; keep ~24 MB of GPU memory spare.
             if (now - budgetT >= 1000000) {
                 budgetT = now;
-                const size_t freeBytes = vglMemFree(VGL_MEM_ALL);
+                const size_t freeBytes = vglMemFree(VGL_MEM_VRAM) + vglMemFree(VGL_MEM_RAM) +
+                                         vglMemFree(VGL_MEM_PHYCONT);
                 const size_t reserve = 24u * 1024u * 1024u;
-                size_t budget = assets.textureBytes() + (freeBytes > reserve ? freeBytes - reserve : 0);
-                budget = std::max<size_t>(48u * 1024u * 1024u, std::min<size_t>(budget, 200u * 1024u * 1024u));
+                const size_t used = assets.textureBytes();
+                size_t budget = freeBytes >= reserve ? used + (freeBytes - reserve)
+                                                     : (used > reserve - freeBytes ? used - (reserve - freeBytes) : 0);
+                budget = std::max<size_t>(32u * 1024u * 1024u, std::min<size_t>(budget, 160u * 1024u * 1024u));
                 game.setTextureBudget(budget);
             }
+            const uint64_t t0 = sceKernelGetProcessTimeWide();
             game.update(dt, in);
+            const uint64_t t1 = sceKernelGetProcessTimeWide();
             game.render(renderer, kScreenW, kScreenH);
+            const uint64_t t2 = sceKernelGetProcessTimeWide();
             vglSwapBuffers(GL_FALSE);
-
+            const uint64_t t3 = sceKernelGetProcessTimeWide();
+            updateUs += t1 - t0;
+            renderUs += t2 - t1;
+            swapUs += t3 - t2;
             frames++;
             if (now - statT >= 5000000) {
-                logf("fps=%.1f draws=%d quads=%d tiles=%d sprites=%d sheets=%u tex=%.1fMB builds=%u free=%.1fMB zoom=%.2f",
-                     frames * 1e6 / (double)(now - statT), renderer.drawCalls(), renderer.quads(),
-                     game.stats().tiles, game.stats().sprites, (unsigned)assets.sheetCount(),
+                logf("fps=%.1f ms upd/rnd/swap=%.1f/%.1f/%.1f draws=%d quads=%d sprites=%d sheets=%u tex=%.1fMB "
+                     "builds=%u free vram/ram/phy=%.1f/%.1f/%.1fMB menu=%d sel=%zu zoom=%.2f",
+                     frames * 1e6 / (double)(now - statT),
+                     frames ? updateUs / 1000.0 / frames : 0.0, frames ? renderUs / 1000.0 / frames : 0.0,
+                     frames ? swapUs / 1000.0 / frames : 0.0, renderer.drawCalls(), renderer.quads(),
+                     game.stats().sprites, (unsigned)assets.sheetCount(),
                      assets.textureBytes() / 1048576.0,
                      (unsigned)(assets.buildCount() - lastBuilds),
-                     vglMemFree(VGL_MEM_ALL) / 1048576.0, game.zoom());
+                     vglMemFree(VGL_MEM_VRAM) / 1048576.0, vglMemFree(VGL_MEM_RAM) / 1048576.0,
+                     vglMemFree(VGL_MEM_PHYCONT) / 1048576.0, (int)game.actionMenuOpenForTesting(),
+                     game.selectedObjectIds().size(), game.zoom());
+                updateUs = renderUs = swapUs = 0;
                 lastBuilds = assets.buildCount();
                 frames = 0;
                 statT = now;

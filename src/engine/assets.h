@@ -28,6 +28,11 @@ struct SpriteFrame {
     int w, h;
     int hotX, hotY;
     Texture *outlineTex = nullptr;
+    // SWGB laser bolts: the projectile frame holds only the two end points
+    // of the bolt; the bolt is drawn as a glowing line between them.
+    bool laser = false;
+    float laserX0 = 0, laserY0 = 0, laserX1 = 0, laserY1 = 0; // relative to hotspot
+    uint8_t laserR = 0, laserG = 0, laserB = 0;
 };
 
 struct SpriteSheet {

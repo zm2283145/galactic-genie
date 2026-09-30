@@ -35,6 +35,9 @@ public:
     virtual void drawMaskedTinted(Texture *tex, const Quad &q, Texture *mask,
                                   const Quad &maskQ, uint8_t r, uint8_t g,
                                   uint8_t b, uint8_t a) = 0;
+    // Texture modulated by a colour (single texture unit: cheap on vitaGL,
+    // used for UI text).
+    virtual void drawTinted(Texture *tex, const Quad &q, uint8_t r, uint8_t g, uint8_t b, uint8_t a) = 0;
     virtual void fillRect(float x, float y, float w, float h, uint8_t r, uint8_t g, uint8_t b, uint8_t a) = 0;
     virtual void endFrame() = 0;
 };

@@ -265,6 +265,7 @@ public:
     void setAttackModeForTesting(uint32_t spawnId, int mode) {
         if (Object *o = findObject(spawnId)) o->attackMode = (AttackMode)mode;
     }
+    size_t projectileCountForTesting() const { return projectiles_.size(); }
     void clearSelectionForTesting() { clearSelection(); }
     int terrainAtForTesting(int x, int y) const { return terrainAt(x, y); }
     void setObjectResourceForTesting(uint32_t spawnId, float amount) {
@@ -406,6 +407,11 @@ private:
         bool felled = false; // carbon tree cut down, still holding resources
         // Hunted/slaughtered animals leave a carcass object holding their food,
         // which decays at the animal's resource decay rate (per second).
+        // A worker keeps the look and title of its last job (builder, ore
+        // miner, ...) until given a different one, like the original's
+        // variant units.
+        const dat::Unit *jobUnit = nullptr;
+        int jobKind = 0; // 0 none, 1 builder, 2 repairer, 10 + resource type
         uint32_t annexParentId = 0; // gate posts: the gate they belong to
         uint32_t carcassId = 0;   // on the dead animal: its carcass
         int carcassClass = -1;    // on a carcass: the animal's class
@@ -513,6 +519,7 @@ private:
                       int32_t garrisonedInId = -1, bool triggerAddressable = true);
     Object *findObject(uint32_t spawnId);
     bool isFlatFootprint(const Object &object) const;
+    Object *objectAtScreenRaw(float screenX, float screenY, int screenW, int screenH, bool includeGatherables);
     void applyBlast(uint32_t sourceId, int sourcePlayer, float x, float y, uint32_t primaryId,
                     float width, int level, int fallbackDamage);
     float minimumRange(const Object &source) const;

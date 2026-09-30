@@ -541,6 +541,35 @@ const SpriteSheet *Assets::build(ResourceSet &set, int32_t slpId, int playerColo
         sheetUse_[key] = terrainGeneration_;
         return nullptr;
     }
+    // Laser bolt frames: a large frame with only a few coloured pixels, the
+    // bolt's ends. Record the two farthest ones and their colour.
+    for (size_t i = 0; i < n && i < sheet->frames.size(); i++) {
+        const SlpImage &image = imgs[i];
+        if (image.width < 8 && image.height < 8) continue;
+        std::vector<int> lit;
+        for (size_t p = 0; p < image.kind.size() && lit.size() <= 48; p++)
+            if (image.kind[p] == PX_COLOR || image.kind[p] == PX_PLAYER) lit.push_back((int)p);
+        if (lit.size() < 2 || lit.size() > 48) continue;
+        int best0 = lit[0], best1 = lit[1], bestD = -1;
+        for (int a : lit)
+            for (int b : lit) {
+                const int dx = a % image.width - b % image.width, dy = a / image.width - b / image.width;
+                if (dx * dx + dy * dy > bestD) { bestD = dx * dx + dy * dy; best0 = a; best1 = b; }
+            }
+        if (bestD < 16) continue;
+        SpriteFrame &frame = sheet->frames[i];
+        frame.laser = true;
+        frame.laserX0 = (float)(best0 % image.width - image.hotspotX);
+        frame.laserY0 = (float)(best0 / image.width - image.hotspotY);
+        frame.laserX1 = (float)(best1 % image.width - image.hotspotX);
+        frame.laserY1 = (float)(best1 / image.width - image.hotspotY);
+        const uint8_t index = image.kind[(size_t)best0] == PX_PLAYER
+                                  ? (uint8_t)(image.index[(size_t)best0] + playerColorBase)
+                                  : image.index[(size_t)best0];
+        frame.laserR = palette_.colors[index].r;
+        frame.laserG = palette_.colors[index].g;
+        frame.laserB = palette_.colors[index].b;
+    }
     textureBytes_ += sheet->bytes;
     const SpriteSheet *res = sheet.get();
     sheets_[key] = std::move(sheet);

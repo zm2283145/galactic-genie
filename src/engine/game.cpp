@@ -405,8 +405,9 @@ bool Game::initCompactTestMap(
     if (gateUnit)
         snapAdjacentBuildingPosition(
             *gateUnit, gateX, gateY);
-    spawn(civ, "BLDG-ENTRYA1CLOS", 1,
-          gateX, gateY, 0);
+    const Object *initialGate = spawn(civ, "BLDG-ENTRYA1CLOS", 1,
+                                      gateX, gateY, 0);
+    const uint32_t initialGateId = initialGate ? initialGate->spawnId : 0;
     if (gateUnit) {
         for (const dat::BuildingAnnex &annex :
              gateUnit->annexes) {
@@ -418,7 +419,10 @@ bool Game::initCompactTestMap(
                 gateX + annex.misplacementY,
                 gateY - annex.misplacementX,
                 0.0f, 0, 0, false, -1, false);
-            if (created) created->wander = false;
+            if (created) {
+                created->wander = false;
+                created->annexParentId = initialGateId;
+            }
         }
     }
     for (int side : {-1, 1})
@@ -625,15 +629,21 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
                 // Its detached layer-5 silhouette reads as a second ship over the landed prop.
                 object->drawShadows = part->name != "BLDG-LLAMBDASH";
             }
+            return object ? std::max(1u, object->spawnId) : 0u; // 0: not added
         };
         const bool hidden = source.garrisonedInId >= 0;
-        addScenarioObject(unit, x, y, source.initialFrame, source.spawnId, hidden);
+        const uint32_t parentId =
+            addScenarioObject(unit, x, y, source.initialFrame, source.spawnId, hidden);
         if (!hidden && unit->type == dat::UT_Building) {
             for (const dat::BuildingAnnex &annex : unit->annexes) {
                 if (annex.unitId < 0) continue;
                 const dat::Unit *part = findUnit(civilization, annex.unitId);
                 if (!part) continue;
-                addScenarioObject(part, x + annex.misplacementY, y - annex.misplacementX, 0, 0, false);
+                // Scenario annexes carry no spawn id; give them one so the
+                // parent can find them (gate posts die with the gate).
+                const uint32_t partId = addScenarioObject(part, x + annex.misplacementY,
+                                                          y - annex.misplacementX, 0, 0, false);
+                if (partId && parentId && source.spawnId) objects_.back().annexParentId = parentId;
             }
         }
     }
@@ -1156,12 +1166,15 @@ void drawBitmapText(Renderer &renderer, const std::vector<std::string> &lines,
     }
     int index = 0;
     const font::Face &face = pickFace(9.0f * pixel * g_textScale, index);
-    if (!g_fontTextures.faces[index])
-        g_fontTextures.faces[index] =
-            renderer.createMaskTexture(face.atlasW, face.atlasH, face.alpha);
+    if (!g_fontTextures.faces[index]) {
+        // White RGBA glyphs tinted by vertex colour: one texture unit, so
+        // text batches don't switch vitaGL to its multi-texture shader.
+        std::vector<uint8_t> rgba((size_t)face.atlasW * face.atlasH * 4, 255);
+        for (size_t i = 0; i < (size_t)face.atlasW * face.atlasH; i++) rgba[i * 4 + 3] = face.alpha[i];
+        g_fontTextures.faces[index] = renderer.createTexture(face.atlasW, face.atlasH, rgba.data());
+    }
     Texture *atlas = g_fontTextures.faces[index];
-    Texture *white = g_fontTextures.white;
-    if (!atlas || !white) return;
+    if (!atlas) return;
     const float unit = 1.0f / g_textScale;
     // Keep the old baseline: the 5x7 font's caps sat 7*pixel below y.
     const float lineStep = std::max(9.0f * pixel, (float)face.lineHeight * unit);
@@ -1176,10 +1189,9 @@ void drawBitmapText(Renderer &renderer, const std::vector<std::string> &lines,
                 const font::Glyph &glyph = face.glyphs[code - 32];
                 if (glyph.w && glyph.h) {
                     Quad q{(penX + glyph.xoff) * unit, (baseY + glyph.yoff) * unit,
-                           glyph.w * unit, glyph.h * unit, 0, 0, 1, 1};
-                    Quad m{0, 0, 0, 0, (float)glyph.x, (float)glyph.y,
+                           glyph.w * unit, glyph.h * unit, (float)glyph.x, (float)glyph.y,
                            (float)(glyph.x + glyph.w), (float)(glyph.y + glyph.h)};
-                    renderer.drawMaskedTinted(white, q, atlas, m, r, g, b, 255);
+                    renderer.drawTinted(atlas, q, r, g, b, 255);
                 }
                 penX += glyph.advance;
             }
@@ -2092,6 +2104,10 @@ bool Game::withinInteractionRange(const Object &source,
 
 bool Game::isInspectable(const Object &object) const {
     if (!object.active || object.hidden || !object.draw || !object.spawnId) return false;
+    // Annex parts are selected through their building.
+    if (object.annexParentId)
+        if (const Object *parent = findObject(object.annexParentId); parent && parent->active)
+            return false;
     // Resources (trees, mines, bushes, animals, fish) can be clicked to see
     // what is left, like the original (pick requires only state < 7).
     if (object.resourceAmount > 0.0f && object.resourceType >= 0 && object.resourceType <= 3 &&
@@ -2215,6 +2231,18 @@ bool Game::footprintContainsScreen(const Object &object, float screenX, float sc
 Game::Object *Game::objectAtScreen(float screenX, float screenY,
                                    int screenW, int screenH,
                                    bool includeGatherables) {
+    Object *picked = objectAtScreenRaw(screenX, screenY, screenW, screenH, includeGatherables);
+    // Annex parts (a fortress's invisible gun platform, gate posts) stand for
+    // their building: picking one selects the building itself.
+    if (picked && picked->annexParentId)
+        if (Object *parent = findObject(picked->annexParentId); parent && parent->active)
+            return parent;
+    return picked;
+}
+
+Game::Object *Game::objectAtScreenRaw(float screenX, float screenY,
+                                      int screenW, int screenH,
+                                      bool includeGatherables) {
     Object *best = nullptr;
     float bestScore = std::numeric_limits<float>::max();
     for (Object &object : objects_) {
@@ -3630,12 +3658,10 @@ const Game::Object *Game::shieldGeneratorFor(
     if (!object.active || object.hidden ||
         object.underConstruction || !object.unit)
         return nullptr;
-    if (object.unit->type == dat::UT_Building &&
-        object.unit->adjacentMode && !object.gate &&
-        (object.player < 0 ||
-         (size_t)object.player >= researchedTechs_.size() ||
-         !researchedTechs_[(size_t)object.player].count(
-             kShieldWallTech)))
+    // 0x54bc40: walls (class 6) are never covered by a generator; only the
+    // Shield Wall pieces shield themselves (trait 0x40). Gates (class 8) are
+    // covered like any other building standing in a generator's field.
+    if (object.unit->cls == 6)
         return nullptr;
     const Object *closest = nullptr;
     float closestDistance =
@@ -3931,8 +3957,10 @@ bool Game::assignAutomaticWorkerTask(
     if (!isWorker(worker) ||
         worker.player != completedBuilding.player)
         return false;
+    // Unfinished buildings are looked for well past the worker's line of
+    // sight (4): sites a few buildings away were being ignored.
     const float searchRange =
-        std::max(4.0f, worker.unit->lineOfSight);
+        std::max(10.0f, worker.unit->lineOfSight * 2.0f);
     const float searchRangeSquared =
         searchRange * searchRange;
     // Unfinished buildings in range come first: builders keep moving from
@@ -6773,6 +6801,25 @@ void Game::updateProjectiles(float dt) {
             const float reach = collisionRadius(*target) + 0.15f;
             if (!groundAimed || hitX * hitX + hitY * hitY <= reach * reach)
                 damageObject(*target, damage, landed.sourceId);
+            // Impact: the projectile's dying graphic is its hit effect (the
+            // heavy assault mech's PROJ-MH3T* use 5007, a small explosion,
+            // with its graphic sound).
+            if (landed.unit && landed.unit->dyingGraphic >= 0) {
+                Remains impact;
+                impact.dyingGraphic = landed.unit->dyingGraphic;
+                impact.player = landed.player;
+                impact.x = destX;
+                impact.y = destY;
+                impact.facing = landed.facing;
+                impact.drawShadows = false;
+                if (const dat::Graphic *graphic = assets_.dat().graphic(impact.dyingGraphic))
+                    impact.dyingDuration = std::max(0.1f, graphic->frameCount * graphic->frameDuration);
+                remains_.push_back(impact);
+                int sound = landed.unit->dyingSound;
+                if (sound < 0) sound = graphicSound(impact.dyingGraphic);
+                if (sound >= 0 && playUnitSound_ && worldSoundAudible(destX, destY))
+                    playUnitSound_(sound, civilizationForPlayer(landed.player));
+            }
             if (landed.blastWidth > 0)
                 applyBlast(landed.sourceId, landed.player, destX, destY,
                            groundAimed ? 0 : targetId, landed.blastWidth, landed.blastLevel, damage);
@@ -8651,6 +8698,7 @@ void Game::executeEffect(const ScenarioEffect &effect) {
         }
         const float worldX = (float)y, worldY = (float)mapSize_ - x;
         Object *created = addObject(unit, sourcePlayer, worldX, worldY, -kPi * 0.5f, nextSpawnId_++);
+        const uint32_t parentId = created ? created->spawnId : 0;
         if (created) {
             created->wander = false;
             created->drawShadows = unit->name != "BLDG-LLAMBDASH";
@@ -8662,7 +8710,10 @@ void Game::executeEffect(const ScenarioEffect &effect) {
                 Object *createdAnnex = addObject(part, sourcePlayer, worldX + annex.misplacementY,
                                                  worldY - annex.misplacementX, -kPi * 0.5f, 0,
                                                  0, false, -1, false);
-                if (createdAnnex) createdAnnex->wander = false;
+                if (createdAnnex) {
+                    createdAnnex->wander = false;
+                    createdAnnex->annexParentId = parentId;
+                }
             }
             refreshAutomaticTechnologies(sourcePlayer);
         }
@@ -9385,6 +9436,22 @@ void Game::update(float dt, const InputState &in) {
         if (object.active && object.unit && object.unit->cls == 7 &&
             object.unit->type == dat::UT_Building)
             syncFarmTerrain(object);
+    for (Object &worker : objects_) {
+        if (!worker.active || !worker.unit || !isWorker(worker)) continue;
+        if (worker.constructionTargetId) {
+            worker.jobKind = 1;
+            worker.jobUnit = builderUnit(worker);
+        } else if (worker.repairTargetId) {
+            worker.jobKind = 2;
+            worker.jobUnit = builderUnit(worker);
+        } else if (worker.gatherTargetId) {
+            const Object *target = findObject(worker.gatherTargetId);
+            if (target && target->resourceType >= 0 && target->resourceType <= 3) {
+                worker.jobKind = 10 + target->resourceType;
+                if (const dat::Unit *gatherer = gathererUnit(worker)) worker.jobUnit = gatherer;
+            }
+        }
+    }
     for (const PendingCarcass &pending : pendingCarcasses_) {
         Object *carcass = addObject(pending.deadUnit, pending.owner, pending.x, pending.y,
                                     pending.facing, nextSpawnId_++);
@@ -9854,7 +9921,14 @@ void Game::update(float dt, const InputState &in) {
         o.animTime += dt;
         o.approachRetry = std::max(0.0f, o.approachRetry - dt);
         o.flashTime = std::max(0.0f, o.flashTime - dt);
-        updateAttack(o, dt);
+        // Passengers and garrisoned units don't fight from inside (a
+        // building's garrison fire is the building's own volley).
+        if (o.garrisonedInId >= 0) {
+            o.attackTargetId = 0;
+            o.attackAutomatic = false;
+        } else {
+            updateAttack(o, dt);
+        }
         if (!o.active) continue;
         if (o.hidden || o.unit->type < dat::UT_DeadFish || o.unit->speed <= 0 ||
             o.unit->type == dat::UT_Building)
@@ -10664,10 +10738,9 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             o.state == State::Build ||
                     o.state == State::Repair
                 ? builderUnit(o)
-                : (o.gatherTargetId ||
-                   o.carriedAmount > 0)
+                : o.gatherTargetId
                       ? gathererUnit(o)
-                      : o.unit;
+                      : o.jobUnit ? o.jobUnit : o.unit;
         if (!visualUnit) visualUnit = o.unit;
         int gid = visualUnit->standingGraphic[0];
         if (o.state == State::Build ||
@@ -10848,6 +10921,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                     viewW, viewH);
     }
     std::vector<std::array<float, 2>> blasterGlowPoints;
+    std::vector<std::array<float, 7>> laserBolts; // x0 y0 x1 y1 r g b
     for (const Projectile &projectile : projectiles_) {
         if (!projectile.unit) continue;
         const dat::Graphic *graphic =
@@ -10871,6 +10945,20 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 continue;
             if (tiny && graphic && graphic->slp == 2738)
                 blasterGlowPoints.push_back({sx, sy});
+            if (graphic && sheet && !sheet->frames.empty()) {
+                size_t frameIndex = 0;
+                bool flip = false;
+                if (pickFrame(*graphic, sheet->frames.size(), projectile.facing,
+                              projectile.animTime, 0, frameIndex, flip) &&
+                    frameIndex < sheet->frames.size() && sheet->frames[frameIndex].laser) {
+                    const SpriteFrame &f = sheet->frames[frameIndex];
+                    const float sign = flip ? -1.0f : 1.0f;
+                    laserBolts.push_back({sx + sign * f.laserX0, sy + f.laserY0,
+                                          sx + sign * f.laserX1, sy + f.laserY1,
+                                          (float)f.laserR, (float)f.laserG, (float)f.laserB});
+                    continue;
+                }
+            }
             drawGraphic(r, projectile.unit->standingGraphic[0], sx, sy,
                         projectile.facing, projectile.animTime, projectile.player,
                         0, 0, false, viewW, viewH);
@@ -11335,6 +11423,27 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         }
     }
 
+    // Laser bolts: a soft wide glow and a bright core along the segment.
+    for (const auto &bolt : laserBolts) {
+        const float dx = bolt[2] - bolt[0], dy = bolt[3] - bolt[1];
+        const float length = std::sqrt(dx * dx + dy * dy);
+        const int steps = std::max(1, (int)(length * zoom_ / 1.5f));
+        const uint8_t cr = (uint8_t)bolt[4], cg = (uint8_t)bolt[5], cb = (uint8_t)bolt[6];
+        const uint8_t hr = (uint8_t)std::min(255.0f, bolt[4] * 0.5f + 128.0f);
+        const uint8_t hg = (uint8_t)std::min(255.0f, bolt[5] * 0.5f + 128.0f);
+        const uint8_t hb = (uint8_t)std::min(255.0f, bolt[6] * 0.5f + 128.0f);
+        const float glow = 6.0f / zoom_, core = 3.0f / zoom_;
+        for (int i = 0; i <= steps; i++) {
+            const float t = (float)i / steps;
+            const float px = bolt[0] + dx * t, py = bolt[1] + dy * t;
+            r.fillRect(px - glow * 0.5f, py - glow * 0.5f, glow, glow, cr, cg, cb, 90);
+        }
+        for (int i = 0; i <= steps; i++) {
+            const float t = (float)i / steps;
+            const float px = bolt[0] + dx * t, py = bolt[1] + dy * t;
+            r.fillRect(px - core * 0.5f, py - core * 0.5f, core, core, hr, hg, hb, 255);
+        }
+    }
     for (const auto &point : blasterGlowPoints) {
         const float glowWidth = 6.0f / zoom_;
         const float glowHeight = 4.0f / zoom_;
@@ -11646,26 +11755,14 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         if (panelMixedUnits)
             title = std::to_string(panelSelectionCount) + " UNITS SELECTED";
         else {
-            title =
-                panelObject->state == State::Repair &&
-                        isWorker(*panelObject)
-                    ? "Repairing"
-                    : panelObject->state == State::Build &&
-                        isWorker(*panelObject)
-                    ? "Builder"
-                    : isWorker(*panelObject) &&
-                              (panelObject->gatherTargetId ||
-                               panelObject->carriedAmount > 0)
-                          ? panelObject->carriedResourceType == 0
-                                ? "Food Gatherer"
-                                : panelObject->carriedResourceType == 1
-                                      ? "Carbon Collector"
-                                      : panelObject->carriedResourceType == 2
-                                            ? "Ore Miner"
-                                            : panelObject->carriedResourceType == 3
-                                                  ? "Nova Collector"
-                                                  : "Gatherer"
-                    : unitDisplayName(*panelObject->unit);
+            static constexpr const char *jobNames[] = {
+                "Food Gatherer", "Carbon Collector", "Ore Miner", "Nova Collector"};
+            const int job = isWorker(*panelObject) ? panelObject->jobKind : 0;
+            title = job == 1   ? "Builder"
+                    : job == 2 ? "Repairer"
+                    : job >= 10 && job <= 13
+                        ? jobNames[job - 10]
+                        : unitDisplayName(*panelObject->unit);
             if (panelObject->player > 0)
                 title += " (" +
                          std::string(

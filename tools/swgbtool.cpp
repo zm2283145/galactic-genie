@@ -3608,11 +3608,35 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         for (int id : g.productionOptionIds(mill)) millIds += std::to_string(id) + ",";
         const bool airMenu = openMenu(air, "_menu_air");
         for (int id : g.productionOptionIds(air)) airIds += std::to_string(id) + ",";
+        // Like the Vita: select the fortress by pressing X on it, then Triangle.
+        bool fortByPress = false;
+        {
+            g.clearSelectionForTesting();
+            InputState none; none.screenW = 960; none.screenH = 544;
+            if (g.actionMenuOpenForTesting()) { none.cycleAttackMode = true; g.update(0.001f, none); }
+            g.lookAtObject(fort);
+            g.update(0.001f, {});
+            float fx = 0, fy = 0;
+            g.objectScreenPosition(fort, 960, 544, fx, fy);
+            for (float dy : {-60.0f, -30.0f, -10.0f}) {
+                InputState press; press.screenW = 960; press.screenH = 544; press.cursorVisible = true;
+                press.pointerX = fx; press.pointerY = fy + dy; press.selectPressed = true;
+                g.update(0.001f, press);
+                g.update(0.3f, {});
+                InputState tri; tri.screenW = 960; tri.screenH = 544; tri.cursorVisible = true;
+                tri.pointerX = fx; tri.pointerY = fy + dy; tri.cycleAttackMode = true;
+                g.update(0.001f, tri);
+                const bool open = g.actionMenuOpenForTesting();
+                printf("  fort press dy %.0f selected %zu open %d\n", dy, g.selectedObjectIds().size(), open);
+                fortByPress |= open;
+                if (open) { g.update(0.001f, tri); }
+            }
+        }
         const bool fortMenu = openMenu(fort, "_menu_fort");
         std::string fortIds;
         for (int id : g.productionOptionIds(fort)) fortIds += std::to_string(id) + ",";
         airIds += " fort " + std::to_string(fortMenu) + " [" + fortIds + "]";
-        report("menus", fortMenu && !fortIds.empty() && millMenu && millIds.find("50,") != std::string::npos && airMenu && !airIds.empty(),
+        report("menus", fortByPress && fortMenu && !fortIds.empty() && millMenu && millIds.find("50,") != std::string::npos && airMenu && !airIds.empty(),
                "mill " + std::to_string(millMenu) + " [" + millIds + "] air " + std::to_string(airMenu) +
                    " [" + airIds + "]");
     }
@@ -3722,7 +3746,16 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         g.setAttackModeForTesting(a, 3); g.setAttackModeForTesting(b, 3);
         const float hpB = g.objectHitPoints(b);
         g.issueAttackForTesting(mech, a);
-        for (int f = 0; f < 30 * 12 && g.objectActive(a); f++) g.update(1.0f / 30.0f, {});
+        bool shotTaken = false;
+        for (int f = 0; f < 30 * 12 && g.objectActive(a); f++) {
+            g.update(1.0f / 30.0f, {});
+            if (!shotTaken && g.projectileCountForTesting() > 0) {
+                g.update(0.1f, {});
+                g.lookAtObject(mech);
+                shot(g, "_mech_bolt");
+                shotTaken = true;
+            }
+        }
         const bool splashed = !g.objectActive(b) || g.objectHitPoints(b) < hpB;
         // Min range: an enemy right next to the mech.
         const uint32_t close = g.spawnObjectForTesting(3, 460, 2, g.objectPosition(mech)[0] + 0.7f,
@@ -3755,6 +3788,7 @@ struct CountingRenderer : SoftRenderer {
     void draw(Texture *t, const Quad &q) override { note(t, nullptr, q); }
     void drawMasked(Texture *t, const Quad &q, Texture *m, const Quad &) override { note(t, m, q); }
     void drawMaskedTinted(Texture *t, const Quad &q, Texture *m, const Quad &, uint8_t, uint8_t, uint8_t, uint8_t) override { note(t, m, q); }
+    void drawTinted(Texture *t, const Quad &q, uint8_t, uint8_t, uint8_t, uint8_t) override { note(t, nullptr, q); }
     void fillRect(float x, float y, float w, float h, uint8_t, uint8_t, uint8_t, uint8_t) override { note((Texture *)1, nullptr, Quad{x, y, w, h, 0, 0, 0, 0}); }
 };
 

@@ -153,6 +153,12 @@ void GlRenderer::drawMaskedTinted(Texture *tex, const Quad &q, Texture *mask,
          r, g, b, a);
 }
 
+void GlRenderer::drawTinted(Texture *tex, const Quad &q, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    auto *gt = static_cast<GlTexture *>(tex);
+    push(tex, nullptr, q.x, q.y, q.x + q.w, q.y + q.h, q.u0 * gt->invW, q.v0 * gt->invH, q.u1 * gt->invW,
+         q.v1 * gt->invH, 0, 0, 0, 0, r, g, b, a);
+}
+
 void GlRenderer::fillRect(float x, float y, float w, float h, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     push(white_, nullptr, x, y, x + w, y + h, 0, 0, 1, 1, 0, 0, 0, 0, r, g, b, a);
 }
