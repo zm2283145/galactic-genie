@@ -114,6 +114,9 @@ public:
         const std::vector<uint32_t> &spawnIds);
     // Group move of the given units, as a right-click with them selected.
     std::string describeObjectForTesting(uint32_t spawnId) const;
+    // Places a gate at world (x, y) the way the cursor would; returns the
+    // chosen variant id, or -(id + 2) if it could not be placed.
+    int placeGateForTesting(uint32_t workerId, int civilization, float x, float y);
     bool garrisonForTesting(uint32_t unitId, uint32_t buildingId) {
         Object *u = findObject(unitId);
         if (!u) return false;
@@ -242,6 +245,14 @@ public:
         uint32_t spawnId, uint32_t targetId) const;
     float objectCarriedAmount(uint32_t spawnId) const;
     float objectResourceAmount(uint32_t spawnId) const;
+    float objectStashForTesting(uint32_t spawnId, int type) const {
+        const Object *o = findObject(spawnId);
+        return o && type >= 0 && type < 4 ? o->stash[(size_t)type] : 0.0f;
+    }
+    int terrainAtForTesting(int x, int y) const { return terrainAt(x, y); }
+    void setObjectResourceForTesting(uint32_t spawnId, float amount) {
+        if (Object *o = findObject(spawnId)) o->resourceAmount = amount;
+    }
     bool objectFelled(uint32_t spawnId) const {
         const Object *o = findObject(spawnId);
         return o && o->felled;
@@ -333,6 +344,9 @@ private:
         float shieldPoints = 0, maxShieldPoints = 0;
         float resourceAmount = 0;
         float carriedAmount = 0;
+        // Resources of other types kept when a worker switches jobs; a drop
+        // site that accepts them takes them along with the carried load.
+        std::array<float, 4> stash{};
         int resourceType = -1;
         int carriedResourceType = -1;
         std::vector<std::array<float, 2>> path;
@@ -373,6 +387,9 @@ private:
         float gateOpenAmount = 0;
         float gateCloseTimer = 0;
         bool felled = false; // carbon tree cut down, still holding resources
+        float damageSoundTime = 0.0f; // next fire/damage graphic sound
+        int farmStage = -1; // farm terrain applied: 0 build, 1 grown, 2 dead
+        std::vector<uint8_t> farmUnderlay; // terrain under a farm foundation
         uint32_t pathGoalId = 0;      // object approached (region goal), 0 = point
         float pathGoalClearance = 0;
         uint8_t repathCount = 0;
@@ -468,6 +485,17 @@ private:
                       uint32_t spawnId, uint16_t initialFrame = 0, bool hidden = false,
                       int32_t garrisonedInId = -1, bool triggerAddressable = true);
     Object *findObject(uint32_t spawnId);
+    bool isFlatFootprint(const Object &object) const;
+    int carryTypeForSite(const Object &worker) const;
+    bool siteAcceptsType(const Object &worker, const Object &building, int type) const;
+    bool hasCarry(const Object &worker) const;
+    bool depositAt(Object &worker, const Object &building);
+
+    bool engagedWithCurrentTarget(const Object &object) const;
+    bool footprintContainsScreen(const Object &object, float screenX, float screenY,
+                                 int screenW, int screenH) const;
+    void syncFarmTerrain(Object &farm, bool dying = false);
+    float playerAttribute(int player, int attribute) const;
     const Object *findObject(uint32_t spawnId) const;
     int civilizationForPlayer(int player) const;
     void rebuildAdjacency();
@@ -547,7 +575,19 @@ private:
     std::vector<WallTile> wallLine(int x1, int y1, int x2, int y2) const;
     Object *createFoundation(const dat::Unit &unit, int player, float x, float y);
     bool placeWallLine(int x1, int y1, int x2, int y2);
+    bool placeBuildingWorld(float worldX, float worldY);
     bool isWallPlacement() const;
+    // Gate placement (0x60c100): picks the A/B/C/D gate from the walls
+    // around the cursor tile; returns the unit id or -1 to keep the current.
+    int gateVariantAt(int tileX, int tileY) const;
+    bool isGateFoundation(const dat::Unit &unit) const {
+        // 487/490/665/673 and their upgraded variants (all class 8).
+        return unit.id == 487 || unit.id == 490 || unit.id == 665 || unit.id == 673 ||
+               (unit.cls == 8 && unit.type == dat::UT_Building);
+    }
+    // Placement check that lets a gate replace the player's own wall pieces.
+    bool placementValid(const dat::Unit &unit, float x, float y,
+                        std::vector<Object *> *replacedWalls = nullptr);
     bool hasResearchTab(const Object &building) const;
     bool overlapsWorkingUnit(const Object &object, uint32_t targetId) const;
     // Closest spot around the target's footprint that no other unit is
@@ -769,7 +809,15 @@ private:
     float cursorX_ = 0, cursorY_ = 0;
     float boxStartX_ = 0, boxStartY_ = 0, boxEndX_ = 0, boxEndY_ = 0;
     float commandMarkerX_ = 0, commandMarkerY_ = 0, commandMarkerTime_ = 0;
+    uint32_t commandTargetId_ = 0;   // object an order was issued on
+    float commandTargetTime_ = 0.0f; // its green acknowledgement blink
+    void flashCommandTarget(const Object &target) {
+        commandTargetId_ = target.spawnId;
+        commandTargetTime_ = 1.0f;
+        commandMarkerTime_ = 0.0f; // object orders show no ground marker
+    }
     float selectionClickAge_ = 1000.0f;
+    float animClock_ = 0.0f;
     float lastSelectionX_ = 0, lastSelectionY_ = 0;
     int lastSelectionUnitId_ = -1;
     std::vector<uint32_t> selectionOrder_;
@@ -806,6 +854,7 @@ private:
     // Set when placement starts from the build menu, so the same press
     // that picked the item cannot also place it.
     bool placementJustBegun_ = false;
+    const std::vector<Object *> *placementIgnore_ = nullptr; // walls a gate replaces
     uint32_t gatherPointBuildingId_ = 0; // "click an area to set gather point" mode
     bool gatherPointJustBegun_ = false;
 public:

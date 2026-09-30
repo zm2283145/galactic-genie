@@ -2075,7 +2075,11 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
             return 1;
         }
     }
-    for (float decayElapsed = 0; decayElapsed < 65.0f; decayElapsed += step)
+    // Remains last about a minute; later deaths in the ongoing skirmish add
+    // their own, so wait for all of them to clear.
+    for (float decayElapsed = 0;
+         decayElapsed < 140.0f && (decayElapsed < 65.0f || game.combatStats().activeRemains);
+         decayElapsed += step)
         game.update(step, {});
     const bool remainsDecayed = game.combatStats().activeRemains == 0;
     const int commandCenterBeforeAge =
@@ -3143,6 +3147,9 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         const auto lWall = add(bx + 1, by + 1, bx + 7, by + 4);
         const auto diag = add(bx + 1, by + 8, bx + 5, by + 12);
         const auto straight = add(bx + 11, by + 1, bx + 11, by + 7);
+        // Gap fill: a 2-tile wall ending one tile short of the straight wall
+        // is extended by one foundation to close the gap.
+        const auto gapWall = add(bx + 8, by + 6, bx + 9, by + 6);
         for (uint32_t id : walls) g.completeFoundationForTesting(id);
         for (int f = 0; f < 10; f++) g.update(1.0f / 30.0f, {});
         auto frameOf = [&](uint32_t id) {
@@ -3161,8 +3168,31 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
             shot(g, "_walls_diag");
         }
         // L: 7 tiles along X (ends/corner = 2, middle = 1) then 3 along Y.
+        bool gapClosed = false;
+        for (uint32_t id : gapWall) {
+            const auto p = g.objectPosition(id);
+            if (std::abs(p[0] - (bx + 10.5f)) < 0.01f && std::abs(p[1] - (by + 6.5f)) < 0.01f)
+                gapClosed = true;
+        }
+        printf("  gap wall pieces %zu closed=%d\n", gapWall.size(), (int)gapClosed);
+        report("wall-gap-fill", gapWall.size() == 3 && gapClosed,
+               "pieces=" + std::to_string(gapWall.size()) + " closed=" + std::to_string(gapClosed));
+        // Gates follow the wall they are placed on and replace its pieces.
+        g.setResourceForTesting(1, 2, 5000);
+        const auto alongX = add(bx + 1, by + 14, bx + 9, by + 14);
+        for (uint32_t id : alongX) g.completeFoundationForTesting(id);
+        for (int f = 0; f < 5; f++) g.update(1.0f / 30.0f, {});
+        const int gateX = g.placeGateForTesting(worker, 3, bx + 5.5f, by + 14.5f);
+        const int gateY = g.placeGateForTesting(worker, 3, bx + 11.5f, by + 4.5f);
+        const int gateDiag = g.placeGateForTesting(worker, 3, bx + 3.5f, by + 10.5f);
+        for (int f = 0; f < 5; f++) g.update(1.0f / 30.0f, {});
+        g.lookAtObject(alongX[alongX.size() / 2]);
+        shot(g, "_gate_on_wall");
+        report("gate-orientation", gateX == 490 && gateY == 487 && gateDiag == 673,
+               "alongX=" + std::to_string(gateX) + " alongY=" + std::to_string(gateY) +
+                   " diagonal=" + std::to_string(gateDiag));
         report("wall-lines", lWall.size() == 10 && diag.size() == 5 && straight.size() == 7 &&
-                                 frames == "2111112002 24442 2000002",
+                                 frames == "2111112002 24442 2000022",
                "counts " + std::to_string(lWall.size()) + "/" + std::to_string(diag.size()) + "/" +
                    std::to_string(straight.size()) + " frames " + frames);
     }
@@ -3371,6 +3401,106 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
                "heavy=" + std::to_string(heavyShield) + "/" +
                    std::to_string(g.objectMaxShieldPoints(heavy)) + " plain=" +
                    std::to_string(plainShield));
+    }
+    // 18) Farms: terrain-drawn (build/complete), walkable, farmed for food.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        g.spawnObjectForTesting(3, 109, 1, 44.0f, 12.0f);
+        const uint32_t worker = g.spawnObjectForTesting(3, 83, 1, 44.0f, 17.0f);
+        g.update(1.0f / 30.0f, {});
+        const uint32_t farm = g.spawnFoundationForTesting(3, 50, 1, 44.5f, 20.5f, {worker});
+        g.update(1.0f / 30.0f, {});
+        const int buildTerrain = g.terrainAtForTesting(44, 20);
+        int f = 0;
+        auto building = [&]() {
+            for (uint32_t id : g.underConstructionObjectIds()) if (id == farm) return true;
+            return false;
+        };
+        for (; f < 30 * 120 && building(); f++) g.update(1.0f / 30.0f, {});
+        g.update(1.0f / 30.0f, {});
+        const int doneTerrain = g.terrainAtForTesting(44, 20);
+        const bool walk = g.positionPassableForTesting(worker, 44.5f, 20.5f);
+        const float food0 = g.objectResourceAmount(farm);
+        for (int k = 0; k < 30 * 60; k++) g.update(1.0f / 30.0f, {});
+        const float food1 = g.objectResourceAmount(farm);
+        printf("  %s\n", g.describeObjectForTesting(worker).substr(0, 300).c_str());
+        g.setObjectResourceForTesting(farm, 0.5f);
+        for (int k = 0; k < 30 * 20; k++) g.update(1.0f / 30.0f, {});
+        const int deadTerrain = g.terrainAtForTesting(44, 20);
+        report("farm", buildTerrain == 29 && doneTerrain == 7 && walk && food1 < food0 - 1.0f &&
+                           deadTerrain == 8,
+               "terrain " + std::to_string(buildTerrain) + "/" + std::to_string(doneTerrain) + "/" +
+                   std::to_string(deadTerrain) + " walk=" + std::to_string(walk) + " food " +
+                   std::to_string(food0) + "->" + std::to_string(food1));
+    }
+    // 19) Upgrades: build menu shows the upgraded building; HP techs raise
+    // the maximum of standing buildings and add to their current HP.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t worker = g.spawnObjectForTesting(3, 83, 1, 44.0f, 16.0f);
+        const uint32_t generator = g.spawnObjectForTesting(3, 335, 1, 50.0f, 20.0f);
+        g.researchTechnology(1, 1);
+        g.researchTechnology(1, 2);
+        g.update(1.0f / 30.0f, {});
+        const float hp0 = g.objectMaxHitPoints(generator);
+        g.researchTechnology(1, 569);
+        g.update(1.0f / 30.0f, {});
+        const float hp1 = g.objectMaxHitPoints(generator);
+        const float cur1 = g.objectHitPoints(generator);
+        auto has = [&](int id) {
+            for (int option : g.buildingOptionIds(worker)) if (option == id) return true;
+            return false;
+        };
+        const bool before = has(117) && !has(155);
+        g.researchTechnology(1, 483);
+        g.update(1.0f / 30.0f, {});
+        const bool heavy = has(155) && !has(117);
+        g.researchTechnology(1, 484);
+        g.update(1.0f / 30.0f, {});
+        const bool shield = has(195) && !has(155) && has(488) && !has(487);
+        report("upgrades", before && heavy && shield && hp1 >= hp0 + 249.0f && cur1 >= hp1 - 0.5f,
+               "menu " + std::to_string(before) + std::to_string(heavy) + std::to_string(shield) +
+                   " hp " + std::to_string(hp0) + "->" + std::to_string(hp1) + " cur " +
+                   std::to_string(cur1));
+    }
+    // 20) Drop-off: nearest accepting site; switching jobs keeps the old
+    // load; a processing center takes only its resource, the CC takes all.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t cc = g.spawnObjectForTesting(3, 109, 1, 44.0f, 8.0f);
+        const uint32_t mill = g.spawnObjectForTesting(3, 562, 1, 44.0f, 26.0f);
+        const uint32_t worker = g.spawnObjectForTesting(3, 83, 1, 44.0f, 23.0f);
+        const uint32_t bush = g.spawnObjectForTesting(0, 59, 0, 42.0f, 22.0f);
+        const uint32_t tree = g.spawnObjectForTesting(0, 348, 0, 46.5f, 28.5f);
+        g.update(1.0f / 30.0f, {});
+        g.issueGatherForTesting(worker, bush);
+        for (int f = 0; f < 30 * 12; f++) g.update(1.0f / 30.0f, {});
+        const float food = g.objectCarriedAmount(worker);
+        g.issueGatherForTesting(worker, tree);
+        const float carbon0 = g.resource(1, 1), food0 = g.resource(1, 0);
+        float nearest = 1e9f;
+        for (int f = 0; f < 30 * 60; f++) {
+            g.update(1.0f / 30.0f, {});
+            const auto p = g.objectPosition(worker);
+            nearest = std::min(nearest, std::abs(p[1] - 8.0f));
+        }
+        const float stashed = g.objectStashForTesting(worker, 0);
+        const bool millUsed = g.resource(1, 1) > carbon0 + 1.0f && nearest > 6.0f;
+        const bool manual = g.issueDropOffForTesting(worker, cc);
+        for (int f = 0; f < 30 * 30; f++) g.update(1.0f / 30.0f, {});
+        const bool ccTookAll = g.resource(1, 0) >= food0 + stashed - 0.5f &&
+                               g.objectStashForTesting(worker, 0) <= 0.01f;
+        (void)mill;
+        report("drop-off", food > 1.0f && stashed > 1.0f && millUsed && manual && ccTookAll,
+               "food carried " + std::to_string(food) + " stashed " + std::to_string(stashed) +
+                   " mill " + std::to_string(millUsed) + " nearestCC " + std::to_string(nearest) +
+                   " manual " + std::to_string(manual) + " cc " + std::to_string(ccTookAll));
     }
     printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;

@@ -86,28 +86,19 @@ constexpr float kCheatMenuWidth = 620.0f;
 constexpr float kCheatMenuRowHeight = 34.0f;
 constexpr size_t kCheatMenuVisibleRows = 11;
 
+// Placement snapping for adjacent-mode buildings (walls, gates), as the
+// original: along each axis the centre sits on a tile centre when the
+// half-size has a fractional part, otherwise on a tile corner. Uses our
+// world-axis sizes (swapped at load), so gates snap along their posts.
 void snapAdjacentBuildingPosition(
     const dat::Unit &unit, float &x, float &y) {
     if (!unit.adjacentMode) return;
-    const auto halfTile = [](float value) {
-        return std::floor(value) + 0.5f;
+    auto snap = [](float value, float half) {
+        const float fraction = half - std::floor(half);
+        return fraction > 0.01f ? std::floor(value) + 0.5f : std::round(value);
     };
-    if (unit.name.rfind("BLDG-ENTRYA", 0) == 0) {
-        x = std::round(x);
-        y = halfTile(y);
-    } else if (
-        unit.name.rfind("BLDG-ENTRYB", 0) == 0) {
-        x = halfTile(x);
-        y = std::round(y);
-    } else if (
-        unit.name.rfind("BLDG-ENTRYC", 0) == 0 ||
-        unit.name.rfind("BLDG-ENTRYD", 0) == 0) {
-        x = std::round(x);
-        y = std::round(y);
-    } else {
-        x = halfTile(x);
-        y = halfTile(y);
-    }
+    x = snap(x, std::max(0.5f, unit.collisionSize[0]));
+    y = snap(y, std::max(0.5f, unit.collisionSize[1]));
 }
 
 enum class CheatAction {
@@ -379,7 +370,7 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     for (int i = 0; i < 8; i++) {
         float x = pos(rng_), y = pos(rng_);
         if (terrainAt((int)x, (int)y) == T_WATER1 || terrainAt((int)x, (int)y) == T_WATER2) continue;
-        if (Object *o = spawn(0, i % 2 ? "ANIMAL-NERF" : "ANIMAL-BANTHA", 0, x, y, 0)) (void)o;
+        if (Object *o = spawn(0, i % 2 ? "ANIMAL-CAPTUREA1" : "ANIMAL-BANTHA", 0, x, y, 0)) (void)o;
     }
     if (objects_.empty()) {
         if (err) *err = "no units could be spawned (dat/graphics mismatch?)";
@@ -437,8 +428,14 @@ bool Game::initCompactTestMap(
           testX + 13.0f, testY + 7.0f, 0);
     spawn(3, "BLDG-DWELLING1", 1,
           testX + 26.0f, testY + 7.0f, 0);
-    spawn(0, "ANIMAL-NERF", 0,
+    spawn(0, "ANIMAL-CAPTUREA1", 0,
           testX + 8.0f, testY + 12.0f, 0);
+    // A small herd a short walk away to test capturing and the animal
+    // nursery (garrisoned animals produce food).
+    for (int index = 0; index < 4; index++)
+        spawn(0, "ANIMAL-CAPTUREA1", 0,
+              testX + 18.0f + (index % 2) * 1.6f,
+              testY + 20.0f + (index / 2) * 1.6f, 0);
     static constexpr const char *resources[] = {
         "OBJ-VEGETABLE", "OBJ-BULLION",
         "OBJ-MINERAL", "OBJ-TIMBERA",
@@ -1794,6 +1791,19 @@ float Game::attackRange(const Object &source, const Object &target) const {
     return std::max(contact, source.unit->maxRange);
 }
 
+// A unit already fighting a live target within reach keeps it when others
+// hit it; it only turns on a new attacker when idle or its target is gone or
+// out of reach. Otherwise every hit from a crowd would retarget it and it
+// would never get a shot off.
+bool Game::engagedWithCurrentTarget(const Object &object) const {
+    if (!object.attackTargetId) return false;
+    const Object *current = findObject(object.attackTargetId);
+    if (!current || !current->active || current->hidden) return false;
+    const float dx = current->x - object.x, dy = current->y - object.y;
+    const float reach = attackRange(object, *current) + 0.5f;
+    return dx * dx + dy * dy <= reach * reach;
+}
+
 bool Game::technologyCommandApplies(
     const dat::EffectCommand &command,
     const Object &object) const {
@@ -2169,6 +2179,18 @@ void Game::screenToWorld(float screenX, float screenY, int screenW, int screenH,
     }
 }
 
+bool Game::isFlatFootprint(const Object &object) const {
+    return object.unit && object.unit->cls == 7 && object.unit->type == dat::UT_Building;
+}
+
+bool Game::footprintContainsScreen(const Object &object, float screenX, float screenY,
+                                   int screenW, int screenH) const {
+    float worldX = 0, worldY = 0;
+    const_cast<Game *>(this)->screenToWorld(screenX, screenY, screenW, screenH, worldX, worldY);
+    return std::abs(worldX - object.x) <= std::max(0.5f, object.unit->collisionSize[0]) &&
+           std::abs(worldY - object.y) <= std::max(0.5f, object.unit->collisionSize[1]);
+}
+
 Game::Object *Game::objectAtScreen(float screenX, float screenY,
                                    int screenW, int screenH,
                                    bool includeGatherables) {
@@ -2179,6 +2201,15 @@ Game::Object *Game::objectAtScreen(float screenX, float screenY,
             !(includeGatherables &&
               isGatherable(object)))
             continue;
+        if (isFlatFootprint(object)) {
+            // Farms have no sprite: pick them by the ground they cover.
+            if (footprintContainsScreen(object, screenX, screenY, screenW, screenH) &&
+                2500.0f < bestScore) {
+                best = &object;
+                bestScore = 2500.0f;
+            }
+            continue;
+        }
         float objectX, objectY;
         objectScreenPosition(object, screenW, screenH, objectX, objectY);
         const float radiusX = std::max(30.0f, collisionRadius(object) * 48.0f * zoom_ + 12.0f);
@@ -2203,6 +2234,14 @@ Game::Object *Game::gatherableAtScreen(
         std::numeric_limits<float>::max();
     for (Object &object : objects_) {
         if (!isGatherable(object)) continue;
+        if (isFlatFootprint(object)) {
+            if (footprintContainsScreen(object, screenX, screenY, screenW, screenH) &&
+                2500.0f < bestScore) {
+                best = &object;
+                bestScore = 2500.0f;
+            }
+            continue;
+        }
         float objectX = 0.0f;
         float objectY = 0.0f;
         objectScreenPosition(
@@ -2799,8 +2838,22 @@ void Game::applyUnitUpgrades(int player) {
             continue;
         const dat::Unit *upgraded =
             effectiveUnitForPlayer(player, object.unit);
-        if (!upgraded || upgraded == object.unit)
+        if (!upgraded || upgraded == object.unit) {
+            // Hit point technologies (attribute 0) raise the maximum of
+            // existing units and buildings at once and add the same amount
+            // to their current hit points.
+            const float newMax = (float)std::max(
+                1, (int)std::lround(modifiedUnitAttribute(object, 0, object.unit->hitPoints)));
+            if (newMax != object.maxHitPoints && object.maxHitPoints > 0.0f) {
+                if (object.underConstruction)
+                    object.hitPoints *= newMax / object.maxHitPoints;
+                else
+                    object.hitPoints += newMax - object.maxHitPoints;
+                object.maxHitPoints = newMax;
+                object.hitPoints = std::max(1.0f, std::min(newMax, object.hitPoints));
+            }
             continue;
+        }
         const bool building =
             object.unit->type == dat::UT_Building ||
             upgraded->type == dat::UT_Building;
@@ -3304,15 +3357,20 @@ std::vector<const dat::Unit *> Game::buildingOptions(
             unit.heroMode || unit.buttonId == 0 ||
             !unitAvailable(worker.player, unit.id))
             continue;
+        // Upgrade technologies (effect type 3: A -> B) replace the base
+        // entry, e.g. Heavy Wall research swaps Medium Wall for Heavy Wall.
+        const dat::Unit *shown = effectiveUnitForPlayer(worker.player, &unit);
+        if (!shown) shown = &unit;
         const ActionMenuTab unitCategory =
-            unit.interfaceKind == 10
+            shown->interfaceKind == 10
                 ? ActionMenuTab::Military
-                : unit.interfaceKind == 11
+                : shown->interfaceKind == 11
                       ? ActionMenuTab::Defense
                       : ActionMenuTab::Economy;
-        if (unitCategory != category)
+        if (unitCategory != category ||
+            std::find(options.begin(), options.end(), shown) != options.end())
             continue;
-        options.push_back(&unit);
+        options.push_back(shown);
     }
     std::stable_sort(
         options.begin(), options.end(),
@@ -3663,6 +3721,7 @@ int Game::builderWorkingGraphic(
 bool Game::isGatherable(
     const Object &object) const {
     return object.active && !object.hidden &&
+           !object.underConstruction &&
            object.unit && object.resourceType >= 0 &&
            object.resourceType <= 3 &&
            object.resourceAmount > 0.0f;
@@ -3677,6 +3736,7 @@ const dat::Unit *Game::gathererUnit(
     if (target && target->unit) {
         switch (target->unit->cls) {
         case 1: variant = 11; break;
+        case 7: variant = 3; break; // farm -> farmer (UNIT-WORKERA3)
         case 27: variant = 5; break;
         case 29: variant = 6; break;
         case 30: variant = 9; break;
@@ -3685,7 +3745,7 @@ const dat::Unit *Game::gathererUnit(
         }
     }
     if (variant < 0) {
-        switch (worker.carriedResourceType) {
+        switch (carryTypeForSite(worker)) {
         case 0: variant = 5; break;
         case 1: variant = 8; break;
         case 2: variant = 9; break;
@@ -3822,6 +3882,9 @@ bool Game::assignAutomaticWorkerTask(
         foundationDistance = distance;
     }
     if (foundation && assignBuilder(worker, *foundation)) return true;
+    // A finished farm is worked by the worker who built it.
+    if (completedBuilding.unit->cls == 7 && isGatherable(completedBuilding))
+        return issueGatherCommand(worker, const_cast<Object &>(completedBuilding));
     Object *resourceTarget = nullptr;
     float resourceDistance =
         std::numeric_limits<float>::max();
@@ -3854,6 +3917,9 @@ bool Game::issueGatherCommand(
     if (!isWorker(worker) ||
         !isGatherable(resource))
         return false;
+    // Player-owned resources (farms) are worked by their owner only.
+    if (resource.player > 0 && resource.player != worker.player)
+        return false;
     clearConstructionAssignment(worker);
     worker.gatherTargetId = 0;
     worker.dropOffTargetId = 0;
@@ -3872,21 +3938,72 @@ bool Game::issueGatherCommand(
     return true;
 }
 
+bool Game::hasCarry(const Object &worker) const {
+    if (worker.carriedAmount > 0.001f && worker.carriedResourceType >= 0) return true;
+    for (float amount : worker.stash)
+        if (amount > 0.001f) return true;
+    return false;
+}
+
+// The resource the worker is taking to a drop site: its current load, else
+// the first stashed one.
+int Game::carryTypeForSite(const Object &worker) const {
+    if (worker.carriedResourceType >= 0 && worker.carriedAmount > 0.001f)
+        return worker.carriedResourceType;
+    for (int type = 0; type < 4; type++)
+        if (worker.stash[(size_t)type] > 0.001f) return type;
+    return worker.carriedResourceType;
+}
+
+bool Game::siteAcceptsType(const Object &worker, const Object &building, int type) const {
+    if (type < 0 || type > 3) return false;
+    Object probe = worker;
+    probe.gatherTargetId = 0;
+    probe.carriedResourceType = type;
+    probe.carriedAmount = 1.0f;
+    const dat::Unit *gatherer = gathererUnit(probe);
+    return gatherer && buildingAcceptsResource(building, *gatherer);
+}
+
+// Deposits the carried load and any stashed resources the building takes.
+// Returns true if anything was deposited.
+bool Game::depositAt(Object &worker, const Object &building) {
+    bool deposited = false;
+    auto &bank = resources_[(size_t)worker.player];
+    if (worker.carriedAmount > 0.001f &&
+        siteAcceptsType(worker, building, worker.carriedResourceType)) {
+        bank[worker.carriedResourceType] += worker.carriedAmount;
+        worker.carriedAmount = 0.0f;
+        worker.carriedResourceType = -1;
+        deposited = true;
+    }
+    for (int type = 0; type < 4; type++)
+        if (worker.stash[(size_t)type] > 0.001f && siteAcceptsType(worker, building, type)) {
+            bank[type] += worker.stash[(size_t)type];
+            worker.stash[(size_t)type] = 0.0f;
+            deposited = true;
+        }
+    return deposited;
+}
+
 bool Game::issueDropOffCommand(
     Object &worker, Object &building) {
-    if (!isWorker(worker) ||
-        worker.carriedAmount <= 0.001f ||
-        worker.carriedResourceType < 0 ||
+    if (!isWorker(worker) || !hasCarry(worker) ||
         !building.active || building.hidden ||
         building.underConstruction ||
         building.player != worker.player ||
         !building.unit ||
         building.unit->type != dat::UT_Building)
         return false;
-    const dat::Unit *gatherer = gathererUnit(worker);
-    if (!gatherer ||
-        !buildingAcceptsResource(building, *gatherer))
-        return false;
+    // Only a building that takes something the worker holds (the command
+    // center takes everything, processing centers their own resource).
+    bool accepts = false;
+    for (int type = 0; type < 4; type++)
+        if (((worker.carriedResourceType == type && worker.carriedAmount > 0.001f) ||
+             worker.stash[(size_t)type] > 0.001f) &&
+            siteAcceptsType(worker, building, type))
+            accepts = true;
+    if (!accepts) return false;
     clearConstructionAssignment(worker);
     worker.attackTargetId = 0;
     worker.attackAutomatic = false;
@@ -4107,17 +4224,21 @@ void Game::updateGathering(float dt) {
             std::max(
                 1.0f,
                 (float)gatherer->resourceCapacity);
+        // Switching to another resource keeps the old load (stashed) instead
+        // of throwing it away.
+        if (!worker.manualDropOff && resource && isGatherable(*resource) &&
+            worker.carriedAmount > 0.001f && worker.carriedResourceType >= 0 &&
+            worker.carriedResourceType != resource->resourceType) {
+            worker.stash[(size_t)worker.carriedResourceType] += worker.carriedAmount;
+            worker.carriedAmount = 0.0f;
+            worker.carriedResourceType = -1;
+        }
         const bool needsDropOff =
             worker.manualDropOff ||
             worker.carriedAmount >=
                 capacity - 0.001f ||
-            (resource &&
-             worker.carriedAmount > 0 &&
-             worker.carriedResourceType !=
-                 resource->resourceType) ||
             (!resource || !isGatherable(*resource));
-        if (needsDropOff &&
-            worker.carriedAmount > 0) {
+        if (needsDropOff && hasCarry(worker)) {
             Object *dropSite =
                 findObject(worker.dropOffTargetId);
             if (!dropSite || !dropSite->active) {
@@ -4132,15 +4253,11 @@ void Game::updateGathering(float dt) {
                 approach(worker, *dropSite, 0.25f);
                 continue;
             }
-            resources_[(size_t)worker.player]
-                      [worker.carriedResourceType] +=
-                worker.carriedAmount;
+            depositAt(worker, *dropSite);
             if (const dat::Task *task =
                     gatherTask(worker, *gatherer))
                 playWorldUnitSound(
                     worker, task->resourceDepositSound);
-            worker.carriedAmount = 0;
-            worker.carriedResourceType = -1;
             worker.dropOffTargetId = 0;
             worker.manualDropOff = false;
             worker.state = State::Idle;
@@ -4207,7 +4324,8 @@ void Game::updateGathering(float dt) {
             resource->resourceType;
         worker.carriedAmount += gathered;
         resource->resourceAmount -= gathered;
-        if (resource->maxHitPoints > 0 && !resource->felled) {
+        if (resource->maxHitPoints > 0 && !resource->felled &&
+            resource->unit->cls != 7) {
             float initialAmount = 0.0f;
             for (const dat::ResourceStorage &storage :
                  resource->unit->resourceStorages)
@@ -4913,6 +5031,82 @@ bool Game::placeWallLine(int x1, int y1, int x2, int y2) {
         foundations.push_back(building->spawnId);
         rebuildAdjacency(); // later tiles must see this one as blocked
     }
+    // End gap fill (0x5baf60 / 0x5bb140, human players only): from each end
+    // of the line, keep going in the line's direction over at most two free
+    // tiles if that closes the gap to a wall, gate, tree, water/cliff or the
+    // map edge. A single post extends away from its only wall neighbour.
+    if (!outOfMoney && !foundations.empty()) {
+        auto objectOfClassAt = [&](int cls, int tx, int ty) {
+            for (const Object &o : objects_)
+                if (o.active && !o.hidden && o.unit->cls == cls &&
+                    (int)std::floor(o.x) == tx && (int)std::floor(o.y) == ty)
+                    return true;
+            return false;
+        };
+        Object probe;
+        probe.unit = unit;
+        probe.player = localPlayer_;
+        auto placeable = [&](int tx, int ty) {
+            return tx >= 0 && ty >= 0 && tx < mapSize_ && ty < mapSize_ &&
+                   positionPassable(probe, tx + 0.5f, ty + 0.5f, true);
+        };
+        auto closes = [&](int tx, int ty) {
+            if (tx < 0 || ty < 0 || tx >= mapSize_ || ty >= mapSize_) return true;
+            if (terrainAt(tx, ty) == 1) return true; // water
+            Object land;
+            land.unit = unit;
+            if (!terrainPassable(land, tx + 0.5f, ty + 0.5f)) return true; // cliff
+            return objectOfClassAt(6, tx, ty) || objectOfClassAt(31, tx, ty) ||
+                   objectOfClassAt(8, tx, ty);
+        };
+        auto fill = [&](int x, int y, int dx, int dy, bool front) {
+            if ((dx == 0 && dy == 0) || !objectOfClassAt(6, x, y)) return;
+            int count = 0, tx = x, ty = y;
+            for (int gap = 0;; gap++) {
+                tx += dx;
+                ty += dy;
+                if (!placeable(tx, ty)) return;
+                count++;
+                if (closes(tx + dx, ty + dy)) break;
+                if (gap >= 1) return; // more than two free tiles: leave it
+            }
+            for (int i = 1; i <= count; i++) {
+                bool affordable = true;
+                for (const dat::ResourceCost &cost : unit->costs)
+                    if (cost.flag && cost.type >= 0 && cost.amount > 0 &&
+                        resource(localPlayer_, cost.type) + 0.001f < cost.amount)
+                        affordable = false;
+                if (!affordable) return;
+                for (const dat::ResourceCost &cost : unit->costs)
+                    if (cost.flag && cost.type >= 0 && cost.amount > 0)
+                        resources_[(size_t)localPlayer_][cost.type] -= cost.amount;
+                Object *building = createFoundation(*unit, localPlayer_, x + dx * i + 0.5f,
+                                                    y + dy * i + 0.5f);
+                if (!building) return;
+                if (front) foundations.insert(foundations.begin(), building->spawnId);
+                else foundations.push_back(building->spawnId);
+                rebuildAdjacency();
+            }
+        };
+        const std::vector<WallTile> line = wallLine(x1, y1, x2, y2);
+        auto sign = [](int v) { return (v > 0) - (v < 0); };
+        if (line.size() >= 2) {
+            fill(line[0].x, line[0].y, -sign(line[1].x - line[0].x),
+                 -sign(line[1].y - line[0].y), true);
+            const WallTile &last = line.back(), &before = line[line.size() - 2];
+            fill(last.x, last.y, sign(last.x - before.x), sign(last.y - before.y), false);
+        } else if (line.size() == 1) {
+            int found = 0, ox = 0, oy = 0;
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++)
+                    if ((dx || dy) && objectOfClassAt(6, line[0].x + dx, line[0].y + dy)) {
+                        found++;
+                        ox = dx;
+                        oy = dy;
+                    }
+            if (found == 1) fill(line[0].x, line[0].y, -ox, -oy, false);
+        }
+    }
     placementUnit_ = nullptr;
     placementBuilderId_ = 0;
     wallDragActive_ = false;
@@ -4938,6 +5132,68 @@ bool Game::placeWallLine(int x1, int y1, int x2, int y2) {
     return true;
 }
 
+int Game::gateVariantAt(int x0, int y0) const {
+    // Count wall pieces (with a matching connection frame) or gates along
+    // each of the four directions through the cursor, retrying one tile to
+    // either side when a direction finds nothing. Original axes: its x-line
+    // is our Y-line (frame 0), its y-line our X-line (frame 1), and its two
+    // diagonals our (X+t, Y-t) (frame 3) and (X+t, Y+t) (frame 4).
+    auto countAt = [&](int tx, int ty, int frame) {
+        for (const Object &o : objects_) {
+            if (!o.active || o.hidden || (int)std::floor(o.x) != tx || (int)std::floor(o.y) != ty)
+                continue;
+            if (o.unit->cls == 8) return 1;
+            if (o.unit->cls == 6) {
+                const int f = (int)std::lround(o.facing / (2.0f * kPi / 5.0f)) % 5;
+                if (f == 2 || f == frame) return 1;
+            }
+        }
+        return 0;
+    };
+    auto scan = [&](int dx, int dy, int shiftX, int shiftY, int frame) {
+        for (int attempt = 0; attempt < 3; attempt++) {
+            const int s = attempt == 0 ? 0 : attempt == 1 ? -1 : 1;
+            int count = 0;
+            for (int t = -2; t <= 2; t++)
+                count += countAt(x0 + dx * t + shiftX * s, y0 + dy * t + shiftY * s, frame);
+            if (count > 0) return count;
+        }
+        return 0;
+    };
+    const int a = scan(0, 1, 1, 0, 0);   // our Y-line -> 487
+    const int b = scan(1, 0, 0, 1, 1);   // our X-line -> 490
+    const int c = scan(1, -1, 1, 0, 3);  // (X+t, Y-t) -> 665
+    const int d = scan(1, 1, 1, 0, 4);   // (X+t, Y+t) -> 673
+    if (a == 0 && b == 0 && c == 0 && d == 0) return -1;
+    if (a > b && a > c && a > d) return 487;
+    if (b > a && b > c && b > d) return 490;
+    if (c > a && c > b && c > d) return 665;
+    if (d > a && d > b && d > c) return 673;
+    return -1;
+}
+
+bool Game::placementValid(const dat::Unit &unit, float x, float y,
+                          std::vector<Object *> *replacedWalls) {
+    Object candidate;
+    candidate.unit = &unit;
+    candidate.player = localPlayer_;
+    std::vector<Object *> walls;
+    if (unit.cls == 8) {
+        // Own wall pieces under the gate are replaced by it.
+        const float hx = std::max(0.5f, unit.collisionSize[0]);
+        const float hy = std::max(0.5f, unit.collisionSize[1]);
+        for (Object &o : objects_)
+            if (o.active && !o.hidden && o.player == localPlayer_ && o.unit->cls == 6 &&
+                std::abs(o.x - x) < hx && std::abs(o.y - y) < hy)
+                walls.push_back(&o);
+    }
+    placementIgnore_ = walls.empty() ? nullptr : &walls;
+    const bool valid = positionPassable(candidate, x, y, true);
+    placementIgnore_ = nullptr;
+    if (replacedWalls) *replacedWalls = walls;
+    return valid;
+}
+
 bool Game::isWallPlacement() const {
     return placementUnit_ && placementUnit_->cls == 6;
 }
@@ -4955,13 +5211,16 @@ bool Game::placeBuilding(float screenX, float screenY,
     float worldX = 0, worldY = 0;
     screenToWorld(screenX, screenY, screenW, screenH,
                   worldX, worldY);
+    return placeBuildingWorld(worldX, worldY);
+}
+
+bool Game::placeBuildingWorld(float worldX, float worldY) {
+    Object *worker = findObject(placementBuilderId_);
+    if (!placementUnit_ || !worker) return false;
     snapAdjacentBuildingPosition(
         *placementUnit_, worldX, worldY);
-    Object candidate;
-    candidate.unit = placementUnit_;
-    candidate.player = localPlayer_;
-    if (!positionPassable(
-            candidate, worldX, worldY, true)) {
+    std::vector<Object *> replacedWalls;
+    if (!placementValid(*placementUnit_, worldX, worldY, &replacedWalls)) {
         statusMessage_ = "BUILDING CANNOT BE PLACED HERE";
         statusTime_ = 3.0f;
         return true;
@@ -4996,6 +5255,17 @@ bool Game::placeBuilding(float screenX, float screenY,
     if (builderIds.empty())
         builderIds.push_back(worker->spawnId);
     const dat::Unit *unit = placementUnit_;
+    const std::vector<uint32_t> replacedIds = [&] {
+        std::vector<uint32_t> ids;
+        for (Object *wall : replacedWalls) ids.push_back(wall->spawnId);
+        return ids;
+    }();
+    for (uint32_t id : replacedIds)
+        if (Object *wall = findObject(id)) {
+            wall->active = false;
+            wall->selected = false;
+        }
+    if (!replacedIds.empty()) rebuildAdjacency();
     Object *building = addObject(
         unit, localPlayer_, worldX, worldY, 0,
         nextSpawnId_++);
@@ -5183,9 +5453,7 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
                 acknowledgement = object;
         if (acknowledgement) {
             playJobAcknowledgement(*acknowledgement, resource, false, false);
-            commandMarkerX_ = resource->x;
-            commandMarkerY_ = resource->y;
-            commandMarkerTime_ = 0.65f;
+            flashCommandTarget(*resource);
             statusMessage_ = "GATHERING " +
                 unitDisplayName(*resource->unit);
             statusTime_ = 2.0f;
@@ -5207,9 +5475,7 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
             }
         if (depositor) {
             playUnitAcknowledgement(*depositor, false);
-            commandMarkerX_ = friendly->x;
-            commandMarkerY_ = friendly->y;
-            commandMarkerTime_ = 0.65f;
+            flashCommandTarget(*friendly);
             statusMessage_ =
                 "DEPOSITING RESOURCES (" +
                 std::to_string(assigned) + ")";
@@ -5224,9 +5490,7 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
                 acknowledgement = object;
         if (acknowledgement) {
             playJobAcknowledgement(*acknowledgement, friendly, false, true);
-            commandMarkerX_ = friendly->x;
-            commandMarkerY_ = friendly->y;
-            commandMarkerTime_ = 0.65f;
+            flashCommandTarget(*friendly);
             statusMessage_ =
                 "REPAIRING " +
                 unitDisplayName(
@@ -5245,9 +5509,7 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
                 acknowledgement = object;
         if (acknowledgement) {
             playJobAcknowledgement(*acknowledgement, friendly, true, false);
-            commandMarkerX_ = friendly->x;
-            commandMarkerY_ = friendly->y;
-            commandMarkerTime_ = 0.65f;
+            flashCommandTarget(*friendly);
             statusMessage_ = "CONSTRUCTION RESUMED";
             statusTime_ = 2.0f;
             return;
@@ -5396,9 +5658,7 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
         if (!acknowledgement) return;
         attackOrdersIssued_++;
         playUnitAcknowledgement(*acknowledgement, true);
-        commandMarkerX_ = enemy->x;
-        commandMarkerY_ = enemy->y;
-        commandMarkerTime_ = 0.65f;
+        flashCommandTarget(*enemy);
         return;
     }
 
@@ -5948,7 +6208,77 @@ void Game::acquireAutomaticTarget(Object &source) {
     if (source.unit->type == dat::UT_Building) armedBuildingsEngaged_++;
 }
 
+// Player attribute (civ resource) with the researched technologies' resource
+// effects applied: type 1 sets (b == 0) or adds (b != 0) d, type 6 multiplies.
+float Game::playerAttribute(int player, int attribute) const {
+    const int civilization = civilizationForPlayer(player);
+    float value = 0.0f;
+    if (civilization >= 0 && (size_t)civilization < assets_.dat().civs.size()) {
+        const auto &base = assets_.dat().civs[(size_t)civilization].resources;
+        if (attribute >= 0 && (size_t)attribute < base.size()) value = base[(size_t)attribute];
+    }
+    if (player < 0 || (size_t)player >= researchedTechs_.size()) return value;
+    for (int technologyId : researchedTechs_[(size_t)player]) {
+        if (technologyId < 0 || (size_t)technologyId >= assets_.dat().techs.size()) continue;
+        const dat::Tech &technology = assets_.dat().techs[(size_t)technologyId];
+        if (technology.effectId < 0 || (size_t)technology.effectId >= assets_.dat().effects.size())
+            continue;
+        for (const dat::EffectCommand &command :
+             assets_.dat().effects[(size_t)technology.effectId].commands) {
+            if (command.a != attribute) continue;
+            if (command.type == 1) value = command.b ? value + command.d : command.d;
+            else if (command.type == 6) value *= command.d;
+        }
+    }
+    return value;
+}
+
+// Farms have no sprite (their SLPs are placeholders): the original paints
+// the footprint with farm terrain. Construction shows TERR-FARMBUILD1, a
+// finished farm TERR-FARM and an exhausted one TERR-FARMDEAD; Gungans use
+// their own set (FARMBUILD1G / FARMG / FARMDEADG).
+void Game::syncFarmTerrain(Object &farm, bool dying) {
+    const bool gungan = civilizationForPlayer(farm.player) == 2;
+    int stage = farm.underConstruction ? 0 : 1;
+    if (dying) stage = farm.underConstruction ? -2 : 2;
+    if (!dying && stage == 1 && farm.farmStage != 1) {
+        // Food comes from the player's farm food attribute (36).
+        const float food = playerAttribute(farm.player, 36);
+        if (food > 0.0f) {
+            farm.resourceType = 0;
+            farm.resourceAmount = food;
+        }
+    }
+    if (stage == farm.farmStage) return;
+    const float halfX = std::max(0.5f, farm.unit->collisionSize[0]);
+    const float halfY = std::max(0.5f, farm.unit->collisionSize[1]);
+    const int x0 = (int)std::floor(farm.x - halfX + 0.01f), x1 = (int)std::ceil(farm.x + halfX - 0.01f);
+    const int y0 = (int)std::floor(farm.y - halfY + 0.01f), y1 = (int)std::ceil(farm.y + halfY - 0.01f);
+    const bool record = farm.farmStage < 0 && farm.farmUnderlay.empty();
+    size_t index = 0;
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++, index++) {
+            if (x < 0 || y < 0 || x >= mapSize_ || y >= mapSize_) continue;
+            uint8_t &tile = terrain_[(size_t)y * mapSize_ + x];
+            if (record) {
+                if (farm.farmUnderlay.size() <= index) farm.farmUnderlay.resize(index + 1, tile);
+                farm.farmUnderlay[index] = tile;
+            }
+            if (stage == -2) {
+                // A cancelled foundation gives the ground back.
+                if (index < farm.farmUnderlay.size()) tile = farm.farmUnderlay[index];
+            } else {
+                static const uint8_t normal[3] = {29, T_FARM, 8};
+                static const uint8_t gungans[3] = {30, T_FARM_GUNGAN, 31};
+                tile = (gungan ? gungans : normal)[stage];
+            }
+        }
+    farm.farmStage = stage;
+}
+
 void Game::killObject(Object &object, bool countKill) {
+    if (object.unit->cls == 7 && object.unit->type == dat::UT_Building)
+        syncFarmTerrain(object, true);
     const bool wasStatic = object.unit->speed <= 0 || object.unit->type == dat::UT_Building;
     object.active = false;
     object.selected = false;
@@ -6032,7 +6362,8 @@ void Game::damageObject(Object &object, int damage, uint32_t attackerId) {
     Object *attacker = findObject(attackerId);
     if (attacker && attacker->active && canAttack(object) &&
         isEnemy(object, *attacker) && object.attackMode != AttackMode::Passive &&
-        (!object.attackTargetId || object.attackAutomatic)) {
+        (!object.attackTargetId || object.attackAutomatic) &&
+        !engagedWithCurrentTarget(object)) {
         const float dx = attacker->x - object.x;
         const float dy = attacker->y - object.y;
         const float distanceSquared = dx * dx + dy * dy;
@@ -6061,7 +6392,8 @@ void Game::damageObject(Object &object, int damage, uint32_t attackerId) {
     const float currentDamage =
         100.0f * (1.0f - object.hitPoints / std::max(1.0f, object.maxHitPoints));
     for (const dat::DamageGraphic &damageGraphic : object.unit->damageGraphics)
-        if (previousDamage < damageGraphic.damagePercent &&
+        if (object.unit->type != dat::UT_Building && // buildings loop it in update
+            previousDamage < damageGraphic.damagePercent &&
             currentDamage >= damageGraphic.damagePercent)
             soundId = graphicSound(damageGraphic.graphicId);
     playWorldUnitSound(object, soundId);
@@ -6680,6 +7012,10 @@ bool Game::positionPassable(const Object &object, float x, float y, bool dynamic
                 const Object &other = objects_[(size_t)index];
                 if (!other.active || other.hidden) continue;
                 if (other.gate && !gateBlocks(other, object)) continue;
+                if (placementIgnore_ &&
+                    std::find(placementIgnore_->begin(), placementIgnore_->end(), &other) !=
+                        placementIgnore_->end())
+                    continue;
                 const dat::Unit *obstructionUnit = other.unit;
                 const float halfX = std::max(
                     0.05f,
@@ -6687,8 +7023,13 @@ bool Game::positionPassable(const Object &object, float x, float y, bool dynamic
                 const float halfY = std::max(
                     0.05f,
                     obstructionUnit->collisionSize[1]);
-                const float extentX = halfX + radius - 0.01f,
-                            extentY = halfY + radius - 0.01f;
+                // Buildings are rectangles (gates are 4 x 1 tiles), units
+                // are treated as their radius.
+                const bool rectangle = object.unit->type == dat::UT_Building;
+                const float ownX = rectangle ? std::max(0.05f, object.unit->collisionSize[0]) : radius;
+                const float ownY = rectangle ? std::max(0.05f, object.unit->collisionSize[1]) : radius;
+                const float extentX = halfX + ownX - 0.01f,
+                            extentY = halfY + ownY - 0.01f;
                 const float newDx = std::abs(x - other.x), newDy = std::abs(y - other.y);
                 if (newDx >= extentX || newDy >= extentY) continue;
                 const float oldDx = std::abs(object.x - other.x);
@@ -8253,6 +8594,21 @@ std::vector<uint32_t> Game::placeWallForTesting(uint32_t workerId, int civilizat
     return created;
 }
 
+int Game::placeGateForTesting(uint32_t workerId, int civilization, float x, float y) {
+    Object *worker = findObject(workerId);
+    const dat::Unit *gate = findUnit(civilization, 487);
+    if (!worker || !gate) return -1;
+    clearSelection();
+    selectObject(*worker);
+    beginBuildingPlacement(*worker, *gate);
+    const int variant = gateVariantAt((int)std::floor(x), (int)std::floor(y));
+    if (variant >= 0) placementUnit_ = findUnit(civilization, variant);
+    const int chosen = placementUnit_ ? placementUnit_->id : -1;
+    const uint32_t before = nextSpawnId_;
+    placeBuildingWorld(x, y);
+    return nextSpawnId_ > before ? chosen : -chosen - 2;
+}
+
 std::string Game::describeObjectForTesting(uint32_t spawnId) const {
     const Object *o = findObject(spawnId);
     if (!o) return "missing";
@@ -8732,7 +9088,39 @@ void Game::update(float dt, const InputState &in) {
         }
     }
     commandMarkerTime_ = std::max(0.0f, commandMarkerTime_ - dt);
+    commandTargetTime_ = std::max(0.0f, commandTargetTime_ - dt);
     selectionClickAge_ += dt;
+    animClock_ = std::fmod(animClock_ + dt, 3600.0f);
+    for (Object &object : objects_)
+        if (object.active && object.unit && object.unit->cls == 7 &&
+            object.unit->type == dat::UT_Building)
+            syncFarmTerrain(object);
+    // Damage graphics (fire/smoke stages) carry their own sound, played each
+    // animation cycle like any graphic sound while the building is heard.
+    for (Object &object : objects_) {
+        if (!object.active || object.hidden || !object.unit ||
+            object.unit->type != dat::UT_Building || object.underConstruction ||
+            object.maxHitPoints <= 0.0f)
+            continue;
+        const float damage = 100.0f * (1.0f - object.hitPoints / object.maxHitPoints);
+        const dat::DamageGraphic *stage = nullptr;
+        for (const dat::DamageGraphic &damageGraphic : object.unit->damageGraphics)
+            if (damage >= damageGraphic.damagePercent &&
+                (!stage || damageGraphic.damagePercent > stage->damagePercent))
+                stage = &damageGraphic;
+        if (!stage) {
+            object.damageSoundTime = 0.0f;
+            continue;
+        }
+        object.damageSoundTime -= dt;
+        if (object.damageSoundTime > 0.0f) continue;
+        const dat::Graphic *graphic = assets_.dat().graphic(stage->graphicId);
+        const float cycle = graphic ? graphic->frameCount * graphic->frameDuration +
+                                          graphic->replayDelay
+                                    : 0.0f;
+        object.damageSoundTime = std::max(2.0f, cycle);
+        playWorldUnitSound(object, graphicSound(stage->graphicId));
+    }
     for (Object &object : objects_)
         if (object.selected && !isInspectable(object)) object.selected = false;
     syncSelectionOrder();
@@ -8749,6 +9137,16 @@ void Game::update(float dt, const InputState &in) {
         actionMenuOpen_ = false;
         selectBox(in.boxStartX, in.boxStartY, in.boxEndX, in.boxEndY,
                   in.screenW, in.screenH);
+    }
+    // Gate placement follows the walls under the cursor (0x60c100).
+    if (placementUnit_ && isGateFoundation(*placementUnit_) && in.cursorVisible) {
+        float worldX = 0, worldY = 0;
+        screenToWorld(in.pointerX, in.pointerY, in.screenW, in.screenH, worldX, worldY);
+        const int variant = gateVariantAt((int)std::floor(worldX), (int)std::floor(worldY));
+        if (variant >= 0)
+            if (const dat::Unit *unit = effectiveUnitForPlayer(
+                    localPlayer_, findUnit(civilizationForPlayer(localPlayer_), variant)))
+                placementUnit_ = unit;
     }
     bool placementHandled = false;
     if (!consumeWorldInput && placementUnit_ &&
@@ -8828,9 +9226,7 @@ void Game::update(float dt, const InputState &in) {
             statusTime_ = 3.0f;
         } else if (issueGarrisonCommand(*building)) {
             garrisonCursorActive_ = false;
-            commandMarkerX_ = building->x;
-            commandMarkerY_ = building->y;
-            commandMarkerTime_ = 0.65f;
+            flashCommandTarget(*building);
         }
         garrisonHandled = true;
     }
@@ -8867,9 +9263,7 @@ void Game::update(float dt, const InputState &in) {
             playUnitAcknowledgement(
                 *acknowledgement, false);
             repairCursorActive_ = false;
-            commandMarkerX_ = target->x;
-            commandMarkerY_ = target->y;
-            commandMarkerTime_ = 0.65f;
+            flashCommandTarget(*target);
             statusMessage_ =
                 "REPAIRING " +
                 unitDisplayName(*target->unit);
@@ -9012,11 +9406,18 @@ void Game::update(float dt, const InputState &in) {
         // Carrying workers over a drop site that takes their load get the
         // same green ellipse (help 3723 "drop off resources").
         const bool dropOff =
-            cursorWorker && hovered && cursorWorker->carriedAmount > 0.001f &&
+            cursorWorker && hovered && hasCarry(*cursorWorker) &&
             hovered->player == cursorWorker->player &&
             hovered->unit->type == dat::UT_Building && !hovered->underConstruction &&
-            gathererUnit(*cursorWorker) &&
-            buildingAcceptsResource(*hovered, *gathererUnit(*cursorWorker));
+            [&] {
+                for (int type = 0; type < 4; type++)
+                    if (((cursorWorker->carriedResourceType == type &&
+                          cursorWorker->carriedAmount > 0.001f) ||
+                         cursorWorker->stash[(size_t)type] > 0.001f) &&
+                        siteAcceptsType(*cursorWorker, *hovered, type))
+                        return true;
+                return false;
+            }();
         bool garrisonable = false;
         if (!selectedWorker && hovered && hovered->player == localPlayer_ &&
             hovered->unit->type == dat::UT_Building && hovered->unit->garrisonCapacity > 0)
@@ -10238,17 +10639,51 @@ void Game::render(Renderer &r, int screenW, int screenH) {
 
     // Selection footprints sit on the terrain so foreground sprites occlude them.
     for (const Object &object : objects_) {
-        if (!object.active || object.hidden || !object.draw || !object.selected)
+        if (!object.active || object.hidden || !object.draw)
             continue;
+        // The target of a gather/attack/build/garrison command blinks a
+        // green outline for about a second to acknowledge the order.
+        const bool flashing =
+            commandTargetTime_ > 0.0f && object.spawnId == commandTargetId_ &&
+            std::fmod(commandTargetTime_, 0.3f) >= 0.12f;
+        if (!object.selected && !flashing)
+            continue;
+        const uint8_t lineR = flashing ? 40 : 255, lineG = 255, lineB = flashing ? 40 : 255;
         float screenX, screenY;
         objectScreenPosition(object, screenW, screenH, screenX, screenY);
         const float sx = screenX / zoom_, sy = screenY / zoom_;
+        auto drawEdge = [&](const std::array<float, 2> &from,
+                            const std::array<float, 2> &to,
+                            float thickness, uint8_t color) {
+            const float dx = to[0] - from[0], dy = to[1] - from[1];
+            const int steps =
+                std::max(1, (int)std::ceil(std::max(std::abs(dx), std::abs(dy))));
+            const uint8_t cr = color ? lineR : 0, cg = color ? lineG : 0, cb = color ? lineB : 0;
+            for (int step = 0; step <= steps; step++) {
+                const float amount = (float)step / steps;
+                r.fillRect(from[0] + dx * amount - thickness * 0.5f,
+                           from[1] + dy * amount - thickness * 0.5f,
+                           thickness, thickness, cr, cg, cb, 255);
+            }
+        };
         if (object.unit->type != dat::UT_Building) {
-            if (!selectionRing) continue;
             const float radiusX =
                 std::max(14.0f, object.unit->outlineSize[0] * 96.0f);
             const float radiusY =
                 std::max(6.0f, object.unit->outlineSize[1] * 48.0f);
+            if (flashing && !object.selected) {
+                // Green ellipse in place of the white selection ring.
+                const int segments = 20;
+                for (int segment = 0; segment < segments; segment++) {
+                    const float a0 = 2.0f * kPi * segment / segments;
+                    const float a1 = 2.0f * kPi * (segment + 1) / segments;
+                    drawEdge({sx + std::cos(a0) * radiusX, sy + std::sin(a0) * radiusY},
+                             {sx + std::cos(a1) * radiusX, sy + std::sin(a1) * radiusY},
+                             2.0f / zoom_, 255);
+                }
+                continue;
+            }
+            if (!selectionRing) continue;
             const float halfW = radiusX * 64.0f / 59.0f;
             const float halfH = radiusY * 32.0f / 26.0f;
             r.draw(selectionRing,
@@ -10257,19 +10692,6 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             continue;
         }
 
-        auto drawEdge = [&](const std::array<float, 2> &from,
-                            const std::array<float, 2> &to,
-                            float thickness, uint8_t color) {
-            const float dx = to[0] - from[0], dy = to[1] - from[1];
-            const int steps =
-                std::max(1, (int)std::ceil(std::max(std::abs(dx), std::abs(dy))));
-            for (int step = 0; step <= steps; step++) {
-                const float amount = (float)step / steps;
-                r.fillRect(from[0] + dx * amount - thickness * 0.5f,
-                           from[1] + dy * amount - thickness * 0.5f,
-                           thickness, thickness, color, color, color, 255);
-            }
-        };
         auto drawFootprint = [&](float centerX, float centerY,
                                  const dat::Unit &unit) {
             const float halfX =
@@ -10321,7 +10743,8 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     }
 
     // Gather point flag: shown while its building is the only selection
-    // (the original's map sprite, BLDG-FLAG graphic 1509).
+    // (ENGINE-WAYPOINT graphic 5071, the animated rally flag; 1509 is the
+    // garrison banner).
     {
         const Object *flagOwner = nullptr;
         size_t selectedCount = 0;
@@ -10337,7 +10760,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             toScreen(flagOwner->rallyX, flagOwner->rallyY, sx, sy);
             sy -= elevationAt(flagOwner->rallyX, flagOwner->rallyY) *
                   assets_.dat().terrainBlock.elevHeight;
-            drawGraphic(r, 1509, sx - ox, sy - oy, 0, selectionClickAge_, localPlayer_, 0, 0, true,
+            drawGraphic(r, 5071, sx - ox, sy - oy, 0, animClock_, localPlayer_, 0, 0, true,
                         viewW, viewH);
         }
     }
@@ -10389,9 +10812,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         Object candidate;
         candidate.unit = placementUnit_;
         candidate.player = localPlayer_;
-        bool valid =
-            positionPassable(
-                candidate, worldX, worldY, true);
+        bool valid = placementValid(*placementUnit_, worldX, worldY);
         for (const dat::ResourceCost &cost :
              placementUnit_->costs)
             if (cost.flag && cost.type >= 0 &&
@@ -10613,6 +11034,8 @@ void Game::render(Renderer &r, int screenW, int screenH) {
 
     for (const Object &object : objects_) {
         if (!object.active || object.hidden || !object.draw || !object.selected) continue;
+        // Resources (trees, mines, bushes, carcasses) show no health bar.
+        if (object.player == 0 && object.unit->type < dat::UT_Combatant) continue;
         float screenX, screenY;
         objectScreenPosition(object, screenW, screenH, screenX, screenY);
         const float sx = screenX / zoom_, sy = screenY / zoom_;
@@ -10932,6 +11355,10 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         drawBitmapText(r, {title}, infoX, panelY + 11.0f * invZoom,
                        1.8f * invZoom, 238, 231, 190);
 
+        const bool panelIsResource =
+            panelObject && panelObject->player == 0 &&
+            panelObject->unit->type < dat::UT_Combatant;
+        if (!panelIsResource) {
         const int hitPoints = std::max(0, (int)std::lround(panelHitPoints));
         const int maxHitPoints =
             std::max(1, (int)std::lround(panelMaxHitPoints));
@@ -10995,6 +11422,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 healthFillW * shield,
                 4.0f * invZoom,
                 244, 190, 43, 255);
+        }
         }
 
         std::string combatLine;
@@ -11095,7 +11523,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         }
         if (!panelMixedUnits &&
             isWorker(*panelObject) &&
-            panelObject->carriedAmount > 0.001f) {
+            hasCarry(*panelObject)) {
             static constexpr const char
                 *resourceNames[] = {
                     "FOOD", "CARBON", "ORE", "NOVA",
@@ -11122,6 +11550,12 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                               gatherer
                                   ->resourceCapacity)
                         : 0);
+            // Stashed loads from earlier jobs are shown alongside.
+            if (panelObject->carriedAmount <= 0.001f) combatLine = "CARRY";
+            for (int type = 0; type < 4; type++)
+                if (panelObject->stash[(size_t)type] > 0.001f)
+                    combatLine += std::string("  ") + resourceNames[(size_t)type] + " " +
+                                  std::to_string((int)std::lround(panelObject->stash[(size_t)type]));
         }
         if (!combatLine.empty())
             drawBitmapText(
