@@ -3242,7 +3242,112 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
                    " through " + std::to_string(throughGate) + " around " + std::to_string(around) +
                    " leftover " + std::to_string(left) + " replaced " + std::to_string(again));
     }
-    // 10) Gather point: a trained unit walks to it; removing it works.
+    // 10) Production uses distinct immediate perimeter exits, blocks at
+    //     100% when they are full, and resumes after one becomes available.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const float bx = 64.0f, by = 64.0f;
+        const uint32_t center =
+            g.spawnObjectForTesting(
+                3, 87, 1, bx, by);
+        std::vector<uint32_t> before;
+        for (uint32_t id = 1; id < 20000; id++)
+            if (g.objectActive(id) &&
+                g.objectUnitId(id) == 460)
+                before.push_back(id);
+        for (int i = 0; i < 64; i++)
+            g.queueUnitForTesting(center, 460);
+        // Keep produced combat units passive so this test observes exit
+        // placement rather than their later automatic engagement orders.
+        std::vector<uint32_t> seen = before;
+        for (int frame = 0; frame < 30 * 15; frame++) {
+            g.update(1.0f / 30.0f, {});
+            for (uint32_t id = 1; id < 20000; id++)
+                if (g.objectActive(id) &&
+                    g.objectUnitId(id) == 460 &&
+                    std::find(
+                        seen.begin(), seen.end(), id) ==
+                        seen.end()) {
+                    const auto position =
+                        g.objectPosition(id);
+                    g.setAttackModeForTesting(id, 3);
+                    g.moveObjectForTesting(
+                        id, position[0], position[1]);
+                    seen.push_back(id);
+                }
+        }
+        std::vector<uint32_t> produced;
+        for (uint32_t id = 1; id < 20000; id++) {
+            if (!g.objectActive(id) ||
+                g.objectUnitId(id) != 460 ||
+                std::find(before.begin(), before.end(), id) !=
+                    before.end())
+                continue;
+            produced.push_back(id);
+        }
+        bool immediate = !produced.empty();
+        bool separate = true;
+        float closest = 1000.0f;
+        for (size_t i = 0; i < produced.size(); i++) {
+            const auto a =
+                g.objectPosition(produced[i]);
+            immediate &=
+                std::abs(a[0] - bx) <= 2.01f &&
+                std::abs(a[1] - by) <= 2.01f;
+            for (size_t j = i + 1;
+                 j < produced.size(); j++) {
+                const auto b =
+                    g.objectPosition(produced[j]);
+                const float dx = a[0] - b[0];
+                const float dy = a[1] - b[1];
+                closest = std::min(
+                    closest,
+                    std::sqrt(dx * dx + dy * dy));
+                separate &=
+                    dx * dx + dy * dy >=
+                    0.44f * 0.44f;
+            }
+        }
+        const size_t blockedQueue =
+            g.productionQueueSizeForTesting(center);
+        const bool blocked =
+            blockedQueue > 0 &&
+            g.productionRemainingForTesting(center) <=
+                0.001f;
+        g.lookAtObject(center);
+        shot(g, "_production_blocked");
+        bool resumed = false;
+        if (!produced.empty()) {
+            g.moveObjectForTesting(
+                produced.front(),
+                bx + 8.0f, by + 8.0f);
+            step(g, 0.5f);
+            resumed =
+                g.productionQueueSizeForTesting(center) <
+                blockedQueue;
+        }
+        report(
+            "production-exits",
+            immediate && separate && blocked && resumed,
+            "produced=" +
+                std::to_string(produced.size()) +
+                " queued=" +
+                std::to_string(blockedQueue) +
+                " immediate=" +
+                std::to_string(immediate) +
+                " separate=" +
+                std::to_string(separate) +
+                " closest=" +
+                std::to_string(closest) +
+                " blocked=" +
+                std::to_string(blocked) +
+                " resumed=" +
+                std::to_string(resumed));
+    }
+
+    // 11) Gather point: a trained unit walks to it; removing it works.
     {
         Game g(assets);
         if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
@@ -3267,7 +3372,7 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         report("gather-point", set && bestDistance < 1.0f,
                "set=" + std::to_string(set) + " nearest=" + std::to_string(bestDistance));
     }
-    // 11) Command Center fires only when garrisoned: +1 bolt per trooper.
+    // 12) Command Center fires only when garrisoned: +1 bolt per trooper.
     {
         Game g(assets);
         if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
@@ -3304,7 +3409,7 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
                    " shots=" + std::to_string(garrisonShots) + " enemyHp " + std::to_string(hp0) +
                    "->" + std::to_string(g.objectHitPoints(enemy)));
     }
-    // 12) Research/unit help uses the original rollover text.
+    // 13) Research/unit help uses the original rollover text.
     {
         Game g(assets);
         if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }

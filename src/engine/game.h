@@ -226,6 +226,14 @@ public:
     bool actionMenuOpenForTesting() const {
         return actionMenuOpen_;
     }
+    size_t productionQueueSizeForTesting(uint32_t spawnId) const {
+        const Object *object = findObject(spawnId);
+        return object ? object->productionQueue.size() : 0;
+    }
+    float productionRemainingForTesting(uint32_t spawnId) const {
+        const Object *object = findObject(spawnId);
+        return object ? object->productionRemaining : 0.0f;
+    }
     int objectUnitId(uint32_t spawnId) const;
     int objectAttackDamage(uint32_t sourceId,
                            uint32_t targetId) const;
@@ -546,6 +554,8 @@ private:
     const Object *findObject(uint32_t spawnId) const;
     int civilizationForPlayer(int player) const;
     void rebuildAdjacency();
+    void classifyObject(size_t index);
+    void rebuildObjectClassification();
     bool configureGate(Object &object);
     bool gateBlocks(const Object &gate, const Object &mover) const;
     void rebuildMobileOccupancy();
@@ -743,6 +753,10 @@ private:
     void updateRepairing(float dt);
     bool canGarrison(const Object &unit,
                      const Object &building) const;
+    bool findProductionExit(
+        const Object &building, const dat::Unit &unit,
+        const std::vector<std::array<float, 4>> &reserved,
+        float &x, float &y) const;
     uint8_t garrisonCategory(const Object &unit) const;
     size_t garrisonedCount(const Object &building,
                            bool includeIncoming) const;

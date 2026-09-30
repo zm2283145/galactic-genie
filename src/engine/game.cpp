@@ -897,38 +897,57 @@ void Game::rebuildAdjacency() {
         object->facing = connectionFrame * 2.0f * kPi / 5.0f;
     }
 
+    rebuildObjectClassification();
+}
+
+void Game::rebuildObjectClassification() {
     mobileObjectIndices_.clear();
     combatObjectIndices_.clear();
     staticObstructionIndices_.clear();
     staticObstructionCells_.assign((size_t)mapSize_ * mapSize_, {});
-    for (size_t index = 0; index < objects_.size(); index++) {
-        const Object &object = objects_[index];
-        if (!object.active || object.hidden) continue;
-        const dat::Unit *obstructionUnit = object.unit;
-        if (object.felled) continue;
-        if (object.draw && object.spawnId &&
-            object.unit->type >= dat::UT_Combatant)
-            combatObjectIndices_.push_back((uint32_t)index);
-        const bool mobile = object.unit->speed > 0 && object.unit->type != dat::UT_Building;
-        if (mobile) {
-            mobileObjectIndices_.push_back((uint32_t)index);
-            continue;
-        }
-        if (obstructionUnit->obstructionType == 0)
-            continue;
-        staticObstructionIndices_.push_back((uint32_t)index);
-        const float halfX =
-            std::max(0.05f, obstructionUnit->collisionSize[0]);
-        const float halfY =
-            std::max(0.05f, obstructionUnit->collisionSize[1]);
-        const int minX = std::max(0, (int)std::floor(object.x - halfX));
-        const int maxX = std::min(mapSize_ - 1, (int)std::floor(object.x + halfX));
-        const int minY = std::max(0, (int)std::floor(object.y - halfY));
-        const int maxY = std::min(mapSize_ - 1, (int)std::floor(object.y + halfY));
-        for (int y = minY; y <= maxY; y++)
-            for (int x = minX; x <= maxX; x++)
-                staticObstructionCells_[(size_t)y * mapSize_ + x].push_back((uint32_t)index);
+    for (size_t index = 0; index < objects_.size(); index++)
+        classifyObject(index);
+}
+
+void Game::classifyObject(size_t index) {
+    if (index >= objects_.size()) return;
+    const Object &object = objects_[index];
+    if (!object.active || object.hidden || object.felled)
+        return;
+    const dat::Unit *obstructionUnit = object.unit;
+    if (object.draw && object.spawnId &&
+        object.unit->type >= dat::UT_Combatant)
+        combatObjectIndices_.push_back((uint32_t)index);
+    const bool mobile =
+        object.unit->speed > 0 &&
+        object.unit->type != dat::UT_Building;
+    if (mobile) {
+        mobileObjectIndices_.push_back((uint32_t)index);
+        return;
     }
+    if (obstructionUnit->obstructionType == 0)
+        return;
+    staticObstructionIndices_.push_back((uint32_t)index);
+    const float halfX =
+        std::max(0.05f, obstructionUnit->collisionSize[0]);
+    const float halfY =
+        std::max(0.05f, obstructionUnit->collisionSize[1]);
+    const int minX = std::max(
+        0, (int)std::floor(object.x - halfX));
+    const int maxX = std::min(
+        mapSize_ - 1,
+        (int)std::floor(object.x + halfX));
+    const int minY = std::max(
+        0, (int)std::floor(object.y - halfY));
+    const int maxY = std::min(
+        mapSize_ - 1,
+        (int)std::floor(object.y + halfY));
+    for (int cellY = minY; cellY <= maxY; cellY++)
+        for (int cellX = minX; cellX <= maxX;
+             cellX++)
+            staticObstructionCells_[
+                (size_t)cellY * mapSize_ + cellX]
+                .push_back((uint32_t)index);
 }
 
 void Game::rebuildMobileOccupancy() {
@@ -4576,6 +4595,118 @@ size_t Game::garrisonedCount(
                   building.spawnId)))
             count++;
     return count;
+}
+
+// Production exit finder, modelled on battlegrounds_x1.exe 0x558810, called
+// by the production-completion activity at 0x56e390. The original packs
+// candidate positions around the producer's immediate rectangular perimeter,
+// using the produced unit's X/Y collision diameter plus 0.1 tile as its slot
+// spacing. A rally point changes which side/slot is tried first. It does not
+// expand through arbitrary rings: a full perimeter leaves production at 100%.
+bool Game::findProductionExit(
+    const Object &building, const dat::Unit &unit,
+    const std::vector<std::array<float, 4>> &reserved,
+    float &x, float &y) const {
+    Object candidate;
+    candidate.unit = &unit;
+    candidate.player = building.player;
+    candidate.x = building.x;
+    candidate.y = building.y;
+
+    const float halfX =
+        std::max(0.05f, building.unit->collisionSize[0]);
+    const float halfY =
+        std::max(0.05f, building.unit->collisionSize[1]);
+    const float unitHalfX =
+        std::max(0.05f, unit.collisionSize[0]);
+    const float unitHalfY =
+        std::max(0.05f, unit.collisionSize[1]);
+    const float stepX = unitHalfX * 2.0f + 0.1f;
+    const float stepY = unitHalfY * 2.0f + 0.1f;
+    const float edgeX = halfX + stepX;
+    const float edgeY = halfY + stepY;
+    const bool air = isAirUnit(candidate);
+
+    struct Slot {
+        float x;
+        float y;
+        int side;
+        size_t order;
+    };
+    std::vector<Slot> slots;
+    auto appendRange = [&](int side, bool horizontal) {
+        const float begin =
+            horizontal ? building.x - edgeX
+                       : building.y - edgeY + stepY;
+        const float end =
+            horizontal ? building.x + edgeX
+                       : building.y + edgeY - stepY;
+        const float step = horizontal ? stepX : stepY;
+        size_t order = 0;
+        for (float value = begin;
+             value <= end + 0.001f;
+             value += step, order++) {
+            float slotX = building.x;
+            float slotY = building.y;
+            if (horizontal) {
+                slotX = value;
+                slotY =
+                    side == 0 ? building.y + edgeY
+                              : building.y - edgeY;
+            } else {
+                slotX =
+                    side == 1 ? building.x + edgeX
+                              : building.x - edgeX;
+                slotY = value;
+            }
+            slots.push_back({slotX, slotY, side, order});
+        }
+    };
+    // Original no-rally preference starts at the positive-Y side.
+    appendRange(0, true);
+    appendRange(1, false);
+    appendRange(2, true);
+    appendRange(3, false);
+
+    if (building.rallyActive) {
+        std::stable_sort(
+            slots.begin(), slots.end(),
+            [&](const Slot &a, const Slot &b) {
+                const float adx = a.x - building.rallyX;
+                const float ady = a.y - building.rallyY;
+                const float bdx = b.x - building.rallyX;
+                const float bdy = b.y - building.rallyY;
+                return adx * adx + ady * ady <
+                       bdx * bdx + bdy * bdy;
+            });
+    }
+
+    const float radius = collisionRadius(candidate);
+    for (const Slot &slot : slots) {
+        if (!positionPassable(
+                candidate, slot.x, slot.y, true))
+            continue;
+        bool occupied = false;
+        for (const std::array<float, 4> &other :
+             reserved) {
+            if ((other[3] != 0.0f) != air)
+                continue;
+            const float dx = slot.x - other[0];
+            const float dy = slot.y - other[1];
+            const float separation =
+                radius + other[2] + 0.04f;
+            if (dx * dx + dy * dy <
+                separation * separation) {
+                occupied = true;
+                break;
+            }
+        }
+        if (occupied) continue;
+        x = slot.x;
+        y = slot.y;
+        return true;
+    }
+    return false;
 }
 
 bool Game::issueGarrisonCommand(Object &building) {
@@ -9300,6 +9431,8 @@ void Game::update(float dt, const InputState &in) {
         uint32_t buildingId;
     };
     std::vector<ProductionSpawn> productionSpawns;
+    std::vector<std::array<float, 4>>
+        reservedProductionExits;
     const size_t productionObjectCount = objects_.size();
     for (size_t index = 0; index < productionObjectCount;
          index++) {
@@ -9343,41 +9476,27 @@ void Game::update(float dt, const InputState &in) {
                     : building.productionQueue.front().duration;
             continue;
         }
-        Object candidate;
-        candidate.unit = unit;
-        candidate.player = building.player;
-        bool foundExit = false;
-        const float startDistance =
-            collisionRadius(building) +
-            collisionRadius(candidate) + 0.25f;
-        for (int ring = 0; ring < 12 && !foundExit; ring++) {
-            const int samples = 12 + ring * 4;
-            const float distance =
-                startDistance + ring * 0.35f;
-            for (int sample = 0; sample < samples; sample++) {
-                const float angle =
-                    sample * (2.0f * kPi / samples);
-                const float x =
-                    building.x + std::cos(angle) * distance;
-                const float y =
-                    building.y + std::sin(angle) * distance;
-                candidate.x = x;
-                candidate.y = y;
-                if (!positionPassable(candidate, x, y, true))
-                    continue;
-                productionSpawns.push_back(
-                    {unit, building.player, x, y, building.spawnId});
-                if (unit->trainSound >= 0)
-                    playWorldUnitSound(
-                        building, unit->trainSound);
-                foundExit = true;
-                break;
-            }
-        }
-        if (!foundExit) {
+        float exitX = 0.0f;
+        float exitY = 0.0f;
+        if (!findProductionExit(
+                building, *unit,
+                reservedProductionExits,
+                exitX, exitY)) {
             building.productionRemaining = 0;
             continue;
         }
+        Object candidate;
+        candidate.unit = unit;
+        candidate.player = building.player;
+        productionSpawns.push_back(
+            {unit, building.player, exitX, exitY,
+             building.spawnId});
+        reservedProductionExits.push_back(
+            {exitX, exitY, collisionRadius(candidate),
+             isAirUnit(candidate) ? 1.0f : 0.0f});
+        if (unit->trainSound >= 0)
+            playWorldUnitSound(
+                building, unit->trainSound);
         building.productionQueue.pop_front();
         building.productionRemaining =
             building.productionQueue.empty()
@@ -9398,6 +9517,7 @@ void Game::update(float dt, const InputState &in) {
             created->stateTime = 0.0f;
             created->initialFrame = 0;
             const uint32_t createdId = created->spawnId;
+            classifyObject(objects_.size() - 1);
             const Object *building = findObject(spawned.buildingId);
             Object *unit = findObject(createdId);
             if (building && unit) sendToGatherPoint(*building, *unit);
