@@ -36,6 +36,7 @@ static int usage() {
             "  swgbtool graphics <DataDir> <name-fragment>\n"
             "  swgbtool tech <DataDir> <techId>\n"
             "  swgbtool techs <DataDir> <name-fragment>\n"
+            "  swgbtool effect-refs <DataDir> <value>\n"
             "  swgbtool options <DataDir> <civId> <buildingId>\n"
             "  swgbtool sound <DataDir> <soundId>\n"
             "  swgbtool drs    <file.drs>\n"
@@ -193,14 +194,16 @@ static int cmdUnit(const char *dataDir, int id) {
                    unit.outlineSize[0], unit.outlineSize[1], unit.outlineSize[2],
                    unit.enabled, unit.disabled, unit.civilization,
                    unit.selectionSound, unit.moveSound, unit.attackSound);
-            printf("  combat hp %d base armor %d range %.2f..%.2f reload %.2f "
+            printf("  combat hp %d base armor %d level %u range %.2f..%.2f reload %.2f "
                    "garrison capacity/type/heal %.0f/%u/%.2f "
-                   "attack graphic %d projectile %d frame delay %d displacement %.2f,%.2f,%.2f "
+                   "attack graphic %d projectile %d/%d frame delay %d displacement %.2f,%.2f,%.2f "
                    "displayed attack/armor %d/%d\n",
-                   unit.hitPoints, unit.baseArmor, unit.minRange, unit.maxRange,
+                   unit.hitPoints, unit.baseArmor, unit.combatLevel,
+                   unit.minRange, unit.maxRange,
                    unit.reloadTime, (float)unit.garrisonCapacity,
                    unit.garrisonType, unit.garrisonHealRate,
                    unit.attackGraphic, unit.projectileUnitId,
+                   unit.secondaryProjectileUnit,
                    unit.frameDelay, unit.graphicDisplacement[0], unit.graphicDisplacement[1],
                    unit.graphicDisplacement[2],
                    unit.displayedAttack, unit.displayedMeleeArmour);
@@ -456,6 +459,55 @@ static int cmdTechs(const char *dataDir, const char *fragment) {
                id, tech.locationId, tech.effectId, tech.researchTime,
                tech.civ, tech.buttonId, tech.name.c_str(),
                tech.name2.c_str(), localized.c_str());
+    }
+    return 0;
+}
+
+static int cmdEffectRefs(
+    const char *dataDir, int value) {
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    std::string err;
+    if (!assets.init(dataDir, &err)) {
+        fprintf(
+            stderr, "error: %s\n",
+            err.c_str());
+        return 1;
+    }
+    for (size_t technologyId = 0;
+         technologyId < assets.dat().techs.size();
+         technologyId++) {
+        const dat::Tech &technology =
+            assets.dat().techs[technologyId];
+        if (technology.effectId < 0 ||
+            (size_t)technology.effectId >=
+                assets.dat().effects.size())
+            continue;
+        const dat::Effect &effect =
+            assets.dat().effects[
+                (size_t)technology.effectId];
+        for (const dat::EffectCommand &command :
+             effect.commands) {
+            const int rounded =
+                (int)std::lround(command.d);
+            if (command.a != value &&
+                command.b != value &&
+                command.c != value &&
+                rounded != value)
+                continue;
+            printf(
+                "tech %zu '%s' effect %d '%s': "
+                "type %u a %d b %d c %d d %.3f\n",
+                technologyId,
+                assets.localizedString(
+                    technology.languageDllName)
+                    .c_str(),
+                technology.effectId,
+                effect.name.c_str(),
+                command.type, command.a,
+                command.b, command.c,
+                command.d);
+        }
     }
     return 0;
 }
@@ -2602,6 +2654,139 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         systems.selectedMovingObjectCount() >
             0;
 
+    Game targeting(assets);
+    if (!targeting.init(7, 96, &err)) {
+        fprintf(stderr, "%s\n", err.c_str());
+        return 1;
+    }
+    targeting.setLocalPlayerForTesting(1);
+    targeting.setDiplomacyForTesting(1, 2, 3);
+    targeting.setDiplomacyForTesting(2, 1, 3);
+    const uint32_t groundTrooper =
+        targeting.spawnObjectForTesting(
+            1, 460, 1, 74.0f, 72.0f);
+    const uint32_t antiAirMobile =
+        targeting.spawnObjectForTesting(
+            1, 651, 1, 74.0f, 74.0f);
+    const uint32_t assaultMech =
+        targeting.spawnObjectForTesting(
+            1, 603, 1, 74.0f, 76.0f);
+    const uint32_t fighter =
+        targeting.spawnObjectForTesting(
+            5, 158, 2, 79.0f, 74.0f);
+    const uint32_t enemyTrooper =
+        targeting.spawnObjectForTesting(
+            3, 460, 2, 79.0f, 76.0f);
+    const bool groundRejectsAir =
+        !targeting.canAttackTargetForTesting(
+            groundTrooper, fighter) &&
+        !targeting.issueAttackForTesting(
+            groundTrooper, fighter);
+    const bool antiAirTargetsOnlyAir =
+        targeting.canAttackTargetForTesting(
+            antiAirMobile, fighter) &&
+        !targeting.canAttackTargetForTesting(
+            antiAirMobile, enemyTrooper);
+    const bool walkerLockedBeforeResearch =
+        !targeting.canAttackTargetForTesting(
+            assaultMech, fighter);
+    const bool walkerResearchApplied =
+        targeting.researchTechnologyForTesting(
+            1, 164) &&
+        targeting.canAttackTargetForTesting(
+            assaultMech, fighter) &&
+        targeting.issueAttackForTesting(
+            assaultMech, fighter);
+    targeting.lookAtObject(assaultMech);
+    for (int frame = 0;
+         frame < 90 &&
+         targeting.projectileCountForTesting() ==
+             0;
+         frame++)
+        targeting.update(1.0f / 30.0f, {});
+    const bool walkerAirProjectile =
+        targeting.firstProjectileUnitForTesting() ==
+        992;
+    for (int frame = 0; frame < 60; frame++)
+        targeting.update(1.0f / 30.0f, {});
+    const bool invalidAutomaticTargetIgnored =
+        targeting.attackTargetForTesting(
+            groundTrooper) != fighter;
+
+    Game buildingAttack(assets);
+    if (!buildingAttack.init(7, 96, &err)) {
+        fprintf(stderr, "%s\n", err.c_str());
+        return 1;
+    }
+    buildingAttack.setLocalPlayerForTesting(1);
+    buildingAttack.setDiplomacyForTesting(1, 2, 3);
+    buildingAttack.setDiplomacyForTesting(2, 1, 3);
+    const uint32_t fortress =
+        buildingAttack.spawnObjectForTesting(
+            3, 84, 2, 80.0f, 80.0f);
+    const float fortressHealthBefore =
+        buildingAttack.objectHitPoints(fortress);
+    std::vector<uint32_t> buildingAttackers;
+    for (int index = 0; index < 10; index++) {
+        const uint32_t attacker =
+            buildingAttack.spawnObjectForTesting(
+                1, 460, 1, 71.0f,
+                75.5f + index);
+        if (attacker &&
+            buildingAttack.issueAttackForTesting(
+                attacker, fortress))
+            buildingAttackers.push_back(attacker);
+    }
+    for (int frame = 0; frame < 30 * 24;
+         frame++)
+        buildingAttack.update(
+            1.0f / 30.0f, {});
+    size_t attackersStillEngaged = 0;
+    float minimumSeparation =
+        std::numeric_limits<float>::max();
+    float minimumY =
+        std::numeric_limits<float>::max();
+    float maximumY =
+        -std::numeric_limits<float>::max();
+    for (size_t i = 0;
+         i < buildingAttackers.size(); i++) {
+        if (!buildingAttack.objectActive(
+                buildingAttackers[i]))
+            continue;
+        const auto a =
+            buildingAttack.objectPosition(
+                buildingAttackers[i]);
+        minimumY = std::min(minimumY, a[1]);
+        maximumY = std::max(maximumY, a[1]);
+        if (buildingAttack.attackTargetForTesting(
+                buildingAttackers[i]) ==
+            fortress)
+            attackersStillEngaged++;
+        for (size_t j = i + 1;
+             j < buildingAttackers.size(); j++) {
+            if (!buildingAttack.objectActive(
+                    buildingAttackers[j]))
+                continue;
+            const auto b =
+                buildingAttack.objectPosition(
+                    buildingAttackers[j]);
+            const float dx = a[0] - b[0];
+            const float dy = a[1] - b[1];
+            minimumSeparation =
+                std::min(
+                    minimumSeparation,
+                    std::sqrt(
+                        dx * dx + dy * dy));
+        }
+    }
+    const bool buildingAttackSlotsWorked =
+        buildingAttackers.size() == 10 &&
+        buildingAttack.objectHitPoints(fortress) <
+            fortressHealthBefore &&
+        attackersStillEngaged >= 8 &&
+        minimumSeparation >= 0.34f &&
+        maximumY - minimumY >= 2.0f;
+
     if (out) {
         systems.selectObjectForTesting(
             repairWorkerId);
@@ -2729,12 +2914,26 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            buildingElapsed, destructionElapsed);
     printf(
         "compatibility: manual drop-off %d, mobile power on/off %d/%d, "
-        "reverse destroy %d, stance menu %d\n",
+        "reverse destroy %d, stance menu %d, "
+        "air ground/aa/walker/projectile/auto %d/%d/%d/%d/%d, "
+        "building slots %d engaged %zu separation %.2f spread %.2f\n",
         manualDropOffWorked ? 1 : 0,
         mobilePowerWorked ? 1 : 0,
         mobilePowerRemoved ? 1 : 0,
         destroyReverseOrder ? 1 : 0,
-        stanceMenuWorked ? 1 : 0);
+        stanceMenuWorked ? 1 : 0,
+        groundRejectsAir ? 1 : 0,
+        antiAirTargetsOnlyAir ? 1 : 0,
+        walkerLockedBeforeResearch &&
+                walkerResearchApplied
+            ? 1
+            : 0,
+        walkerAirProjectile ? 1 : 0,
+        invalidAutomaticTargetIgnored ? 1 : 0,
+        buildingAttackSlotsWorked ? 1 : 0,
+        attackersStillEngaged,
+        minimumSeparation,
+        maximumY - minimumY);
     const bool heardBlaster =
         std::find(acknowledgementSounds.begin(), acknowledgementSounds.end(), 71) !=
         acknowledgementSounds.end();
@@ -2788,6 +2987,13 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         !mobilePowerRemoved ||
         !destroyReverseOrder ||
         !stanceMenuWorked ||
+        !groundRejectsAir ||
+        !antiAirTargetsOnlyAir ||
+        !walkerLockedBeforeResearch ||
+        !walkerResearchApplied ||
+        !walkerAirProjectile ||
+        !invalidAutomaticTargetIgnored ||
+        !buildingAttackSlotsWorked ||
         !automaticGatheringAssigned ||
         !automaticConstructionChained ||
         !workerRepairedBuilding ||
@@ -4458,6 +4664,9 @@ int main(int argc, char **argv) {
         return cmdGraphics(argv[2], argv[3]);
     if (!strcmp(cmd, "tech") && argc >= 4) return cmdTech(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "techs") && argc >= 4) return cmdTechs(argv[2], argv[3]);
+    if (!strcmp(cmd, "effect-refs") && argc >= 4)
+        return cmdEffectRefs(
+            argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "options") && argc >= 5)
         return cmdOptions(argv[2], atoi(argv[3]), atoi(argv[4]));
     if (!strcmp(cmd, "sound") && argc >= 4) return cmdSound(argv[2], atoi(argv[3]));

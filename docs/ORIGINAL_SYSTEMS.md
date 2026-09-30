@@ -22,6 +22,8 @@ build and test on Vita.
 | Pathfinding | Long-range routines at `0x4982f0`, `0x498820`, `0x4989f0`, `0x499010` | Partially verified and covered |
 | Unit information UI | Panel rows at `0x5d98a0`/`0x5db840`; resource rows at `0x5daf72` | Partially verified |
 | Workers | DAT class 58 and `UNIT-WORKER[A/B]1..11` task variants | Partially verified and covered |
+| Combat target eligibility | Attack-task validation at `0x5b9930`; class filter at `0x41c530`; DAT effect 129 | Verified and covered |
+| Building attack approach | DAT rectangular collision footprints; attack action and path goal state | Covered; exact original slot ordering remains open |
 | AI scripts | Original `.per` parser, facts, actions, and managers | Not implemented |
 
 ## Production exits
@@ -101,6 +103,48 @@ destroy command-panel icons remain frames 28 and 59 of command sheet 50721,
 as constructed by the executable with help strings 4927 and 4941.
 Attack stances are offered only to eligible combat units; workers and
 buildings do not show the stance button or stance status.
+
+## Combat targeting and building approach
+
+Attack-task validation at `0x5b9930` delegates action 7 to the class filter at
+`0x41c530`. The original does not decide air eligibility from `flyMode` or
+damage classes alone. Target classes 43, 48, 59, 62, 63, and 64 are aircraft.
+Dedicated anti-air source classes 9, 16, 33, 40, and 55 can attack only those
+classes. Source classes 48, 57, 62, 63, and 64 can attack either layer; most
+other source classes reject aircraft. Source class 4, target unit 696, and
+target classes 21 and 28 are explicitly rejected.
+
+Units 500 and 603 are executable exceptions when player attribute 31 is
+positive. DAT technology 164, Walker Research, applies effect 129 command
+`type 1, resource 31, +1`, establishing the unlock rather than requiring a
+synthetic unit flag. Heavy Assault Mech 603 then uses air projectile 992
+(`PROJ-MH3TE-AIR`) instead of its ground projectile 198. Other projectile
+changes continue to use researched unit attribute 16. Researched range,
+line-of-sight, minimum range, and reload use attributes 12, 1, 20, and 10.
+
+Manual orders, automatic acquisition, retaliation, rally-point dispatch, and
+active-order validation all use the same eligibility predicate. An ineligible
+member of a mixed selection receives no attack order or attack acknowledgement;
+eligible members still do. Attack animation and projectile graphics and sounds
+remain DAT-driven, including the alternate Heavy Assault Mech projectile.
+
+Attackers assigned to a building retain distinct explicit approach points on
+its rectangular collision perimeter. A point is reserved against friendly
+units already attacking that building, checked for terrain and obstruction,
+and replaced when progress stalls. Pathfinding must not collapse the point
+back to the building's generic footprint goal, because that makes every unit
+converge on the same nearest edge or corner.
+
+Engine contract:
+
+- Ground-only units cannot manually or automatically attack aircraft.
+- Dedicated anti-air units cannot attack ground targets.
+- Walker Research enables Assault Mechs to target aircraft; Heavy Assault
+  Mechs use projectile 992 for air and their ordinary projectile for ground.
+- Research-adjusted range, sight, minimum range, reload, and projectile values
+  are used by simulation as well as the information panel.
+- Crowds attacking large or rectangular buildings occupy distinct passable
+  perimeter points and retry blocked points without stacking.
 
 ## Workers
 

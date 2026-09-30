@@ -1863,6 +1863,84 @@ bool Game::canAttack(const Object &object) const {
     return object.unit->attackGraphic >= 0;
 }
 
+// Attack-task target filter from battlegrounds_x1.exe 0x41c530. SWGB uses
+// unit classes rather than flyMode alone: dedicated anti-air classes can only
+// target the aircraft classes, most ground weapons reject them, and aircraft
+// can engage both layers. Assault Mechs 500/603 become dual-target only while
+// player attribute 31 is enabled.
+bool Game::canAttackTarget(
+    const Object &source, const Object &target) const {
+    if (!canAttack(source) || !source.unit || !target.unit)
+        return false;
+    if (source.unit->cls == 4 || target.unit->id == 696 ||
+        target.unit->cls == 21 || target.unit->cls == 28)
+        return false;
+
+    const int sourceId = source.unit->id;
+    if (sourceId == 1314 || sourceId == 1204 ||
+        sourceId == 545)
+        return true;
+    if ((sourceId == 500 || sourceId == 603) &&
+        playerAttribute(source.player, 31) > 0.0f)
+        return true;
+
+    const int targetClass = target.unit->cls;
+    const bool aircraft =
+        targetClass == 43 || targetClass == 48 ||
+        targetClass == 59 || targetClass == 62 ||
+        targetClass == 63 || targetClass == 64;
+    switch (source.unit->cls) {
+    case 9:
+    case 16:
+    case 33:
+    case 40:
+    case 55:
+        return aircraft;
+    case 48:
+    case 57:
+    case 62:
+    case 63:
+    case 64:
+        return true;
+    default:
+        return !aircraft;
+    }
+}
+
+void Game::attackApproachPoint(
+    const Object &source, const Object &target,
+    float angle, float centerDistance,
+    float &x, float &y) const {
+    const float directionX = std::cos(angle);
+    const float directionY = std::sin(angle);
+    if (target.unit->type != dat::UT_Building) {
+        x = target.x + directionX * centerDistance;
+        y = target.y + directionY * centerDistance;
+        return;
+    }
+
+    const float halfWidth =
+        std::max(0.1f, target.unit->collisionSize[0]);
+    const float halfHeight =
+        std::max(0.1f, target.unit->collisionSize[1]);
+    const float extentX =
+        std::abs(directionX) > 0.0001f
+            ? halfWidth / std::abs(directionX)
+            : std::numeric_limits<float>::max();
+    const float extentY =
+        std::abs(directionY) > 0.0001f
+            ? halfHeight / std::abs(directionY)
+            : std::numeric_limits<float>::max();
+    const float edgeDistance = std::min(extentX, extentY);
+    const float targetRadius = collisionRadius(target);
+    const float outsideDistance =
+        std::max(collisionRadius(source) + 0.08f,
+                 centerDistance - targetRadius);
+    const float distance = edgeDistance + outsideDistance;
+    x = target.x + directionX * distance;
+    y = target.y + directionY * distance;
+}
+
 // Minimum range with technologies applied (attribute 20): research such as
 // the Rebel heavy assault mech's removes it.
 float Game::minimumRange(const Object &source) const {
@@ -1872,7 +1950,13 @@ float Game::minimumRange(const Object &source) const {
 
 float Game::attackRange(const Object &source, const Object &target) const {
     const float contact = collisionRadius(source) + collisionRadius(target) + 0.08f;
-    return std::max(contact, source.unit->maxRange);
+    const float weaponRange =
+        std::max(
+            0.0f,
+            modifiedUnitAttribute(
+                source, 12,
+                source.unit->maxRange));
+    return std::max(contact, weaponRange);
 }
 
 // A unit already fighting a live target within reach keeps it when others
@@ -2383,18 +2467,22 @@ Game::Object *Game::gatherableAtScreen(
 }
 
 Game::Object *Game::enemyAtScreen(float screenX, float screenY, int screenW, int screenH) {
-    const Object *source = nullptr;
-    for (Object *object : selectedObjectsInOrder(true))
-        if (canAttack(*object)) {
-            source = object;
-            break;
-        }
-    if (!source) return nullptr;
+    const std::vector<Object *> selected =
+        selectedObjectsInOrder(true);
 
     Object *best = nullptr;
     float bestScore = std::numeric_limits<float>::max();
     for (Object &object : objects_) {
-        if (!isEnemy(*source, object)) continue;
+        const bool eligible =
+            std::any_of(
+                selected.begin(), selected.end(),
+                [&](const Object *source) {
+                    return source &&
+                           isEnemy(*source, object) &&
+                           canAttackTarget(
+                               *source, object);
+                });
+        if (!eligible) continue;
         float objectX, objectY;
         objectScreenPosition(object, screenW, screenH, objectX, objectY);
         const float radiusX =
@@ -3210,9 +3298,14 @@ void Game::sendToGatherPoint(const Object &building, Object &unit) {
     }
     if (target && isWorker(unit) && isGatherable(*target) && issueGatherCommand(unit, *target))
         return;
-    if (target && target->player != unit.player && isEnemy(unit, *target) && canAttack(unit)) {
-        unit.attackTargetId = target->spawnId;
-        unit.attackAutomatic = false;
+    if (target && target->player != unit.player &&
+        isEnemy(unit, *target) &&
+        canAttackTarget(unit, *target)) {
+        issueAttack(
+            unit, *target,
+            std::atan2(
+                unit.y - target->y,
+                unit.x - target->x));
         return;
     }
     unit.homeX = unit.moveAnchorX = building.rallyX;
@@ -6280,7 +6373,9 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
         Object *acknowledgement = nullptr;
         std::vector<Object *> attackers;
         for (Object *source : selected)
-            if (!canAttack(*source) || !isEnemy(*source, *enemy)) continue;
+            if (!isEnemy(*source, *enemy) ||
+                !canAttackTarget(*source, *enemy))
+                continue;
             else
                 attackers.push_back(source);
         float centroidX = 0, centroidY = 0;
@@ -6328,8 +6423,10 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
             float slotDistance = preferredDistance;
             bool foundSlot = false;
             auto slotOpen = [&](float angle, float distance) {
-                const float x = enemy->x + std::cos(angle) * distance;
-                const float y = enemy->y + std::sin(angle) * distance;
+                float x = 0.0f, y = 0.0f;
+                attackApproachPoint(
+                    *source, *enemy, angle, distance,
+                    x, y);
                 if (!positionPassable(*source, x, y, false))
                     return false;
                 for (const ReservedAttackSlot &slot : reserved) {
@@ -6403,10 +6500,12 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
                     break;
                 }
             }
+            float slotX = 0.0f, slotY = 0.0f;
+            attackApproachPoint(
+                *source, *enemy, slotAngle, slotDistance,
+                slotX, slotY);
             reserved.push_back(
-                {enemy->x + std::cos(slotAngle) * slotDistance,
-                 enemy->y + std::sin(slotAngle) * slotDistance,
-                 sourceRadius});
+                {slotX, slotY, sourceRadius});
             issueAttack(*source, *enemy, slotAngle, false,
                         slotDistance);
             if (!acknowledgement) acknowledgement = source;
@@ -6797,6 +6896,9 @@ void Game::setSelectedAttackMode(
 
 void Game::issueAttack(Object &source, Object &target, float approachAngle,
                        bool automatic, float approachDistance) {
+    if (!isEnemy(source, target) ||
+        !canAttackTarget(source, target))
+        return;
     source.gatherTargetId = 0;
     source.dropOffTargetId = 0;
     if (approachDistance <= 0) {
@@ -6811,16 +6913,77 @@ void Game::issueAttack(Object &source, Object &target, float approachAngle,
                 std::max(approachDistance,
                          minimumRange(source) + 0.2f);
     }
+    if (target.unit->type == dat::UT_Building) {
+        const float separation =
+            collisionRadius(source) * 2.0f + 0.12f;
+        const float perimeter =
+            4.0f *
+            (std::max(0.1f, target.unit->collisionSize[0]) +
+             std::max(0.1f, target.unit->collisionSize[1]));
+        const int samples =
+            std::max(
+                16,
+                std::min(
+                    96,
+                    (int)std::ceil(
+                        perimeter / separation)));
+        for (int sample = 0; sample < samples; sample++) {
+            const int alternating =
+                sample == 0
+                    ? 0
+                    : ((sample + 1) / 2) *
+                          (sample & 1 ? 1 : -1);
+            const float candidateAngle =
+                approachAngle +
+                alternating *
+                    (2.0f * kPi / samples);
+            float candidateX = 0.0f;
+            float candidateY = 0.0f;
+            attackApproachPoint(
+                source, target, candidateAngle,
+                approachDistance, candidateX,
+                candidateY);
+            if (!positionPassable(
+                    source, candidateX, candidateY,
+                    false))
+                continue;
+            bool occupied = false;
+            for (const Object &other : objects_) {
+                if (&other == &source ||
+                    !other.active ||
+                    other.hidden ||
+                    other.player != source.player ||
+                    other.attackTargetId !=
+                        target.spawnId)
+                    continue;
+                const float dx =
+                    candidateX - other.targetX;
+                const float dy =
+                    candidateY - other.targetY;
+                const float required =
+                    collisionRadius(source) +
+                    collisionRadius(other) +
+                    0.08f;
+                if (dx * dx + dy * dy <
+                    required * required) {
+                    occupied = true;
+                    break;
+                }
+            }
+            if (occupied) continue;
+            approachAngle = candidateAngle;
+            break;
+        }
+    }
     source.attackTargetId = target.spawnId;
     source.attackRepathTime = 0;
     source.attackApproachAngle = approachAngle;
     source.attackApproachDistance = approachDistance;
-    if (approachDistance > 0) {
-        source.targetX =
-            target.x + std::cos(approachAngle) * approachDistance;
-        source.targetY =
-            target.y + std::sin(approachAngle) * approachDistance;
-    }
+    if (approachDistance > 0)
+        attackApproachPoint(
+            source, target, approachAngle,
+            approachDistance, source.targetX,
+            source.targetY);
     source.attackSlotRetries = 0;
     source.attackStallTime = 0;
     source.attackBestDistance = std::numeric_limits<float>::max();
@@ -6836,8 +6999,18 @@ void Game::issueAttack(Object &source, Object &target, float approachAngle,
 }
 
 float Game::automaticAcquisitionRadius(const Object &source) const {
-    const float weaponRange = std::max(0.0f, source.unit->maxRange);
-    const float sight = std::max(0.0f, source.unit->lineOfSight);
+    const float weaponRange =
+        std::max(
+            0.0f,
+            modifiedUnitAttribute(
+                source, 12,
+                source.unit->maxRange));
+    const float sight =
+        std::max(
+            0.0f,
+            modifiedUnitAttribute(
+                source, 1,
+                source.unit->lineOfSight));
     if (source.unit->type == dat::UT_Building ||
         source.attackMode == AttackMode::StandGround)
         return std::max(weaponRange + 0.5f, attackRange(source, source));
@@ -6898,14 +7071,43 @@ void Game::retryAttackApproach(Object &source) {
             source.attackApproachDistance =
                 std::max(source.attackApproachDistance,
                          minimumRange(source) + 0.2f);
-        source.targetX =
-            target->x +
-            std::cos(source.attackApproachAngle) *
-                source.attackApproachDistance;
-        source.targetY =
-            target->y +
-            std::sin(source.attackApproachAngle) *
-                source.attackApproachDistance;
+        for (int attempt = 0; attempt < 16;
+             attempt++) {
+            attackApproachPoint(
+                source, *target,
+                source.attackApproachAngle,
+                source.attackApproachDistance,
+                source.targetX, source.targetY);
+            bool occupied = false;
+            for (const Object &other : objects_) {
+                if (&other == &source ||
+                    !other.active ||
+                    other.player != source.player ||
+                    other.attackTargetId !=
+                        target->spawnId)
+                    continue;
+                const float dx =
+                    source.targetX - other.targetX;
+                const float dy =
+                    source.targetY - other.targetY;
+                const float separation =
+                    collisionRadius(source) +
+                    collisionRadius(other) +
+                    0.08f;
+                if (dx * dx + dy * dy <
+                    separation * separation) {
+                    occupied = true;
+                    break;
+                }
+            }
+            if (!occupied &&
+                positionPassable(
+                    source, source.targetX,
+                    source.targetY, false))
+                break;
+            source.attackApproachAngle +=
+                handedness * 2.39996323f;
+        }
     }
     source.path.clear();
     source.pathIndex = 0;
@@ -6946,7 +7148,9 @@ void Game::acquireAutomaticTarget(Object &source) {
                 Object &candidate = objects_[(size_t)index];
                 // Gaia wildlife/resources may be manually hunted, but defensive
                 // units should not start clearing neutral fauna on sight.
-                if (candidate.player <= 0 || !isEnemy(source, candidate))
+                if (candidate.player <= 0 ||
+                    !isEnemy(source, candidate) ||
+                    !canAttackTarget(source, candidate))
                     continue;
                 const float dx = candidate.x - source.x;
                 const float dy = candidate.y - source.y;
@@ -7155,8 +7359,10 @@ void Game::damageObject(Object &object, int damage, uint32_t attackerId) {
     }
 
     Object *attacker = findObject(attackerId);
-    if (attacker && attacker->active && canAttack(object) &&
-        isEnemy(object, *attacker) && object.attackMode != AttackMode::Passive &&
+    if (attacker && attacker->active &&
+        isEnemy(object, *attacker) &&
+        canAttackTarget(object, *attacker) &&
+        object.attackMode != AttackMode::Passive &&
         (!object.attackTargetId || object.attackAutomatic) &&
         !engagedWithCurrentTarget(object)) {
         const float dx = attacker->x - object.x;
@@ -7194,9 +7400,27 @@ void Game::damageObject(Object &object, int damage, uint32_t attackerId) {
     playWorldUnitSound(object, soundId);
 }
 
+const dat::Unit *Game::projectileUnitForTarget(
+    const Object &source,
+    const Object &target) const {
+    int projectileId =
+        (int)std::lround(
+            modifiedUnitAttribute(
+                source, 16,
+                source.unit->projectileUnitId));
+    if (source.unit->id == 603 &&
+        isAirUnit(target) &&
+        playerAttribute(source.player, 31) >
+            0.0f)
+        projectileId = 992;
+    return findUnit(
+        civilizationForPlayer(source.player),
+        projectileId);
+}
+
 void Game::launchProjectile(const Object &source, const Object &target, int damage) {
     const dat::Unit *projectileUnit =
-        findUnit(civilizationForPlayer(source.player), source.unit->projectileUnitId);
+        projectileUnitForTarget(source, target);
     if (!projectileUnit || projectileUnit->standingGraphic[0] < 0) {
         const int soundId = graphicSound(source.unit->attackGraphic);
         playWorldUnitSound(source, soundId);
@@ -7459,7 +7683,8 @@ void Game::updateAttack(Object &source, float dt) {
     }
 
     Object *target = findObject(source.attackTargetId);
-    if (!target || !isEnemy(source, *target) || !canAttack(source)) {
+    if (!target || !isEnemy(source, *target) ||
+        !canAttackTarget(source, *target)) {
         const bool returnToPost =
             source.attackAutomatic &&
             source.attackMode == AttackMode::Defensive;
@@ -7496,7 +7721,13 @@ void Game::updateAttack(Object &source, float dt) {
             return;
         }
     }
-    if (edgeGap <= source.unit->maxRange + 0.1f &&
+    const float maximumRange =
+        std::max(
+            0.0f,
+            modifiedUnitAttribute(
+                source, 12,
+                source.unit->maxRange));
+    if (edgeGap <= maximumRange + 0.1f &&
         edgeGap + 0.05f >= minimumRange(source)) {
         source.path.clear();
         source.pathIndex = 0;
@@ -7557,10 +7788,11 @@ void Game::updateAttack(Object &source, float dt) {
         minimumRange(source) > 0 && edgeGap + 0.05f < minimumRange(source)
             ? std::atan2(source.y - target->y, source.x - target->x)
             : source.attackApproachAngle;
-    const float awayX = std::cos(approachAngle);
-    const float awayY = std::sin(approachAngle);
-    const float destinationX = target->x + awayX * desiredDistance;
-    const float destinationY = target->y + awayY * desiredDistance;
+    float destinationX = 0.0f, destinationY = 0.0f;
+    attackApproachPoint(
+        source, *target, approachAngle,
+        desiredDistance, destinationX,
+        destinationY);
     const float destinationDx = destinationX - source.x;
     const float destinationDy = destinationY - source.y;
     const float destinationDistance =
@@ -7595,10 +7827,14 @@ void Game::updateAttack(Object &source, float dt) {
     // as already arrived and the unit would never step back.
     const bool backingOff =
         minimumRange(source) > 0 && edgeGap + 0.05f < minimumRange(source);
+    // Attackers move to their assigned perimeter point rather than treating
+    // the whole target footprint as one interchangeable goal region. That
+    // preserves group slot distribution around buildings and prevents every
+    // melee unit from converging on the same nearest corner.
     source.attackRepathTime =
-        (backingOff ? issueMove(source, destinationX, destinationY, nullptr, 0.2f)
-                    : issueMove(source, destinationX, destinationY, target,
-                                std::max(0.05f, source.unit->maxRange - 0.05f)))
+        issueMove(
+            source, destinationX, destinationY,
+            nullptr, backingOff ? 0.2f : 0.0f)
             ? (backingOff ? 0.3f : 0.5f)
             : 1.5f;
 }

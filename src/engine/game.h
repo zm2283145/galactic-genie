@@ -266,14 +266,36 @@ public:
     bool issueAttackForTesting(uint32_t sourceId, uint32_t targetId) {
         Object *a = findObject(sourceId);
         Object *b = findObject(targetId);
-        if (!a || !b) return false;
+        if (!a || !b || !isEnemy(*a, *b) ||
+            !canAttackTarget(*a, *b))
+            return false;
         issueAttack(*a, *b, std::atan2(a->y - b->y, a->x - b->x));
         return true;
+    }
+    bool canAttackTargetForTesting(
+        uint32_t sourceId, uint32_t targetId) const {
+        const Object *source = findObject(sourceId);
+        const Object *target = findObject(targetId);
+        return source && target &&
+               canAttackTarget(*source, *target);
     }
     void setAttackModeForTesting(uint32_t spawnId, int mode) {
         if (Object *o = findObject(spawnId)) o->attackMode = (AttackMode)mode;
     }
     size_t projectileCountForTesting() const { return projectiles_.size(); }
+    int firstProjectileUnitForTesting() const {
+        return projectiles_.empty() || !projectiles_.front().unit
+                   ? -1
+                   : projectiles_.front().unit->id;
+    }
+    uint32_t attackTargetForTesting(
+        uint32_t spawnId) const {
+        const Object *object =
+            findObject(spawnId);
+        return object
+                   ? object->attackTargetId
+                   : 0;
+    }
     float minimumRangeForTesting(uint32_t id) const { const Object *o = findObject(id); return o ? minimumRange(*o) : -1.0f; }
     void clearSelectionForTesting() { clearSelection(); }
     int terrainAtForTesting(int x, int y) const { return terrainAt(x, y); }
@@ -321,6 +343,11 @@ public:
         return player >= 0 &&
                (size_t)player < researchedTechs_.size() &&
                researchedTechs_[(size_t)player].count(technologyId);
+    }
+    bool researchTechnologyForTesting(
+        int player, int technologyId) {
+        return researchTechnology(
+            player, technologyId);
     }
     bool technologyRequirementsMetForTesting(
         int player, int technologyId) const {
@@ -622,6 +649,12 @@ private:
     bool isAirUnit(const Object &object) const;
     bool isEnemy(const Object &source, const Object &target) const;
     bool canAttack(const Object &object) const;
+    bool canAttackTarget(
+        const Object &source, const Object &target) const;
+    void attackApproachPoint(
+        const Object &source, const Object &target,
+        float angle, float centerDistance,
+        float &x, float &y) const;
     float attackRange(const Object &source, const Object &target) const;
     int attackDamage(const Object &source, const Object &target) const;
     int modifiedAttackAmount(
@@ -827,6 +860,8 @@ private:
     float automaticAcquisitionRadius(const Object &source) const;
     float automaticPursuitLeash(const Object &source) const;
     void updateAttack(Object &source, float dt);
+    const dat::Unit *projectileUnitForTarget(
+        const Object &source, const Object &target) const;
     void launchProjectile(const Object &source, const Object &target, int damage);
     void updateProjectiles(float dt);
     void updateRemains(float dt);
