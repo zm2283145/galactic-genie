@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Milestone-1 "sandbox" game: a generated map with terrain, buildings and
-// units that idle and wander using their real SWGB animations.
+// Genie-style simulation using the original SWGB data and presentation.
 #pragma once
 
 #include "assets.h"
@@ -173,6 +172,13 @@ public:
     size_t gateCount() const;
     void setLocalPlayerForTesting(int player) { localPlayer_ = player; }
     size_t garrisonedCount(uint32_t spawnId) const;
+    float animalNurseryFoodRateForTesting(
+        uint32_t spawnId) const {
+        const Object *nursery = findObject(spawnId);
+        return nursery
+                   ? animalNurseryFoodRate(*nursery)
+                   : 0.0f;
+    }
     bool garrisonCursorActive() const {
         return garrisonCursorActive_;
     }
@@ -565,7 +571,7 @@ private:
         uint32_t guardTargetId = 0;
         uint32_t followTargetId = 0;
         bool moveGoalActive = false;
-        bool wander = true;
+        bool wander = false;
         bool drawShadows = true;
         bool active = true;
         bool hidden = false;
@@ -761,6 +767,9 @@ private:
         bool dynamic, int *failure = nullptr) const;
     bool terrainPassable(const Object &object, float x, float y) const;
     bool isAirUnit(const Object &object) const;
+    bool isPassiveAnimal(const Object &object) const;
+    bool isHostileGaiaAnimal(
+        const Object &object) const;
     bool isEnemy(const Object &source, const Object &target) const;
     bool canAttack(const Object &object) const;
     bool canAttackTarget(
@@ -960,6 +969,8 @@ private:
     uint8_t garrisonCategory(const Object &unit) const;
     size_t garrisonedCount(const Object &building,
                            bool includeIncoming) const;
+    float animalNurseryFoodRate(
+        const Object &nursery) const;
     bool issueGarrisonCommand(Object &building);
     bool issueGarrisonOrder(
         Object &unit, Object &container);
@@ -1161,6 +1172,8 @@ public:
         return true;
     }
     bool queueUnitForTesting(uint32_t buildingId, int unitId);
+    bool queueTechnologyForTesting(
+        uint32_t buildingId, int technologyId);
 private:
     // Wall placement (mouse mode 0x15 in the original): first press sets
     // the start tile, the preview follows the cursor, the next press

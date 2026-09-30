@@ -36,8 +36,10 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 - Fixed-timestep simulation separate from rendering. Deterministic, to leave room for multiplayer later.
 - Player-issued move and attack commands use cached terrain-restriction A* pathing, dynamic occupancy,
   shared formation routes, route-tangent marching columns, slowest-member group speed with bounded
-  catch-up, collision-free movement within established formations, and precise destination formations.
-  Workers, traders, and distant stragglers move independently. Broader task-list actions remain.
+  catch-up, collision-free movement within established formations, precise destination formations,
+  and continuous walking animation for every actively marching member. Idle units do not perform the
+  former sample wander; generated units begin in distinct slots. Workers, traders, and distant
+  stragglers move independently. Broader task-list actions remain.
 - Unit commands from the dat task lists (`UnitHeader.tasks`): move, attack, gather, build, repair,
   and garrison. Workers repair owned or allied buildings and DAT-designated mechanical classes,
   consume half of the target's original resource cost across a full HP restoration, and use the
@@ -60,6 +62,7 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   choices, while researched replacement effects upgrade both available choices and existing units
   and buildings. Production locations follow each building's researched upgrade lineage, so Command
   Centers and Troop Centers retain their original production menus after advancing a Tech Level.
+  Command Centers also progress through their TL2, TL3, and TL4 appearance replacements.
   Every queued unit/research item is displayed and can be cancelled for a refund.
   Power Cores and mobile Power Droids provide the original nine-tile power coverage; selected power
   sources show the original blue coverage ring. Unpowered buildings train and research at 25% speed.
@@ -82,7 +85,10 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   other nodes transition through their original death/remains graphics instead of vanishing. Farms
   are available as a base economy building rather than depending on their
   circular `MADE-*` technology. Neutral Nerfs and Banthas use the
-  original Gaia color and convert through proximity capture. Live-animal slaughter, farms,
+  original Gaia color, convert through proximity capture, and remain excluded from proactive
+  military/building targeting; explicit attacks still work. Hostile class-5 Gaia predators attack
+  player units and provoke retaliation. Animal Nurseries produce food at their DAT work rate per
+  garrisoned animal. Live-animal slaughter, farms,
   automatic adjacent-node retargeting, and DAT-driven population use/capacity are implemented.
   Production waits at 100% when housing is full and resumes after capacity is added. Fishing
   remains.
@@ -117,7 +123,8 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   selected gate footprints follow their oriented annexes. Unit/group panels use the original command sheet for
   garrison targeting, repair targeting, gate locking, destruction, and ejection. The destroy command
   removes one object per press in reverse selection order. Eligible buildings show their garrisoned
-  unit portraits; a portrait ejects only that unit while Eject All remains available. Attack-capable
+  unit portraits; a portrait ejects only that unit while Eject All remains available. Animal
+  Nurseries use the same clickable occupant portraits and show their live food-per-second rate. Attack-capable
   selections expose a dedicated original-style stance grid while Triangle still cycles stances
   directly. Mobile units expose the original Stop, Patrol, Guard, Follow, and Attack Ground
   icons in a dedicated command grid; patrol resumes after stance-aware combat, Guard protects
@@ -141,9 +148,8 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   the speaking player's color, while hostile damage uses the original cooldown-controlled
   `atakwarn.wav`. Garrison/ejection, gate
   transformation, unit-training, construction-start, and building-completion cues use their DAT
-  sound groups. The DAT has no per-technology completion sound field, so the original generic
-  research-completion cue still requires executable-level verification. User-facing volume controls
-  remain.
+  sound groups. Livestock capture uses `capsheep.wav`, and queued Tech Level completion uses the
+  executable's `archupg.wav` resource. User-facing volume controls remain.
 
 ## Milestone 5: AI and skirmish
 - A subset of the AI script interpreter (`.per` rules), checked against the original using Ghidra where needed.

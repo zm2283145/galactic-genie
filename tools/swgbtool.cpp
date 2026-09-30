@@ -3174,10 +3174,13 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         !sawBuildingRemains || !remainsDecayed || !edgeScrolled ||
         !attackPlayedOnce || !offscreenWorldMuted ||
         combat.automaticTargetsAcquired == 0 ||
+        // Idle sandbox units no longer wander out of combat lanes. Allow
+        // bounded replans around those persistent blockers while still
+        // rejecting a retry loop.
         combat.attackApproachRetries >
             std::max<size_t>(
                 8,
-                combat.attackPathsComputed / 4) ||
+                combat.attackPathsComputed / 2) ||
         !researchedFocusCoils ||
         !workerCanBuild ||
         !buildingPagesSeparated ||
@@ -5120,6 +5123,334 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
                 " transport " +
                 std::to_string(
                     ralliedToTransport));
+    }
+    // Passive livestock are only valid explicit targets. Hostile Gaia
+    // predators acquire enemies and provoke retaliation.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        g.setDiplomacyForTesting(1, 2, 3);
+        g.setDiplomacyForTesting(2, 1, 3);
+        const uint32_t trooper =
+            g.spawnObjectForTesting(
+                3, 460, 1, 72.0f, 72.0f);
+        const uint32_t nerf =
+            g.spawnObjectForTesting(
+                0, 594, 2, 76.5f, 72.0f);
+        const float nerfHp =
+            g.objectHitPoints(nerf);
+        step(g, 3.0f);
+        const bool ignored =
+            g.attackTargetForTesting(trooper) == 0 &&
+            std::abs(
+                g.objectHitPoints(nerf) -
+                nerfHp) < 0.01f;
+        const bool explicitAttack =
+            g.issueAttackForTesting(
+                trooper, nerf);
+        step(g, 2.0f);
+        const bool explicitlyDamaged =
+            !g.objectActive(nerf) ||
+            g.objectHitPoints(nerf) < nerfHp;
+
+        Game predatorGame(assets);
+        if (!predatorGame.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        predatorGame.setLocalPlayerForTesting(1);
+        const uint32_t defender =
+            predatorGame.spawnObjectForTesting(
+                3, 460, 1, 72.0f, 72.0f);
+        const uint32_t nexu =
+            predatorGame.spawnObjectForTesting(
+                0, 1461, 0, 73.0f, 72.0f);
+        step(predatorGame, 3.0f);
+        const bool predatorAttacked =
+            predatorGame.attackTargetForTesting(
+                nexu) == defender ||
+            predatorGame.objectHitPoints(
+                defender) <
+                predatorGame.objectMaxHitPoints(
+                    defender);
+        const bool defenderRetaliated =
+            predatorGame.attackTargetForTesting(
+                defender) == nexu ||
+            predatorGame.objectHitPoints(
+                nexu) <
+                predatorGame.objectMaxHitPoints(
+                    nexu);
+        report(
+            "animal-targeting",
+            ignored && explicitAttack &&
+                explicitlyDamaged &&
+                predatorAttacked &&
+                defenderRetaliated,
+            "ignored " +
+                std::to_string(ignored) +
+                " explicit " +
+                std::to_string(
+                    explicitlyDamaged) +
+                " predator " +
+                std::to_string(
+                    predatorAttacked) +
+                " retaliation " +
+                std::to_string(
+                    defenderRetaliated));
+    }
+    // Capturing livestock plays capsheep.wav once, and uncommanded workers
+    // and animals do not perform the old sample wander.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        step(g, 0.1f);
+        std::vector<int> sounds;
+        g.setInterfaceSoundPlayer(
+            [&](int soundId) {
+                sounds.push_back(soundId);
+            });
+        const uint32_t worker =
+            g.spawnObjectForTesting(
+                3, 83, 1, 82.0f, 82.0f);
+        const uint32_t nerf =
+            g.spawnObjectForTesting(
+                0, 594, 0, 83.0f, 82.0f);
+        const auto workerStart =
+            g.objectPosition(worker);
+        const auto nerfStart =
+            g.objectPosition(nerf);
+        step(g, 5.0f);
+        const size_t captureSounds =
+            (size_t)std::count(
+                sounds.begin(), sounds.end(),
+                50355);
+        const auto workerEnd =
+            g.objectPosition(worker);
+        const auto nerfEnd =
+            g.objectPosition(nerf);
+        const bool stationary =
+            std::hypot(
+                workerEnd[0] -
+                    workerStart[0],
+                workerEnd[1] -
+                    workerStart[1]) < 0.01f &&
+            std::hypot(
+                nerfEnd[0] -
+                    nerfStart[0],
+                nerfEnd[1] -
+                    nerfStart[1]) < 0.01f;
+        report(
+            "animal-capture-and-idle",
+            g.objectPlayer(nerf) == 1 &&
+                captureSounds == 1 &&
+                stationary,
+            "owner " +
+                std::to_string(
+                    g.objectPlayer(nerf)) +
+                " sound " +
+                std::to_string(
+                    captureSounds) +
+                " stationary " +
+                std::to_string(
+                    stationary));
+    }
+    // A construction command immediately replaces a worker's gather job.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t worker =
+            g.spawnObjectForTesting(
+                3, 83, 1, 30.0f, 70.0f);
+        const uint32_t carbon =
+            g.spawnObjectForTesting(
+                0, 348, 0, 30.5f, 70.0f);
+        const bool gathering =
+            g.issueGatherForTesting(
+                worker, carbon);
+        step(g, 0.5f);
+        const uint32_t foundation =
+            g.spawnFoundationForTesting(
+                3, 109, 1,
+                35.0f, 70.0f,
+                {worker});
+        const bool retasked =
+            foundation != 0 &&
+            !g.objectGatheringTarget(
+                worker, carbon) &&
+            g.objectBuildingTarget(
+                worker, foundation);
+        step(g, 2.0f);
+        report(
+            "gather-to-construction",
+            gathering && retasked &&
+                g.objectBuildingTarget(
+                    worker, foundation),
+            "gather " +
+                std::to_string(gathering) +
+                " retasked " +
+                std::to_string(retasked));
+    }
+    // Each Tech Level replaces the current Command Center appearance and
+    // plays the original architecture-upgrade cue.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        std::vector<int> sounds;
+        g.setInterfaceSoundPlayer(
+            [&](int soundId) {
+                sounds.push_back(soundId);
+            });
+        const uint32_t commandCenter =
+            g.spawnObjectForTesting(
+                3, 109, 1, 60.0f, 70.0f);
+        const int expected[] = {
+            71, 141, 142};
+        bool advanced = true;
+        for (int technology = 1;
+             technology <= 3;
+             ++technology) {
+            advanced =
+                g.queueTechnologyForTesting(
+                    commandCenter,
+                    technology) &&
+                advanced;
+            step(g, 0.2f);
+            advanced =
+                g.objectUnitId(
+                    commandCenter) ==
+                    expected[
+                        technology - 1] &&
+                advanced;
+        }
+        const size_t levelSounds =
+            (size_t)std::count(
+                sounds.begin(), sounds.end(),
+                50325);
+        report(
+            "tech-level-command-center",
+            advanced && levelSounds == 3,
+            "unit " +
+                std::to_string(
+                    g.objectUnitId(
+                        commandCenter)) +
+                " sounds " +
+                std::to_string(
+                    levelSounds));
+    }
+    // Animal Nursery occupants use the generic clickable passenger strip,
+    // and its displayed production rate tracks the animals still inside.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t nursery =
+            g.spawnObjectForTesting(
+                3, 319, 1, 45.0f, 70.0f);
+        const uint32_t first =
+            g.spawnObjectForTesting(
+                0, 594, 1, 45.0f, 74.0f);
+        const uint32_t second =
+            g.spawnObjectForTesting(
+                0, 594, 1, 46.0f, 74.0f);
+        const bool ordered =
+            g.garrisonForTesting(
+                first, nursery) &&
+            g.garrisonForTesting(
+                second, nursery);
+        for (int frame = 0;
+             frame < 900 &&
+             g.garrisonedCount(nursery) < 2;
+             ++frame)
+            g.update(
+                1.0f / 30.0f, {});
+        const float fullRate =
+            g.animalNurseryFoodRateForTesting(
+                nursery);
+        const float foodBefore =
+            g.resource(1, 0);
+        step(g, 10.0f);
+        const float foodGained =
+            g.resource(1, 0) -
+            foodBefore;
+        g.selectObjectForTesting(nursery);
+        g.render(renderer, 960, 544);
+        InputState click;
+        click.screenW = 960;
+        click.screenH = 544;
+        click.cursorVisible = true;
+        click.pointerX = 477.0f;
+        click.pointerY =
+            544.0f - 112.0f + 29.0f;
+        click.selectPressed = true;
+        g.update(0.001f, click);
+        const float reducedRate =
+            g.animalNurseryFoodRateForTesting(
+                nursery);
+        report(
+            "nursery-rate-and-eject",
+            ordered &&
+                g.garrisonedCount(
+                    nursery) == 1 &&
+                fullRate > 0.0f &&
+                std::abs(
+                    reducedRate * 2.0f -
+                    fullRate) < 0.001f &&
+                std::abs(
+                    foodGained -
+                    fullRate * 10.0f) < 0.1f,
+            "inside " +
+                std::to_string(
+                    g.garrisonedCount(
+                        nursery)) +
+                " rate " +
+                std::to_string(fullRate) +
+                " -> " +
+                std::to_string(
+                    reducedRate) +
+                " food +" +
+                std::to_string(foodGained));
+    }
+    // Formation members retain their walking state when they consume the
+    // short moving-slot path each frame.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        std::vector<uint32_t> mechs;
+        for (int row = 0; row < 3; ++row)
+            for (int column = 0;
+                 column < 4; ++column)
+                mechs.push_back(
+                    g.spawnObjectForTesting(
+                        3, 277, 1,
+                        18.0f +
+                            column * 1.5f,
+                        18.0f +
+                            row * 1.5f));
+        g.selectObjectsForTesting(mechs);
+        g.groupMoveForTesting(
+            mechs, 72.0f, 72.0f);
+        size_t fewestWalking =
+            mechs.size();
+        for (int frame = 0;
+             frame < 60; ++frame) {
+            g.update(
+                1.0f / 30.0f, {});
+            fewestWalking =
+                std::min(
+                    fewestWalking,
+                    g.selectedMovingObjectCount());
+        }
+        report(
+            "march-walking-animation",
+            fewestWalking == mechs.size(),
+            "walking " +
+                std::to_string(
+                    fewestWalking) +
+                "/" +
+                std::to_string(
+                    mechs.size()));
     }
     printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;

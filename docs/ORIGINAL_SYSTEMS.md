@@ -134,6 +134,14 @@ combat, work, garrison approach, patrol, guard, follow, and pending fire.
 Explicit replacement orders clear patrol/guard/follow; automatic stance
 attacks do not.
 
+Idle units have no sample or ambient wander order. They move only for a
+player, AI, scenario, work, combat, formation, or short friendly
+collision-resolution order. Generated sandbox units are placed in distinct
+starting slots instead of depending on later wandering to separate them.
+While a formation is marching, every member that is following its moving slot
+retains the Walk state even when it consumes that frame's short slot path; the
+standing graphic is not substituted between frames.
+
 ## Combat targeting and building approach
 
 Attack-task validation at `0x5b9930` delegates action 7 to the class filter at
@@ -158,6 +166,12 @@ member of a mixed selection receives no attack order or attack acknowledgement;
 eligible members still do. Attack animation and projectile graphics and sounds
 remain DAT-driven, including the alternate Heavy Assault Mech projectile.
 
+Passive `ANIMAL-*` classes 1, 2, 4, and 60 are excluded from proactive
+military and building acquisition. An explicit military attack remains valid
+and temporarily prevents proximity capture from replacing that order.
+Hostile Gaia predators are class 5: they acquire player units, and attacked
+player units retaliate against them.
+
 Attackers assigned to a building retain distinct explicit approach points on
 its rectangular collision perimeter. A point is reserved against friendly
 units already attacking that building, checked for terrain and obstruction,
@@ -175,6 +189,8 @@ Engine contract:
   are used by simulation as well as the information panel.
 - Crowds attacking large or rectangular buildings occupy distinct passable
   perimeter points and retry blocked points without stacking.
+- Passive livestock and harvest animals are manual targets only; hostile
+  class-5 Gaia predators participate in automatic attack and retaliation.
 
 ## Attack Ground and firing presentation
 
@@ -231,11 +247,20 @@ reservation path. A rally target may therefore be a different compatible
 building or a mobile transport; incoming units reserve capacity before they
 arrive. The original boarding cursor is `mcursors.shp` frame 13.
 
+Animal Nursery unit 319 accepts class-1 livestock through category 16. Each
+occupant adds the building's DAT `workRate` to food per second. The selection
+panel shows the occupants in the same clickable portrait strip as every other
+garrison, allows one animal to be ejected by pressing its portrait, and shows
+the current aggregate food-per-second rate. Ejecting an animal immediately
+reduces that rate.
+
 The original interface sound table maps `button1.wav`, `button2.wav`, and
 `cantdo.wav` to resources 50300, 50301, and 50303. Successful menu choices use
 50300, cancel/back uses 50301, and rejected actions such as full queues,
 resource shortages, and invalid/full garrison targets use 50303. Resource
 shortages use strings 3001-3004 and production queue full uses string 3088.
+Proximity capture of livestock by the local player plays `capsheep.wav`
+resource 50355 once for that ownership transition.
 
 ## Population, attack alerts, and instruction colors
 
@@ -251,6 +276,13 @@ The executable interface table at `0x544ba0` binds `atakwarn.wav` to resource
 50315. Hostile damage to a local object emits that warning and a visible
 under-attack notice, with a cooldown so repeated damage ticks do not restart
 the alert.
+
+The same interface table binds `archupg.wav` to resource 50325. Completing
+queued Tech Level technologies 1, 2, or 3 for the local player plays that cue.
+Those effects directly replace base Command Center 109 at each level
+(`109 -> 71`, `109 -> 141`, and `109 -> 142`), so replacement caching aliases
+the previously displayed level to the newest result instead of preserving the
+first replacement.
 
 Display Instruction effects retain their source player when supplied.
 Campaign dialogue often leaves that field unset, so the speaker prefix before
@@ -290,6 +322,9 @@ automatically switch from forage to hunting or farming).
 Engine contract:
 
 - Every player's class-58 units execute worker jobs.
+- An explicit construction assignment clears gathering, resource-work,
+  drop-off, combat, garrison, and farm-movement state immediately while
+  preserving carried resources.
 - Construction, gathering, carrying, and repair graphics come from the
   corresponding DAT worker variant and task.
 - A carbon worker plays the task's initial working interval against the

@@ -49,7 +49,9 @@ constexpr int kInterfaceButtonSound = 50300; // button1.wav
 constexpr int kInterfaceCancelSound = 50301; // button2.wav
 constexpr int kInterfaceCannotDoSound = 50303; // cantdo.wav
 constexpr int kInterfaceAttackWarningSound = 50315; // atakwarn.wav
+constexpr int kInterfaceTechLevelSound = 50325; // archupg.wav
 constexpr int kInterfaceNeedHousingSound = 50354; // needhous.wav
+constexpr int kInterfaceCaptureAnimalSound = 50355; // capsheep.wav
 // Stance buttons (exe 0x503800): Aggressive, Defensive, Stand Ground, No
 // Attack. The pressed (active) variants are drawn for the current stance.
 constexpr size_t kStanceIcons[4] = {9, 10, 11, 50};
@@ -1029,6 +1031,18 @@ void Game::updateLivestockOwnership() {
             livestock.unit->name.rfind(
                 "ANIMAL-CAPTURE", 0) != 0)
             continue;
+        const bool explicitlyTargeted =
+            std::any_of(
+                objects_.begin(), objects_.end(),
+                [&](const Object &unit) {
+                    return unit.active &&
+                           !unit.hidden &&
+                           unit.player > 0 &&
+                           unit.attackTargetId ==
+                               livestock.spawnId &&
+                           !unit.attackAutomatic;
+                });
+        if (explicitlyTargeted) continue;
         int closestPlayer = 0;
         float closestDistance =
             captureRadius * captureRadius;
@@ -1051,8 +1065,12 @@ void Game::updateLivestockOwnership() {
             }
         }
         if (closestPlayer > 0 &&
-            closestPlayer != livestock.player)
+            closestPlayer != livestock.player) {
             livestock.player = closestPlayer;
+            if (closestPlayer == localPlayer_)
+                playInterfaceFeedback(
+                    kInterfaceCaptureAnimalSound);
+        }
     }
 }
 
@@ -1071,15 +1089,17 @@ void Game::spawnBase(int player, int civ, char L, float cx, float cy) {
     spawn(civ, "BLDG-TRAINRANGE1", player, cx + 5.5f, cy - 2.5f, 0);
     spawn(civ, "BLDG-DEFENSEA1", player, cx + 6.0f, cy + 5.0f, 0);
 
-    std::uniform_real_distribution<float> off(-3.0f, 3.0f);
     std::uniform_real_distribution<float> ang(0, 2 * kPi);
     for (int i = 0; i < 5; i++)
-        spawn(civ, "UNIT-WORKERA1", player, cx + off(rng_), cy + 6 + off(rng_) * 0.5f, ang(rng_));
+        spawn(
+            civ, "UNIT-WORKERA1", player,
+            cx - 2.0f + i, cy + 8.0f,
+            ang(rng_));
     for (int i = 0; i < 4; i++)
         spawn(civ, "UNIT-TTRP" + sL, player, cx + 8 + i * 0.9f, cy + 1 + (i % 2) * 0.9f, ang(rng_));
     spawn(civ, "UNIT-JKNT" + sL, player, cx + 1, cy - 2, ang(rng_));
     spawn(civ, "UNIT-M1TR" + sL, player, cx + 9, cy + 4, ang(rng_));
-    spawn(civ, "UNIT-TAAT" + sL, player, cx + 11, cy + 2, ang(rng_));
+    spawn(civ, "UNIT-TAAT" + sL, player, cx + 12, cy + 4, ang(rng_));
 }
 
 namespace {
@@ -1855,12 +1875,37 @@ bool Game::isAirUnit(const Object &object) const {
     return object.unit->flyMode != 0;
 }
 
+bool Game::isPassiveAnimal(
+    const Object &object) const {
+    return object.unit &&
+           object.unit->name.rfind(
+               "ANIMAL-", 0) == 0 &&
+           object.unit->cls != 5;
+}
+
+bool Game::isHostileGaiaAnimal(
+    const Object &object) const {
+    return object.player == 0 &&
+           object.unit &&
+           object.unit->name.rfind(
+               "ANIMAL-", 0) == 0 &&
+           object.unit->cls == 5;
+}
+
 bool Game::isEnemy(const Object &source, const Object &target) const {
     if (!target.active || target.hidden || !target.draw || !target.spawnId ||
         target.hitPoints <= 0 ||
-        target.unit->type < dat::UT_Combatant || source.player <= 0 ||
+        target.unit->type < dat::UT_Combatant ||
         source.player == target.player)
         return false;
+    if (source.player <= 0)
+        return isHostileGaiaAnimal(source) &&
+               target.player > 0;
+    if (target.player == 0 &&
+        target.unit &&
+        target.unit->name.rfind(
+            "ANIMAL-", 0) == 0)
+        return true;
     const size_t sourceIndex = (size_t)source.player - 1;
     return sourceIndex < players_.size() && target.player >= 0 && target.player < 16 &&
            players_[sourceIndex].diplomacy[(size_t)target.player] == 3;
@@ -3105,8 +3150,10 @@ const dat::Unit *Game::effectiveUnitForPlayer(
         (size_t)player >= researchedTechs_.size() ||
         (size_t)player >= upgradeCache_.size())
         return unit;
-    // Upgrade map (effect type 3, A -> B; the first researched tech that
-    // upgrades A wins), rebuilt only when the researched set changes.
+    // Upgrade map (effect type 3, A -> B), rebuilt only when the researched
+    // set changes. Tech Levels replace the same base master at every age
+    // (109 -> 71, then 109 -> 141, then 109 -> 142), so later replacements
+    // supersede earlier ones and retain aliases from the earlier result.
     std::map<int, int> &upgrades = upgradeCache_[(size_t)player];
     if (upgradeCacheGeneration_[(size_t)player] != techGeneration_) {
         upgradeCacheGeneration_[(size_t)player] = techGeneration_;
@@ -3119,7 +3166,18 @@ const dat::Unit *Game::effectiveUnitForPlayer(
                 continue;
             for (const dat::EffectCommand &command :
                  assets_.dat().effects[(size_t)technology.effectId].commands)
-                if (command.type == 3) upgrades.emplace(command.a, command.b);
+                if (command.type == 3 &&
+                    command.a >= 0 &&
+                    command.b >= 0) {
+                    const auto previous =
+                        upgrades.find(command.a);
+                    if (previous != upgrades.end() &&
+                        previous->second != command.b)
+                        upgrades[previous->second] =
+                            command.b;
+                    upgrades[command.a] =
+                        command.b;
+                }
         }
     }
     int unitId = unit->id;
@@ -3538,6 +3596,9 @@ void Game::updateUnitCommandOrder(
             for (Object &candidate : objects_) {
                 if (!candidate.active ||
                     candidate.hidden ||
+                    candidate.player <= 0 ||
+                    (unit.player > 0 &&
+                     isPassiveAnimal(candidate)) ||
                     !isEnemy(unit, candidate) ||
                     !canAttackTarget(
                         unit, candidate))
@@ -3880,6 +3941,23 @@ bool Game::queueUnitForTesting(uint32_t buildingId, int unitId) {
     item.duration = 0.1f;
     building->productionQueue.push_back(item);
     if (building->productionQueue.size() == 1) building->productionRemaining = item.duration;
+    return true;
+}
+
+bool Game::queueTechnologyForTesting(
+    uint32_t buildingId, int technologyId) {
+    Object *building = findObject(buildingId);
+    if (!building || technologyId < 0 ||
+        (size_t)technologyId >=
+            assets_.dat().techs.size())
+        return false;
+    ProductionItem item;
+    item.technologyId = technologyId;
+    item.duration = 0.1f;
+    building->productionQueue.push_back(item);
+    if (building->productionQueue.size() == 1)
+        building->productionRemaining =
+            item.duration;
     return true;
 }
 
@@ -5489,6 +5567,28 @@ size_t Game::garrisonedCount(
     return count;
 }
 
+float Game::animalNurseryFoodRate(
+    const Object &nursery) const {
+    if (!nursery.active ||
+        nursery.underConstruction ||
+        nursery.player <= 0 ||
+        !nursery.unit ||
+        nursery.unit->type != dat::UT_Building ||
+        !(nursery.unit->garrisonType & 16))
+        return 0.0f;
+    size_t animals = 0;
+    for (const Object &animal : objects_)
+        if (animal.active &&
+            animal.garrisonedInId ==
+                (int32_t)nursery.spawnId &&
+            animal.unit &&
+            animal.unit->cls == 1)
+            animals++;
+    return std::max(
+               0.0f, nursery.unit->workRate) *
+           (float)animals;
+}
+
 // Production exit finder, modelled on battlegrounds_x1.exe 0x558810, called
 // by the production-completion activity at 0x56e390. The original packs
 // candidate positions around the producer's immediate rectangular perimeter,
@@ -6225,6 +6325,18 @@ bool Game::assignBuilder(Object &worker,
         return false;
     clearUnitCommandOrder(worker);
     clearConstructionAssignment(worker);
+    worker.gatherTargetId = 0;
+    worker.resourceWorkTargetId = 0;
+    worker.resourceWorkTime = 0.0f;
+    worker.dropOffTargetId = 0;
+    worker.manualDropOff = false;
+    worker.attackTargetId = 0;
+    worker.attackAutomatic = false;
+    worker.attackGroundActive = false;
+    worker.attackShotPending = false;
+    worker.garrisonTargetId = 0;
+    worker.farmMoveActive = false;
+    worker.wander = false;
     float targetX = 0.0f;
     float targetY = 0.0f;
     if (!freeInteractionPoint(worker, building, 0.35f * 0.6f, targetX, targetY))
@@ -7815,9 +7927,12 @@ void Game::acquireAutomaticTarget(Object &source) {
                  combatObjectCells_[
                      (size_t)cellY * mobileObjectGridWidth_ + cellX]) {
                 Object &candidate = objects_[(size_t)index];
-                // Gaia wildlife/resources may be manually hunted, but defensive
-                // units should not start clearing neutral fauna on sight.
+                // Gaia fauna may be manually hunted, but only hostile Gaia
+                // animals initiate combat. Player-owned passive animals are
+                // never military auto-acquisition targets.
                 if (candidate.player <= 0 ||
+                    (source.player > 0 &&
+                     isPassiveAnimal(candidate)) ||
                     !isEnemy(source, candidate) ||
                     !canAttackTarget(source, candidate))
                     continue;
@@ -11337,8 +11452,16 @@ void Game::update(float dt, const InputState &in) {
         const ProductionItem item =
             building.productionQueue.front();
         if (item.technologyId >= 0) {
-            researchTechnology(
-                building.player, item.technologyId);
+            const bool researched =
+                researchTechnology(
+                    building.player,
+                    item.technologyId);
+            if (researched &&
+                building.player == localPlayer_ &&
+                item.technologyId >= 1 &&
+                item.technologyId <= 3)
+                playInterfaceFeedback(
+                    kInterfaceTechLevelSound);
             building.productionQueue.pop_front();
             building.productionRemaining =
                 building.productionQueue.empty()
@@ -11567,18 +11690,11 @@ void Game::update(float dt, const InputState &in) {
     // Animal Nursery (garrison type 16): each garrisoned animal adds the
     // nursery's work rate in food per second to its owner.
     for (const Object &nursery : objects_) {
-        if (!nursery.active || nursery.underConstruction || nursery.player <= 0 ||
-            !nursery.unit || nursery.unit->type != dat::UT_Building ||
-            !(nursery.unit->garrisonType & 16))
-            continue;
-        size_t animals = 0;
-        for (const Object &animal : objects_)
-            if (animal.active && animal.garrisonedInId == (int32_t)nursery.spawnId &&
-                animal.unit && animal.unit->cls == 1)
-                animals++;
-        if (animals)
+        const float rate =
+            animalNurseryFoodRate(nursery);
+        if (rate > 0.0f)
             resources_[(size_t)nursery.player][0] +=
-                std::max(0.0f, nursery.unit->workRate) * (float)animals * dt;
+                rate * dt;
     }
     // Damage graphics (fire/smoke stages) carry their own sound, played each
     // animation cycle like any graphic sound while the building is heard.
@@ -12249,18 +12365,6 @@ void Game::update(float dt, const InputState &in) {
                 }
                 continue;
             }
-            if (!o.wander) continue;
-            if (o.stateTime <= 0) {
-                // Wander to a nearby point around home.
-                float a = r01(rng_) * 2 * kPi, d = 1.0f + r01(rng_) * 4.0f;
-                const float targetX =
-                    std::max(1.0f, std::min(mapSize_ - 2.0f, o.homeX + std::cos(a) * d));
-                const float targetY =
-                    std::max(1.0f, std::min(mapSize_ - 2.0f, o.homeY + std::sin(a) * d));
-                o.moveGroupId = 0;
-                issueMove(o, targetX, targetY);
-                o.wander = true;
-            }
         } else {
             // Original arrival rule (0x4a45a0): a unit walking to an object
             // stops the moment its edge distance is within its work range,
@@ -12311,6 +12415,11 @@ void Game::update(float dt, const InputState &in) {
                 }
             }
             if (o.pathIndex >= o.path.size()) {
+                if (o.marchGroupId &&
+                    o.moveGoalActive) {
+                    o.state = State::Walk;
+                    continue;
+                }
                 o.state = State::Idle;
                 o.stateTime = 1.5f + r01(rng_) * 5.0f;
                 o.animTime = 0;
@@ -12500,9 +12609,19 @@ void Game::update(float dt, const InputState &in) {
                     wx * wx + wy * wy <= 0.0025f) {
                     o.pathIndex++;
                     if (o.pathIndex >= o.path.size()) {
-                        o.state = State::Idle;
-                        o.stateTime = 1.5f + r01(rng_) * 5.0f;
-                        o.animTime = 0;
+                        const bool marching =
+                            o.marchGroupId != 0 &&
+                            o.moveGoalActive;
+                        o.state =
+                            marching
+                                ? State::Walk
+                                : State::Idle;
+                        if (!marching) {
+                            o.stateTime =
+                                1.5f +
+                                r01(rng_) * 5.0f;
+                            o.animTime = 0;
+                        }
                         const float goalDx = o.targetX - o.x;
                         const float goalDy = o.targetY - o.y;
                         const float arrival =
@@ -14249,6 +14368,17 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             if (panelObject->player == localPlayer_ && unit.garrisonCapacity > 0)
                 statRows.push_back({4, std::to_string(garrisonedCount(*panelObject, false)) + "/" +
                                            std::to_string(unit.garrisonCapacity), 43028});
+            const float nurseryRate =
+                animalNurseryFoodRate(
+                    *panelObject);
+            if (nurseryRate > 0.0f) {
+                std::ostringstream rate;
+                rate << std::fixed
+                     << std::setprecision(2)
+                     << nurseryRate << "/s";
+                statRows.push_back(
+                    {2, rate.str(), -1});
+            }
             // Resource left in the object (0x5daf72): itemicon 2 food, 0
             // carbon, 1 ore, 3 nova; amount rounded.
             if (panelObject->resourceAmount > 0.0f && panelObject->resourceType >= 0 &&
