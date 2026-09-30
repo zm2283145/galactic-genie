@@ -1184,8 +1184,12 @@ static int cmdTestControls(const char *dataDir, const char *campaignPath, int en
     int movementFrames = 0;
     for (; movementFrames < 1800 &&
            game.movementStats().selectedPendingMoveGoals > 0;
-         movementFrames++)
+         movementFrames++) {
         game.update(1.0f / 30.0f, input);
+        if (std::getenv("SWGB_TRACE_PENDING") && movementFrames % 30 == 0)
+            fprintf(stderr, "t=%.1f pending=%zu\n", movementFrames / 30.0f,
+                    game.movementStats().selectedPendingMoveGoals);
+    }
 
     const float foodBeforeCheat = game.resource(1, 0);
     input = {};
@@ -1427,9 +1431,12 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
                 commandCenterResearch.begin(),
                 commandCenterResearch.end(),
                 [&](int technologyId) {
-                    return !game
-                        .technologyRequirementsMetForTesting(
-                            1, technologyId);
+                    // Tech-level buttons (1-3) stay visible while their
+                    // building prerequisites are unmet, like the original
+                    // (pressing them reports string 3062).
+                    return technologyId > 3 &&
+                           !game.technologyRequirementsMetForTesting(
+                               1, technologyId);
                 });
         input = {};
         const size_t basicTrainingIndex =
@@ -2820,6 +2827,231 @@ static int cmdAngles(const char *dataDir, int gid, const char *out) {
     return 0;
 }
 
+// Regression checks for the Sept 2026 compatibility fixes. Each check prints
+// PASS/FAIL; optional PNG crops are written with the given prefix.
+static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
+    std::string err;
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    int failures = 0;
+    auto report = [&](const char *name, bool ok, const std::string &detail) {
+        printf("%s %s %s\n", ok ? "PASS" : "FAIL", name, detail.c_str());
+        if (!ok) failures++;
+    };
+    auto shot = [&](Game &g, const std::string &suffix) {
+        if (!outPrefix) return;
+        g.render(renderer, 960, 544);
+        renderer.savePng(std::string(outPrefix) + suffix + ".png");
+    };
+    auto step = [](Game &g, float seconds) {
+        for (float t = 0; t < seconds; t += 1.0f / 30.0f) g.update(1.0f / 30.0f, {});
+    };
+
+    // 1) Trees are felled when a worker starts on them.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t worker = g.spawnObjectForTesting(3, 83, 1, 26.0f, 40.0f);
+        const uint32_t tree = g.spawnObjectForTesting(0, 348, 0, 27.5f, 40.5f);
+        const bool standing = tree && !g.objectFelled(tree);
+        bool ordered = g.issueGatherForTesting(worker, tree);
+        g.lookAtObject(tree);
+        shot(g, "_tree_before");
+        bool felled = false;
+        for (int f = 0; f < 600 && !felled; f++) {
+            g.update(1.0f / 30.0f, {});
+            felled = g.objectFelled(tree);
+        }
+        step(g, 2.0f);
+        shot(g, "_tree_felled");
+        const float left = g.objectResourceAmount(tree);
+        const auto wp = g.objectPosition(worker);
+        printf("  worker at %.2f,%.2f carried %.2f gathering %d\n", wp[0], wp[1],
+               g.objectCarriedAmount(worker), (int)g.objectGatheringTarget(worker, tree));
+        report("tree-felled", standing && ordered && felled && left > 0.0f,
+               "ordered=" + std::to_string(ordered) + " felled=" + std::to_string(felled) +
+                   " remaining=" + std::to_string(left));
+    }
+
+    // 2) Gates open instantly for friendly units in the corridor and close
+    //    0.5s after it empties; enemies cannot pass a closed gate.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const float gx = 50.0f, gy = 50.5f;
+        const uint32_t gate = g.spawnObjectForTesting(3, 64, 1, gx, gy);
+        const int closedId = g.objectUnitId(gate);
+        const uint32_t trooper = g.spawnObjectForTesting(3, 460, 1, gx, gy - 3.0f);
+        g.update(1.0f / 30.0f, {});
+        const bool startsClosed = g.objectUnitId(gate) == closedId;
+        g.moveObjectForTesting(trooper, gx, gy - 0.4f);
+        g.update(1.0f / 30.0f, {});
+        const bool opened = g.objectUnitId(gate) != closedId;
+        g.lookAtObject(gate);
+        shot(g, "_gate_open");
+        g.moveObjectForTesting(trooper, gx, gy - 4.0f);
+        step(g, 0.25f);
+        const bool stillOpen = g.objectUnitId(gate) != closedId;
+        step(g, 0.6f);
+        const bool closed = g.objectUnitId(gate) == closedId;
+        shot(g, "_gate_closed");
+        const uint32_t enemy = g.spawnObjectForTesting(1, 460, 2, gx, gy - 3.0f);
+        g.setDiplomacyForTesting(1, 2, 3);
+        g.setDiplomacyForTesting(2, 1, 3);
+        g.update(1.0f / 30.0f, {});
+        const bool enemyBlocked = !g.positionPassableForTesting(enemy, gx, gy);
+        const bool friendPasses = g.positionPassableForTesting(trooper, gx, gy);
+        report("gate", startsClosed && opened && stillOpen && closed && enemyBlocked && friendPasses,
+               "closed0=" + std::to_string(startsClosed) + " open=" + std::to_string(opened) +
+                   " hold=" + std::to_string(stillOpen) + " close=" + std::to_string(closed) +
+                   " enemyBlocked=" + std::to_string(enemyBlocked) +
+                   " friendPasses=" + std::to_string(friendPasses));
+    }
+
+    // 3) Command Centre keeps its research after reaching Tech Level 2.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t cc = g.spawnObjectForTesting(3, 109, 1, 70.0f, 70.0f);
+        g.update(1.0f / 30.0f, {});
+        const size_t before = g.researchOptionIds(cc).size();
+        g.researchTechnology(1, 1); // TECH-AGE2
+        step(g, 0.2f);
+        const std::vector<int> after = g.researchOptionIds(cc);
+        std::string ids;
+        for (int id : after) ids += std::to_string(id) + ",";
+        const bool nextLevelShown =
+            std::find(after.begin(), after.end(), 2) != after.end();
+        report("cc-research-tl2", before > 0 && !after.empty() && nextLevelShown,
+               "unit=" + std::to_string(g.objectUnitId(cc)) + " before=" + std::to_string(before) +
+                   " after=" + std::to_string(after.size()) + " [" + ids + "]");
+    }
+    // 4) Stance menu uses the original icons/strings and shows the active one.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t trooper = g.spawnObjectForTesting(3, 460, 1, 26.0f, 40.0f);
+        g.selectObjectForTesting(trooper);
+        g.lookAtObject(trooper);
+        g.update(0.001f, {});
+        shot(g, "_stance_panel");
+        InputState in;
+        in.screenW = 960; in.screenH = 544;
+        in.pointerX = 851.0f; in.pointerY = 473.0f; in.selectPressed = true;
+        g.update(0.001f, in);
+        const bool opened = g.actionMenuOpenForTesting();
+        shot(g, "_stance_menu");
+        report("stance-menu", opened, "opened=" + std::to_string(opened));
+    }
+    // 5) Group pathing: 16 troopers route through a one-tile gap in a wall
+    //    and around a building, arriving without overlaps or stragglers.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        for (int y = 28; y <= 52; y++)
+            if (y != 40) g.spawnObjectForTesting(3, 117, 1, 40.5f, y + 0.5f);
+        g.spawnObjectForTesting(3, 70, 1, 46.0f, 40.0f); // shelter in the way
+        std::vector<uint32_t> troops;
+        for (int i = 0; i < 16; i++)
+            troops.push_back(g.spawnObjectForTesting(3, 460, 1, 29.0f + (i % 4) * 0.8f,
+                                                     37.5f + (i / 4) * 0.8f));
+        g.update(1.0f / 30.0f, {});
+        const size_t staticBefore = g.movementStats().staticObstructionViolations;
+        g.groupMoveForTesting(troops, 50.0f, 40.5f);
+        int frames = 0;
+        for (; frames < 30 * 60; frames++) {
+            g.update(1.0f / 30.0f, {});
+            if (g.movementStats().pendingMoveGoals == 0) break;
+            if (std::getenv("SWGB_TRACE_PENDING") && frames % 60 == 0) {
+                printf("  t=%.0f pending=%zu", frames / 30.0f, g.movementStats().pendingMoveGoals);
+                for (uint32_t id : troops) {
+                    const auto p = g.objectPosition(id);
+                    printf(" %.1f,%.1f", p[0], p[1]);
+                }
+                printf("\n");
+            }
+        }
+        const MovementStats ms = g.movementStats();
+        int across = 0;
+        for (uint32_t id : troops) {
+            const auto p = g.objectPosition(id);
+            if (p[0] > 41.5f) across++;
+            if (p[0] <= 41.5f || g.describeObjectForTesting(id).find("goal=1") != std::string::npos) printf("  stuck %u at %.2f,%.2f %s\n", id, p[0], p[1],
+                        g.describeObjectForTesting(id).c_str());
+        }
+        g.lookAtObject(troops[0]);
+        shot(g, "_group_path");
+        report("group-pathing",
+               across == (int)troops.size() && ms.overlappingPairs == 0 &&
+                   ms.terrainViolations == 0 && ms.staticObstructionViolations <= staticBefore,
+               "across=" + std::to_string(across) + "/16 time=" +
+                   std::to_string(frames / 30.0f) + " overlaps=" +
+                   std::to_string(ms.overlappingPairs) + " pending=" +
+                   std::to_string(ms.pendingMoveGoals) + " static=" +
+                   std::to_string(ms.staticObstructionViolations));
+    }
+    // 6) Formations (Line/Box/Staggered/Flank) settle without overlaps.
+    for (int formation = 0; formation < 4; formation++) {
+        static const char *names[] = {"line", "box", "staggered", "flank"};
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        std::vector<uint32_t> troops;
+        const int mix[] = {460, 460, 460, 460, 460, 460, 460, 460, 460, 460, 460, 460};
+        for (int i = 0; i < 12; i++)
+            troops.push_back(g.spawnObjectForTesting(3, mix[i], 1, 29.0f + (i % 4) * 0.8f,
+                                                     37.5f + (i / 4) * 0.8f));
+        g.update(1.0f / 30.0f, {});
+        g.groupMoveForTesting(troops, 37.0f, 38.5f, formation);
+        int frames = 0;
+        bool reported = false;
+        for (; frames < 30 * 40; frames++) {
+            g.update(1.0f / 30.0f, {});
+            const MovementStats now = g.movementStats();
+            if (std::getenv("SWGB_TRACE_FORMATION") && !reported)
+                for (size_t a = 0; a < troops.size() && !reported; a++)
+                    for (size_t b = a + 1; b < troops.size(); b++) {
+                        const auto pa = g.objectPosition(troops[a]), pb = g.objectPosition(troops[b]);
+                        const float dx = pa[0] - pb[0], dy = pa[1] - pb[1];
+                        if (dx * dx + dy * dy < 0.44f * 0.44f) {
+                            reported = true;
+                            printf("   overlap at frame %d d=%.3f: %u %.2f,%.2f %s | %u %.2f,%.2f %s\n", frames,
+                                   std::sqrt(dx * dx + dy * dy), troops[a], pa[0], pa[1],
+                                   g.describeObjectForTesting(troops[a]).substr(0, 110).c_str(), troops[b], pb[0], pb[1],
+                                   g.describeObjectForTesting(troops[b]).substr(0, 110).c_str());
+                            break;
+                        }
+                    }
+            if (now.pendingMoveGoals == 0) break;
+        }
+        step(g, 1.0f);
+        const MovementStats ms = g.movementStats();
+        if (std::getenv("SWGB_TRACE_FORMATION"))
+            for (uint32_t id : troops) {
+                const auto p = g.objectPosition(id);
+                printf("   %u %.2f,%.2f %s\n", id, p[0], p[1], g.describeObjectForTesting(id).c_str());
+            }
+        g.lookAtObject(troops[0]);
+        shot(g, std::string("_formation_") + names[formation]);
+        report((std::string("formation-") + names[formation]).c_str(),
+               ms.pendingMoveGoals == 0 && ms.overlappingPairs == 0,
+               "time=" + std::to_string(frames / 30.0f) + " overlaps=" +
+                   std::to_string(ms.overlappingPairs) + " (" + std::to_string(ms.firstOverlapObject) + "/" +
+                   std::to_string(ms.secondOverlapObject) + ")");
+    }
+    printf("%d failure(s)\n", failures);
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) return usage();
     const char *cmd = argv[1];
@@ -2871,6 +3103,8 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "test-controls") && argc >= 5)
         return cmdTestControls(argv[2], argv[3], atoi(argv[4]),
                                argc > 5 ? argv[5] : nullptr);
+    if (!strcmp(cmd, "test-fixes"))
+        return cmdTestFixes(argv[2], argc > 3 ? argv[3] : nullptr);
     if (!strcmp(cmd, "test-combat"))
         return cmdTestCombat(argv[2], argc > 3 ? argv[3] : nullptr);
     if (!strcmp(cmd, "mp3")) return cmdMp3(argv[2]);

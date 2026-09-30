@@ -24,6 +24,7 @@ set(SWGB_CORE_SOURCES
     src/core/language_strings.cpp
     src/engine/assets.cpp
     src/engine/game.cpp
+    src/engine/pathfinding.cpp
 )
 
 if(VITA)

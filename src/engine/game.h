@@ -4,6 +4,7 @@
 #pragma once
 
 #include "assets.h"
+#include "pathfinding.h"
 #include "../core/scenario.h"
 
 #include <array>
@@ -111,6 +112,10 @@ public:
     bool selectObjectForTesting(uint32_t spawnId);
     bool selectObjectsForTesting(
         const std::vector<uint32_t> &spawnIds);
+    // Group move of the given units, as a right-click with them selected.
+    std::string describeObjectForTesting(uint32_t spawnId) const;
+    void groupMoveForTesting(const std::vector<uint32_t> &spawnIds, float x,
+                             float y, int formation = -1);
     const FrameStats &stats() const { return stats_; }
     void setLogger(std::function<void(const std::string &)> fn) { log_ = std::move(fn); }
     void setSoundPlayer(std::function<float(const std::string &)> fn) {
@@ -211,6 +216,10 @@ public:
         uint32_t spawnId, uint32_t targetId) const;
     float objectCarriedAmount(uint32_t spawnId) const;
     float objectResourceAmount(uint32_t spawnId) const;
+    bool objectFelled(uint32_t spawnId) const {
+        const Object *o = findObject(spawnId);
+        return o && o->felled;
+    }
     std::array<float, 2> objectPosition(
         uint32_t spawnId) const;
     bool technologyResearched(int player, int technologyId) const {
@@ -334,6 +343,14 @@ private:
         bool triggerAddressable = true;
         float flashTime = 0;
         float gateOpenAmount = 0;
+        float gateCloseTimer = 0;
+        bool felled = false; // carbon tree cut down, still holding resources
+        uint32_t pathGoalId = 0;      // object approached (region goal), 0 = point
+        float pathGoalClearance = 0;
+        uint8_t repathCount = 0;
+        float detourTime = 0;
+        float approachRetry = 0;
+        uint32_t blockerId = 0;     // unit that blocked the last step
         float productionRemaining = 0;
         float constructionRemaining = 0;
         float constructionTotal = 0;
@@ -380,9 +397,10 @@ private:
 
     struct PathGridCache {
         int terrainRestriction = -1;
-        int radiusHundredths = 0;
         bool air = false;
-        std::vector<uint8_t> passable;
+        int player = -1;
+        int radiusHundredths = 0;
+        TilePathfinder finder;
     };
 
     struct Instruction {
@@ -405,6 +423,7 @@ private:
     int civilizationForPlayer(int player) const;
     void rebuildAdjacency();
     bool configureGate(Object &object);
+    bool gateBlocks(const Object &gate, const Object &mover) const;
     void rebuildMobileOccupancy();
     void updateLivestockOwnership();
     void updateTriggers(float dt);
@@ -414,11 +433,18 @@ private:
     std::vector<Object *> effectTargets(const ScenarioEffect &effect);
     bool objectMatches(const Object &object, int unitId, int player, int group, int type) const;
     bool inSourceArea(const Object &object, int x1, int y1, int x2, int y2) const;
-    bool issueMove(Object &object, float targetX, float targetY);
+    bool issueMove(Object &object, float targetX, float targetY,
+                   const Object *goalObject = nullptr, float clearance = 0.0f);
     void issueGroupMove(std::vector<Object *> targets, float targetX, float targetY,
                         FormationType formation = FormationType::Line);
     bool findPath(const Object &object, float targetX, float targetY,
-                  std::vector<std::array<float, 2>> &path) const;
+                  std::vector<std::array<float, 2>> &path,
+                  const Object *goalObject = nullptr, float clearance = 0.0f) const;
+    bool segmentClear(const Object &object, float ax, float ay, float bx, float by) const;
+    bool staticPassableAt(const Object &object, float x, float y) const;
+    const Object *unitBlockerAt(const Object &object, float x, float y) const;
+    bool detourAround(Object &object, float goalX, float goalY);
+    bool approach(Object &object, const Object &target, float clearance);
     bool positionPassable(const Object &object, float x, float y, bool dynamic) const;
     bool terrainPassable(const Object &object, float x, float y) const;
     bool isAirUnit(const Object &object) const;
@@ -487,6 +513,7 @@ private:
     bool technologyRequirementsMet(int player,
                                   const dat::Tech &technology) const;
     void refreshAutomaticTechnologies(int player);
+    bool technologyVisible(int player, const dat::Tech &technology) const;
     void refreshAllAutomaticTechnologies();
     std::string unitDisplayName(const dat::Unit &unit) const;
     std::string ownershipLabel(int player) const;
@@ -625,10 +652,9 @@ private:
     std::vector<uint32_t> staticObstructionIndices_;
     std::vector<std::vector<uint32_t>> staticObstructionCells_;
     mutable std::vector<PathGridCache> pathGridCache_;
-    mutable std::vector<int> pathCostScratch_;
-    mutable std::vector<int> pathParentScratch_;
-    mutable std::vector<uint32_t> pathSearchStamp_;
-    mutable uint32_t pathSearchGeneration_ = 0;
+    mutable uint32_t pathSearches_ = 0;
+    mutable std::vector<uint32_t> shieldGeneratorIndices_;
+    mutable size_t shieldGeneratorCacheSize_ = (size_t)-1;
     mutable std::map<std::pair<int, int>, int>
         civilizationGraphicCache_;
     std::array<ScenarioPlayer, 16> players_{};
