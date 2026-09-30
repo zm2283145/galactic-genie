@@ -83,8 +83,9 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   are available as a base economy building rather than depending on their
   circular `MADE-*` technology. Neutral Nerfs and Banthas use the
   original Gaia color and convert through proximity capture. Live-animal slaughter, farms,
-  fishing, automatic adjacent-node retargeting, and population-limit
-  enforcement remain.
+  automatic adjacent-node retargeting, and DAT-driven population use/capacity are implemented.
+  Production waits at 100% when housing is full and resumes after capacity is added. Fishing
+  remains.
 - Researched technology effects apply packed DAT attack/armor modifiers plus generic health, speed,
   and reload-time modifiers, along with chained unit/building upgrade and age effects. Remaining
   attributes and resource effects still need
@@ -136,7 +137,9 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   Minimap and pause menu remain.
 - Audio: selection, move, and attack acknowledgements plus camera-relative weapon-fire, impact, and
   death effects are implemented. The original Ogg soundtrack streams from storage, ducks beneath
-  scenario dialogue, and mixes with terrain-specific world ambience. Garrison/ejection, gate
+  scenario dialogue, and mixes with terrain-specific world ambience. Scenario speaker text uses
+  the speaking player's color, while hostile damage uses the original cooldown-controlled
+  `atakwarn.wav`. Garrison/ejection, gate
   transformation, unit-training, construction-start, and building-completion cues use their DAT
   sound groups. The DAT has no per-technology completion sound field, so the original generic
   research-completion cue still requires executable-level verification. User-facing volume controls

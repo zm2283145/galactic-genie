@@ -242,9 +242,6 @@ int main() {
             if (pad.buttons & SCE_CTRL_DOWN) in.scrollY = 1;
             if (pressed & SCE_CTRL_RTRIGGER) in.zoomStep = 1;
             if (pressed & SCE_CTRL_LTRIGGER) in.zoomStep = -1;
-            if ((pressed & SCE_CTRL_SELECT) && !cheatChord)
-                in.toggleDebug = true;
-
             if (pressed & SCE_CTRL_SQUARE) {
                 stickBoxArmed = true;
                 stickBoxMoved = false;

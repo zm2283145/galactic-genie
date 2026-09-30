@@ -93,17 +93,27 @@ Engine contract:
   footprint.
 - Mobile units and static obstructions make any overlapping placement invalid.
 - Walls show each dragged segment with its own valid or invalid silhouette.
+- Farms have no usable standing SLP because their completed presentation is
+  terrain. Their preview therefore draws the complete DAT `1.5 x 1.5`
+  clearance diamond in the same valid/invalid color instead of disappearing.
 - A committed ordinary building paints its foundation terrain immediately.
 
 ## Command cursors
 
-`mcursors.shp` resource 51000 contains distinct semantic frames. Frame 2 is
-the valid-order confirmation marker; frame 5 is move, 6 gather/drop-off, 7
-building placement, 9 repair, 10 Attack Ground, 11 attack, 13 garrison, and 18
-set gather point.
-Frames 2/3/4 are not interchangeable generic action cursors. The repair and
-destroy command-panel icons remain frames 28 and 59 of command sheet 50721,
-as constructed by the executable with help strings 4927 and 4941.
+`mcursors.shp` resource 51000 contains distinct semantic frames. Named
+captures from the original establish frame 0 as the normal pointer used for
+ordinary movement; frame 3 as contextual worker build/repair/resource work;
+frame 4 as Attack Ground; frame 7 as explicit Build/Repair; frame 8 as Attack;
+frame 9 as Guard; frame 11 as Follow; frame 13 as Garrison; and frame 18 as
+Patrol and gather-point placement. Frame 2 is a one-pixel invisible frame and
+must not be used as an order marker. Every frame is positioned from its SLP
+hotspot rather than being manually centered.
+
+The repair and destroy command-panel icons remain frames 28 and 59 of command
+sheet 50721, as constructed by the executable with help strings 4927 and
+4941. Worker build portraits use the civilization's building sheet
+(`53241`-`53248`) and the DAT `iconId` directly; the frame index is not
+one-based.
 Attack stances are offered only to eligible combat units; workers and
 buildings do not show the stance button or stance status.
 
@@ -171,7 +181,8 @@ Engine contract:
 The executable constructs Attack Ground at `0x503aca` as panel action `0x17`
 with command-sheet frame 60, name string 4123, help string 4923, and network
 command `0x6b`. Its packet contains the selected object IDs and a world-space
-X/Y point. The command uses `mcursors.shp` frame 10 rather than the ordinary
+X/Y point. Original named cursor capture identifies `mcursors.shp` frame 4
+rather than the ordinary
 attack cursor.
 
 Eligibility is data-driven: a mobile combat unit must have a valid projectile
@@ -200,7 +211,7 @@ building/garrison volley path remains separately sequenced.
 Engine contract:
 
 - Every unit with original blast-projectile eligibility shows command icon 60
-  and accepts a ground point with cursor frame 10.
+  and accepts a ground point with cursor frame 4.
 - Ground-point orders do not require or retain a live object target.
 - Range, minimum range, reload, projectile substitution, attack graphics,
   launch sounds, impact graphics, impact sounds, and blast behavior remain
@@ -225,6 +236,28 @@ The original interface sound table maps `button1.wav`, `button2.wav`, and
 50300, cancel/back uses 50301, and rejected actions such as full queues,
 resource shortages, and invalid/full garrison targets use 50303. Resource
 shortages use strings 3001-3004 and production queue full uses string 3088.
+
+## Population, attack alerts, and instruction colors
+
+DAT resource-storage type 4 is population accounting. Negative storage
+consumes population and positive storage supplies capacity. Completed
+buildings supply capacity; foundations do not. The effective capacity is the
+sum of positive storage clamped to the scenario population limit. Existing
+units may remain above that value, but a completed production item waits at
+100 percent until enough capacity exists. The original housing warning uses
+string 3005 and `needhous.wav` resource 50354.
+
+The executable interface table at `0x544ba0` binds `atakwarn.wav` to resource
+50315. Hostile damage to a local object emits that warning and a visible
+under-attack notice, with a cooldown so repeated damage ticks do not restart
+the alert.
+
+Display Instruction effects retain their source player when supplied.
+Campaign dialogue often leaves that field unset, so the speaker prefix before
+the colon is matched against scenario player names and active DAT unit display
+names. Title variants such as `Lord Vader` and `Darth Vader` match by surname
+when unambiguous. The complete instruction is rendered with that player's
+in-game color; unmatched narration retains the neutral instruction color.
 
 ## Workers
 

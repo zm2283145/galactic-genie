@@ -3749,6 +3749,12 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         const uint32_t center =
             g.spawnObjectForTesting(
                 3, 87, 1, bx, by);
+        for (int index = 0; index < 20;
+             index++)
+            g.spawnObjectForTesting(
+                1, 70, 1,
+                6.0f + (index % 5) * 2.5f,
+                6.0f + (index / 5) * 2.5f);
         std::vector<uint32_t> before;
         for (uint32_t id = 1; id < 20000; id++)
             if (g.objectActive(id) &&
@@ -3844,6 +3850,130 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
                 std::to_string(resumed));
     }
 
+    // Population is DAT resource storage type 4. A completed queue waits
+    // until a finished shelter adds capacity.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        std::vector<int> interfaceSounds;
+        g.setInterfaceSoundPlayer(
+            [&](int soundId) {
+                interfaceSounds.push_back(soundId);
+            });
+        const uint32_t center =
+            g.spawnObjectForTesting(
+                1, 109, 1, 68.0f, 20.0f);
+        float used =
+            g.populationUsedForTesting(1);
+        const float initialCapacity =
+            g.populationCapacityForTesting(1);
+        for (int index = 0;
+             used + 0.001f < initialCapacity &&
+             index < 250;
+             index++) {
+            g.spawnObjectForTesting(
+                1, 83, 1,
+                72.0f + (index % 8) * 0.7f,
+                18.0f + (index / 8) * 0.7f);
+            used = g.populationUsedForTesting(1);
+        }
+        const bool queued =
+            g.queueUnitForTesting(center, 83);
+        for (int frame = 0; frame < 10;
+             frame++)
+            g.update(1.0f / 30.0f, {});
+        const bool blocked =
+            g.productionQueueSizeForTesting(
+                center) == 1 &&
+            g.productionRemainingForTesting(
+                center) <= 0.001f &&
+            std::find(
+                interfaceSounds.begin(),
+                interfaceSounds.end(),
+                50354) != interfaceSounds.end();
+        g.spawnObjectForTesting(
+            1, 70, 1, 76.0f, 16.0f);
+        for (int frame = 0; frame < 10;
+             frame++)
+            g.update(1.0f / 30.0f, {});
+        const bool resumed =
+            g.productionQueueSizeForTesting(
+                center) == 0;
+        report(
+            "population-cap",
+            queued && initialCapacity > 0.0f &&
+                blocked && resumed,
+            "used=" + std::to_string(used) +
+                " capacity=" +
+                std::to_string(initialCapacity) +
+                " blocked=" +
+                std::to_string(blocked) +
+                " resumed=" +
+                std::to_string(resumed));
+    }
+    // Local hostile damage uses the original atakwarn.wav and a cooldown.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        g.setDiplomacyForTesting(1, 2, 3);
+        g.setDiplomacyForTesting(2, 1, 3);
+        std::vector<int> interfaceSounds;
+        g.setInterfaceSoundPlayer(
+            [&](int soundId) {
+                interfaceSounds.push_back(soundId);
+            });
+        const uint32_t victim =
+            g.spawnObjectForTesting(
+                1, 83, 1, 70.0f, 70.0f);
+        const uint32_t attacker =
+            g.spawnObjectForTesting(
+                3, 460, 2, 10.0f, 10.0f);
+        g.damageObjectForTesting(
+            victim, 1, attacker);
+        g.damageObjectForTesting(
+            victim, 1, attacker);
+        const size_t firstAlerts =
+            std::count(
+                interfaceSounds.begin(),
+                interfaceSounds.end(),
+                50315);
+        g.update(10.1f, {});
+        g.damageObjectForTesting(
+            victim, 1, attacker);
+        const size_t laterAlerts =
+            std::count(
+                interfaceSounds.begin(),
+                interfaceSounds.end(),
+                50315);
+        report(
+            "under-attack-alert",
+            firstAlerts == 1 &&
+                laterAlerts == 2,
+            "first=" +
+                std::to_string(firstAlerts) +
+                " later=" +
+                std::to_string(laterAlerts));
+    }
+    // Display-instruction speakers inherit the owning player's color.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        g.spawnObjectForTesting(
+            3, 1083, 2, 60.0f, 60.0f);
+        g.queueInstructionForTesting(
+            "Lord Vader : Move out.", -1);
+        report(
+            "instruction-speaker-color",
+            g.currentInstructionPlayerForTesting() ==
+                2,
+            "player=" +
+                std::to_string(
+                    g.currentInstructionPlayerForTesting()));
+    }
+
     // 11) Gather point: a trained unit walks to it; removing it works.
     {
         Game g(assets);
@@ -3936,6 +4066,44 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         report("original-help", opened, "opened=" + std::to_string(opened));
     }
     // 13) Resources can be selected and show what is left.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t worker =
+            g.spawnObjectForTesting(1, 83, 1, 46.0f, 18.0f);
+        g.update(1.0f / 30.0f, {});
+        g.selectObjectForTesting(worker);
+        g.lookAtObject(worker);
+        InputState in;
+        in.screenW = 960;
+        in.screenH = 544;
+        in.cycleAttackMode = true;
+        g.update(0.001f, in);
+        const bool opened =
+            g.actionMenuOpenForTesting();
+        shot(g, "_worker_build_menu");
+        in = {};
+        in.screenW = 960;
+        in.screenH = 544;
+        in.cursorVisible = true;
+        in.pointerX = 315;
+        in.pointerY = 186;
+        g.update(0.001f, in);
+        in.menuActivate = true;
+        g.update(0.001f, in);
+        shot(g, "_farm_placement");
+        report(
+            "worker-build-menu",
+            opened &&
+                !g.actionMenuOpenForTesting(),
+            "opened=" +
+                std::to_string(opened) +
+                " placement=" +
+                std::to_string(
+                    !g.actionMenuOpenForTesting()));
+    }
+    // 14) Resources can be selected and show what is left.
     {
         Game g(assets);
         if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }

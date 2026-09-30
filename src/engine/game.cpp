@@ -20,17 +20,19 @@ namespace {
 constexpr float kPi = 3.14159265358979f;
 constexpr uint8_t kSequenceAnimated = 0x1;
 constexpr int kCursorSlp = 51000;
-// mcursors.shp frames: 0 arrow, 2 valid-order confirmation, 5 move,
-// 6 gather/drop-off, 7 building placement, 9 repair, 11 attack,
-// 12 garrison and 18 gather-point flag.
+// mcursors.shp frames, verified against captures from the original game:
+// 0 normal/move, 3 contextual repair/build/farm/resource, 4 attack ground,
+// 7 explicit build/repair command, 8 attack, 9 guard, 11 follow,
+// 13 garrison, and 18 patrol/gather point.
 constexpr size_t kCursorNormal = 0;
-constexpr size_t kCursorCommand = 2;
-constexpr size_t kCursorAttack = 11;
-constexpr size_t kCursorMove = 5;
+constexpr size_t kCursorCommand = 1;
+constexpr size_t kCursorAttack = 8;
 constexpr size_t kCursorGarrison = 13;
-constexpr size_t kCursorGather = 6;
-constexpr size_t kCursorRepair = 9;
-constexpr size_t kCursorAttackGround = 10;
+constexpr size_t kCursorContextWork = 3;
+constexpr size_t kCursorRepairCommand = 7;
+constexpr size_t kCursorGuard = 9;
+constexpr size_t kCursorFollow = 11;
+constexpr size_t kCursorAttackGround = 4;
 constexpr size_t kCursorPlacement = 7;
 constexpr size_t kCursorGatherPoint = 18;
 constexpr int kCommandIconSlp = 50721;
@@ -46,6 +48,8 @@ constexpr size_t kCommandShieldStatusIcon = 10;
 constexpr int kInterfaceButtonSound = 50300; // button1.wav
 constexpr int kInterfaceCancelSound = 50301; // button2.wav
 constexpr int kInterfaceCannotDoSound = 50303; // cantdo.wav
+constexpr int kInterfaceAttackWarningSound = 50315; // atakwarn.wav
+constexpr int kInterfaceNeedHousingSound = 50354; // needhous.wav
 // Stance buttons (exe 0x503800): Aggressive, Defensive, Stand Ground, No
 // Attack. The pressed (active) variants are drawn for the current stance.
 constexpr size_t kStanceIcons[4] = {9, 10, 11, 50};
@@ -332,7 +336,9 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     triggerRuntime_.clear();
     instructions_.clear();
     currentInstruction_.clear();
+    currentInstructionPlayer_ = -1;
     instructionTime_ = 0;
+    attackAlertCooldown_ = 0;
     cursorVisible_ = false;
     boxSelectActive_ = false;
     commandMarkerTime_ = 0;
@@ -531,7 +537,9 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
         triggerRuntime_[i].enabled = triggers_[i].enabled;
     instructions_.clear();
     currentInstruction_.clear();
+    currentInstructionPlayer_ = -1;
     instructionTime_ = 0;
+    attackAlertCooldown_ = 0;
     cursorVisible_ = false;
     boxSelectActive_ = false;
     commandMarkerTime_ = 0;
@@ -1612,10 +1620,11 @@ bool Game::setConstructionProgressForTesting(
 }
 
 bool Game::damageObjectForTesting(
-    uint32_t spawnId, int damage) {
+    uint32_t spawnId, int damage,
+    uint32_t attackerId) {
     Object *object = findObject(spawnId);
     if (!object) return false;
-    damageObject(*object, damage, 0);
+    damageObject(*object, damage, attackerId);
     return true;
 }
 
@@ -3814,6 +3823,51 @@ void Game::showResourceShortage(
     showCannotDo(
         languageId,
         "NOT ENOUGH RESOURCES");
+}
+
+float Game::populationUse(
+    const dat::Unit &unit) const {
+    float use = 0.0f;
+    for (const dat::ResourceStorage &storage :
+         unit.resourceStorages)
+        if (storage.type == 4 &&
+            storage.amount < 0.0f)
+            use -= storage.amount;
+    return use;
+}
+
+float Game::populationUsed(int player) const {
+    float used = 0.0f;
+    for (const Object &object : objects_)
+        if (object.active &&
+            object.player == player &&
+            object.unit)
+            used += populationUse(*object.unit);
+    return used;
+}
+
+float Game::populationCapacity(int player) const {
+    if (player <= 0 ||
+        (size_t)player > players_.size())
+        return 0.0f;
+    float capacity = 0.0f;
+    for (const Object &object : objects_) {
+        if (!object.active ||
+            object.player != player ||
+            !object.unit ||
+            object.underConstruction)
+            continue;
+        for (const dat::ResourceStorage &storage :
+             object.unit->resourceStorages)
+            if (storage.type == 4 &&
+                storage.amount > 0.0f)
+                capacity += storage.amount;
+    }
+    const float scenarioLimit = std::max(
+        0.0f,
+        players_[(size_t)player - 1]
+            .populationLimit);
+    return std::min(capacity, scenarioLimit);
 }
 
 bool Game::queueUnitForTesting(uint32_t buildingId, int unitId) {
@@ -7952,6 +8006,17 @@ void Game::killObject(Object &object, bool countKill) {
 
 void Game::damageObject(Object &object, int damage, uint32_t attackerId) {
     if (!object.active || damage <= 0) return;
+    Object *attacker = findObject(attackerId);
+    if (object.player == localPlayer_ &&
+        attacker && attacker->active &&
+        isEnemy(object, *attacker) &&
+        attackAlertCooldown_ <= 0.0f) {
+        playInterfaceFeedback(
+            kInterfaceAttackWarningSound);
+        statusMessage_ = "WE ARE UNDER ATTACK!";
+        statusTime_ = 3.0f;
+        attackAlertCooldown_ = 10.0f;
+    }
     const float previousDamage =
         100.0f * (1.0f - object.hitPoints / std::max(1.0f, object.maxHitPoints));
     float hitPointDamage = (float)damage;
@@ -7973,7 +8038,6 @@ void Game::damageObject(Object &object, int damage, uint32_t attackerId) {
         return;
     }
 
-    Object *attacker = findObject(attackerId);
     if (attacker && attacker->active &&
         isEnemy(object, *attacker) &&
         canAttackTarget(object, *attacker) &&
@@ -10341,8 +10405,83 @@ void Game::setTriggerEnabled(int id, bool enabled) {
     }
 }
 
+int Game::instructionPlayer(
+    const std::string &text,
+    int fallbackPlayer) const {
+    const auto normalized = [](std::string value) {
+        const size_t first =
+            value.find_first_not_of(" \t\r\n");
+        const size_t last =
+            value.find_last_not_of(" \t\r\n");
+        if (first == std::string::npos)
+            return std::string();
+        value = value.substr(
+            first, last - first + 1);
+        std::transform(
+            value.begin(), value.end(),
+            value.begin(),
+            [](unsigned char character) {
+                return (char)std::tolower(
+                    character);
+            });
+        return value;
+    };
+    const size_t colon = text.find(':');
+    if (colon == std::string::npos)
+        return fallbackPlayer;
+    const std::string speaker =
+        normalized(text.substr(0, colon));
+    if (speaker.empty())
+        return fallbackPlayer;
+    for (size_t index = 0;
+         index < players_.size(); index++)
+        if (normalized(players_[index].name) ==
+            speaker)
+            return (int)index + 1;
+    int matchedPlayer = -1;
+    const auto speakerMatches =
+        [&](const std::string &name) {
+            const std::string candidate =
+                normalized(name);
+            if (candidate == speaker)
+                return true;
+            const size_t speakerSpace =
+                speaker.find_last_of(' ');
+            const size_t candidateSpace =
+                candidate.find_last_of(' ');
+            if (speakerSpace ==
+                    std::string::npos ||
+                candidateSpace ==
+                    std::string::npos)
+                return false;
+            const std::string speakerSurname =
+                speaker.substr(speakerSpace + 1);
+            return speakerSurname.size() >= 4 &&
+                   speakerSurname ==
+                       candidate.substr(
+                           candidateSpace + 1);
+        };
+    for (const Object &object : objects_) {
+        if (!object.active || !object.unit ||
+            object.player <= 0)
+            continue;
+        if (!speakerMatches(
+                unitDisplayName(*object.unit)))
+            continue;
+        if (matchedPlayer < 0)
+            matchedPlayer = object.player;
+        else if (matchedPlayer != object.player)
+            return fallbackPlayer;
+    }
+    return matchedPlayer >= 0
+               ? matchedPlayer
+               : fallbackPlayer;
+}
+
 void Game::startInstruction(Instruction instruction) {
     currentInstruction_ = std::move(instruction.text);
+    currentInstructionPlayer_ =
+        instruction.player;
     instructionTime_ = instruction.duration;
     if (!instruction.sound.empty() && playSound_) {
         const float soundDuration = playSound_(instruction.sound);
@@ -10350,9 +10489,13 @@ void Game::startInstruction(Instruction instruction) {
     }
 }
 
-void Game::queueInstruction(const std::string &text, float duration, const std::string &sound) {
+void Game::queueInstruction(
+    const std::string &text, float duration,
+    const std::string &sound, int player) {
     if (text.empty()) return;
-    Instruction instruction{text, sound, std::max(1.0f, duration)};
+    Instruction instruction{
+        text, sound, std::max(1.0f, duration),
+        instructionPlayer(text, player)};
     if (currentInstruction_.empty()) {
         startInstruction(std::move(instruction));
     } else {
@@ -10461,7 +10604,10 @@ void Game::executeEffect(const ScenarioEffect &effect) {
                 "other modifiers remain");
         break;
     case 3:
-        queueInstruction(effect.message, triggerField(effect.fields, 12), effect.sound);
+        queueInstruction(
+            effect.message,
+            triggerField(effect.fields, 12),
+            effect.sound, sourcePlayer);
         break;
     case 4:
         if (!effect.sound.empty() && playSound_) playSound_(effect.sound);
@@ -10576,11 +10722,15 @@ void Game::executeEffect(const ScenarioEffect &effect) {
         rebuildAdjacency();
         break;
     case 20:
-        queueInstruction(effect.message, triggerField(effect.fields, 12), effect.sound);
+        queueInstruction(
+            effect.message,
+            triggerField(effect.fields, 12),
+            effect.sound, sourcePlayer);
         break;
     case 21:
         instructions_.clear();
         currentInstruction_.clear();
+        currentInstructionPlayer_ = -1;
         instructionTime_ = 0;
         break;
     case 32:
@@ -10908,11 +11058,16 @@ void Game::update(float dt, const InputState &in) {
     attackGroundJustBegun_ = false;
     unitCommandJustBegun_ = false;
     statusTime_ = std::max(0.0f, statusTime_ - dt);
+    attackAlertCooldown_ =
+        std::max(
+            0.0f,
+            attackAlertCooldown_ - dt);
     if (statusTime_ <= 0) statusMessage_.clear();
     if (!currentInstruction_.empty()) {
         instructionTime_ -= dt;
         if (instructionTime_ <= 0) {
             currentInstruction_.clear();
+            currentInstructionPlayer_ = -1;
             if (!instructions_.empty()) {
                 Instruction instruction = std::move(instructions_.front());
                 instructions_.pop_front();
@@ -11158,6 +11313,12 @@ void Game::update(float dt, const InputState &in) {
     std::vector<ProductionSpawn> productionSpawns;
     std::vector<std::array<float, 4>>
         reservedProductionExits;
+    std::array<float, 17> reservedPopulation{};
+    for (size_t player = 1;
+         player < reservedPopulation.size();
+         player++)
+        reservedPopulation[player] =
+            populationUsed((int)player);
     const size_t productionObjectCount = objects_.size();
     for (size_t index = 0; index < productionObjectCount;
          index++) {
@@ -11201,6 +11362,35 @@ void Game::update(float dt, const InputState &in) {
                     : building.productionQueue.front().duration;
             continue;
         }
+        const float population =
+            populationUse(*unit);
+        const float capacity =
+            populationCapacity(building.player);
+        if (population > 0.0f &&
+            building.player > 0 &&
+            (size_t)building.player <
+                reservedPopulation.size() &&
+            reservedPopulation[
+                (size_t)building.player] +
+                    population >
+                capacity + 0.001f) {
+            building.productionRemaining = 0.0f;
+            if (!building.productionPopulationBlocked &&
+                building.player == localPlayer_) {
+                statusMessage_ =
+                    assets_.localizedString(3005);
+                if (statusMessage_.empty())
+                    statusMessage_ =
+                        "YOU NEED TO BUILD MORE SHELTERS";
+                statusTime_ = 3.0f;
+                playInterfaceFeedback(
+                    kInterfaceNeedHousingSound);
+            }
+            building.productionPopulationBlocked =
+                true;
+            continue;
+        }
+        building.productionPopulationBlocked = false;
         float exitX = 0.0f;
         float exitY = 0.0f;
         if (!findProductionExit(
@@ -11216,6 +11406,12 @@ void Game::update(float dt, const InputState &in) {
         productionSpawns.push_back(
             {unit, building.player, exitX, exitY,
              building.spawnId});
+        if (building.player > 0 &&
+            (size_t)building.player <
+                reservedPopulation.size())
+            reservedPopulation[
+                (size_t)building.player] +=
+                population;
         reservedProductionExits.push_back(
             {exitX, exitY, collisionRadius(candidate),
              isAirUnit(candidate) ? 1.0f : 0.0f});
@@ -11857,7 +12053,7 @@ void Game::update(float dt, const InputState &in) {
     else if (!consumeWorldInput &&
              cursorVisible_ &&
              repairCursorActive_)
-        cursorMode_ = CursorMode::Repair;
+        cursorMode_ = CursorMode::RepairCommand;
     else if (!consumeWorldInput &&
              cursorVisible_ &&
              attackGroundCursorActive_)
@@ -11867,7 +12063,19 @@ void Game::update(float dt, const InputState &in) {
              unitCommandCursorActive_ &&
              pendingUnitCommand_ ==
                  UnitCommand::Patrol)
-        cursorMode_ = CursorMode::Move;
+        cursorMode_ = CursorMode::GatherPoint;
+    else if (!consumeWorldInput &&
+             cursorVisible_ &&
+             unitCommandCursorActive_ &&
+             pendingUnitCommand_ ==
+                 UnitCommand::Guard)
+        cursorMode_ = CursorMode::Guard;
+    else if (!consumeWorldInput &&
+             cursorVisible_ &&
+             unitCommandCursorActive_ &&
+             pendingUnitCommand_ ==
+                 UnitCommand::Follow)
+        cursorMode_ = CursorMode::Follow;
     else if (!consumeWorldInput && cursorVisible_ &&
         !boxSelectActive_ && hasSelectedUnit()) {
         Object *hovered =
@@ -11914,19 +12122,19 @@ void Game::update(float dt, const InputState &in) {
         cursorMode_ =
             garrisonable ? CursorMode::Garrison
             : (selectedWorker && gatherable) || dropOff
-                ? CursorMode::Gather
+                ? CursorMode::ContextWork
                 : selectedWorker && hovered &&
                           (hovered->underConstruction ||
                            (cursorWorker &&
                             isRepairableBy(
                                 *cursorWorker,
                                 *hovered)))
-                      ? CursorMode::Repair
+                      ? CursorMode::ContextWork
                 : enemyAtScreen(
                       cursorX_, cursorY_,
                       in.screenW, in.screenH)
                       ? CursorMode::Attack
-                      : CursorMode::Move;
+                      : CursorMode::Normal;
     }
 
     std::uniform_real_distribution<float> r01(0, 1);
@@ -13393,6 +13601,44 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 valid ? validColor.b : 45;
             draw.tintA = 190;
         }
+        // Farms have no visible standing SLP: the finished field is terrain.
+        // Keep their complete 1.5 x 1.5 placement footprint visible.
+        if (placementUnit_->cls == 7) {
+            const float halfX = std::max(
+                0.5f,
+                placementUnit_->clearanceSize[0] > 0.0f
+                    ? placementUnit_->clearanceSize[0]
+                    : placementUnit_->collisionSize[0]);
+            const float halfY = std::max(
+                0.5f,
+                placementUnit_->clearanceSize[1] > 0.0f
+                    ? placementUnit_->clearanceSize[1]
+                    : placementUnit_->collisionSize[1]);
+            const std::array<std::array<float, 2>, 4> points = {{
+                {sx + (-halfX + halfY) * kTileHalfW,
+                 sy + (-halfX - halfY) * kTileHalfH},
+                {sx + (halfX + halfY) * kTileHalfW,
+                 sy + (halfX - halfY) * kTileHalfH},
+                {sx + (halfX - halfY) * kTileHalfW,
+                 sy + (halfX + halfY) * kTileHalfH},
+                {sx + (-halfX - halfY) * kTileHalfW,
+                 sy + (-halfX + halfY) * kTileHalfH},
+            }};
+            for (size_t point = 0; point < points.size(); point++) {
+                const auto &from = points[point];
+                const auto &to =
+                    points[(point + 1) % points.size()];
+                r.drawLine(
+                    from[0], from[1], to[0], to[1],
+                    4.0f / zoom_, 0, 0, 0, 220);
+                r.drawLine(
+                    from[0], from[1], to[0], to[1],
+                    2.0f / zoom_,
+                    valid ? validColor.r : 255,
+                    valid ? validColor.g : 45,
+                    valid ? validColor.b : 45, 255);
+            }
+        }
         if (isPowerSource(candidate) ||
             isShieldGenerator(candidate))
             drawGraphic(
@@ -14690,22 +14936,16 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                             item.duration));
             break;
         }
-        size_t population = 0;
-        for (const Object &object : objects_)
-            if (object.active &&
-                object.player == localPlayer_ &&
-                object.unit->type >= dat::UT_Combatant &&
-                object.unit->type != dat::UT_Building)
-                population++;
+        const int population =
+            std::max(
+                0, (int)std::lround(
+                       populationUsed(
+                           localPlayer_)));
         const int populationLimit =
-            localPlayer_ > 0 &&
-                    (size_t)localPlayer_ <= players_.size()
-                ? std::max(
-                      0, (int)std::lround(
-                             players_[(size_t)localPlayer_ -
-                                      1]
-                                 .populationLimit))
-                : 0;
+            std::max(
+                0, (int)std::lround(
+                       populationCapacity(
+                           localPlayer_)));
         r.fillRect(startX, y,
                    fieldW - 3.0f * invZoom, fieldH,
                    5, 8, 16, 225);
@@ -15987,8 +16227,22 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                    5, 8, 16, 220);
         r.fillRect(boxX, boxY, boxWidthPixels * invZoom, 2.0f * invZoom,
                    210, 210, 190, 255);
+        uint8_t textRed = 238;
+        uint8_t textGreen = 231;
+        uint8_t textBlue = 190;
+        if (currentInstructionPlayer_ > 0) {
+            const Rgba &color =
+                assets_.palette()[(uint8_t)(
+                    playerColorBase(
+                        currentInstructionPlayer_) +
+                    4)];
+            textRed = color.r;
+            textGreen = color.g;
+            textBlue = color.b;
+        }
         drawBitmapText(r, lines, 28.0f * invZoom, boxY + 12.0f * invZoom,
-                       2.0f * invZoom);
+                       2.0f * invZoom,
+                       textRed, textGreen, textBlue);
     }
 
     if (boxSelectActive_) {
@@ -16024,7 +16278,6 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         const float invZoom = 1.0f / zoom_;
         const float x = cursorX_ * invZoom, y = cursorY_ * invZoom;
         size_t frameIndex = kCursorNormal;
-        if (cursorMode_ == CursorMode::Move) frameIndex = kCursorMove;
         if (cursorMode_ == CursorMode::Placement) frameIndex = kCursorPlacement;
         if (cursorMode_ == CursorMode::GatherPoint) frameIndex = kCursorGatherPoint;
         if (cursorMode_ == CursorMode::Attack) frameIndex = kCursorAttack;
@@ -16032,23 +16285,19 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             frameIndex = kCursorAttackGround;
         if (cursorMode_ == CursorMode::Garrison)
             frameIndex = kCursorGarrison;
-        if (cursorMode_ == CursorMode::Gather)
-            frameIndex = kCursorGather;
-        if (cursorMode_ == CursorMode::Repair)
-            frameIndex = kCursorRepair;
+        if (cursorMode_ == CursorMode::ContextWork)
+            frameIndex = kCursorContextWork;
+        if (cursorMode_ == CursorMode::RepairCommand)
+            frameIndex = kCursorRepairCommand;
+        if (cursorMode_ == CursorMode::Guard)
+            frameIndex = kCursorGuard;
+        if (cursorMode_ == CursorMode::Follow)
+            frameIndex = kCursorFollow;
         if (cursors && frameIndex < cursors->frames.size()) {
             const SpriteFrame &frame = cursors->frames[frameIndex];
             const float width = frame.w * invZoom, height = frame.h * invZoom;
-            const bool centered =
-                cursorMode_ == CursorMode::Move ||
-                cursorMode_ == CursorMode::Attack ||
-                cursorMode_ == CursorMode::AttackGround ||
-                cursorMode_ == CursorMode::Garrison ||
-                cursorMode_ == CursorMode::Gather ||
-                cursorMode_ == CursorMode::Repair ||
-                cursorMode_ == CursorMode::Placement;
-            r.draw(frame.tex, {x - (centered ? width * 0.5f : 0.0f),
-                               y - (centered ? height * 0.5f : 0.0f),
+            r.draw(frame.tex, {x - frame.hotX * invZoom,
+                               y - frame.hotY * invZoom,
                                width, height, frame.u, frame.v,
                                frame.u + frame.w, frame.v + frame.h});
         } else {

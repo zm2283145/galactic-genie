@@ -180,6 +180,19 @@ public:
     float resource(int player, int resourceId) const;
     bool researchTechnology(int player, int technologyId);
     const std::string &currentInstruction() const { return currentInstruction_; }
+    int currentInstructionPlayerForTesting() const {
+        return currentInstructionPlayer_;
+    }
+    void queueInstructionForTesting(
+        const std::string &text, int player = -1) {
+        queueInstruction(text, 3.0f, std::string(), player);
+    }
+    float populationUsedForTesting(int player) const {
+        return populationUsed(player);
+    }
+    float populationCapacityForTesting(int player) const {
+        return populationCapacity(player);
+    }
     size_t activeObjectCount() const;
     size_t underConstructionObjectCount() const;
     size_t selectedObjectCount() const;
@@ -200,7 +213,9 @@ public:
     bool completeFoundationForTesting(uint32_t spawnId);
     bool setConstructionProgressForTesting(
         uint32_t spawnId, float progress);
-    bool damageObjectForTesting(uint32_t spawnId, int damage);
+    bool damageObjectForTesting(
+        uint32_t spawnId, int damage,
+        uint32_t attackerId = 0);
     bool moveObjectForTesting(uint32_t spawnId, float x, float y);
     int objectPlayer(uint32_t spawnId) const;
     bool setGateLockedForTesting(
@@ -453,11 +468,12 @@ private:
     };
     enum class CursorMode : uint8_t {
         Normal,
-        Move,
         Attack,
         Garrison,
-        Gather,
-        Repair,
+        ContextWork,
+        RepairCommand,
+        Guard,
+        Follow,
         AttackGround,
         Placement,
         GatherPoint,
@@ -609,6 +625,7 @@ private:
         float marchRepath = 0;
         uint32_t blockerId = 0;     // unit that blocked the last step
         float productionRemaining = 0;
+        bool productionPopulationBlocked = false;
         float constructionRemaining = 0;
         float constructionTotal = 0;
         uint32_t constructionBuilderId = 0;
@@ -670,6 +687,7 @@ private:
         std::string text;
         std::string sound;
         float duration = 0;
+        int player = -1;
     };
 
     void generateTerrain(int size);
@@ -1001,7 +1019,13 @@ private:
     void defeatCheatPlayer(int player);
     void startInstruction(Instruction instruction);
     void queueInstruction(const std::string &text, float duration,
-                          const std::string &sound = std::string());
+                          const std::string &sound = std::string(),
+                          int player = -1);
+    int instructionPlayer(
+        const std::string &text, int fallbackPlayer) const;
+    float populationUse(const dat::Unit &unit) const;
+    float populationUsed(int player) const;
+    float populationCapacity(int player) const;
     void log(const std::string &message) const;
     int playerColorBase(int player) const;
     int terrainAt(int x, int y) const { return terrain_[(size_t)y * mapSize_ + x]; }
@@ -1052,7 +1076,9 @@ private:
     std::vector<TriggerRuntime> triggerRuntime_;
     std::deque<Instruction> instructions_;
     std::string currentInstruction_;
+    int currentInstructionPlayer_ = -1;
     float instructionTime_ = 0;
+    float attackAlertCooldown_ = 0;
     uint32_t nextSpawnId_ = 1;
     uint32_t nextMoveGroupId_ = 1;
     int difficulty_ = 2;
