@@ -3195,6 +3195,52 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
                                  frames == "2111112002 24442 2000022",
                "counts " + std::to_string(lWall.size()) + "/" + std::to_string(diag.size()) + "/" +
                    std::to_string(straight.size()) + " frames " + frames);
+        // Gate lifecycle: finish the gate on the X wall, walls can't be laid
+        // through it, destroying it removes its posts, and a new gate can go
+        // back into the wall.
+        uint32_t gateId = 0;
+        for (uint32_t id : g.underConstructionObjectIds())
+            if (std::abs(g.objectPosition(id)[0] - (bx + 5.5f)) < 1.1f &&
+                std::abs(g.objectPosition(id)[1] - (by + 14.5f)) < 1.1f)
+                gateId = id;
+        g.issueRepairForTesting(worker, gateId);
+        for (int f = 0; f < 30 * 120; f++) {
+            g.update(1.0f / 30.0f, {});
+            bool building = false;
+            for (uint32_t id : g.underConstructionObjectIds()) building |= id == gateId;
+            if (!building) break;
+        }
+        const auto gp = g.objectPosition(gateId);
+        auto countNear = [&](float x, float y, float r) {
+            int n = 0;
+            for (uint32_t id = 1; id < 4000; id++)
+                if (g.objectActive(id) && id != worker) {
+                    const auto p = g.objectPosition(id);
+                    if (std::abs(p[0] - x) <= r && std::abs(p[1] - y) <= r) n++;
+                }
+            return n;
+        };
+        const int beforeCross = countNear(gp[0], gp[1], 2.6f);
+        const auto cross = g.placeWallForTesting(worker, 3, 117, bx + 5, by + 11, bx + 5, by + 17);
+        bool throughGate = false;
+        for (uint32_t id : cross) {
+            const auto p = g.objectPosition(id);
+            if (std::abs(p[0] - gp[0]) < 2.0f && std::abs(p[1] - gp[1]) < 0.5f) throughGate = true;
+        }
+        const int around = countNear(bx + 5.5f, by + 14.5f, 2.6f) - (int)cross.size();
+        g.damageObjectForTesting(gateId, 100000);
+        for (int f = 0; f < 5; f++) g.update(1.0f / 30.0f, {});
+        int left = 0; // anything but wall pieces left where the gate stood
+        for (uint32_t id = 1; id < 4000; id++)
+            if (g.objectActive(id) && id != worker && g.objectUnitId(id) != 117) {
+                const auto p = g.objectPosition(id);
+                if (std::abs(p[0] - gp[0]) < 2.6f && std::abs(p[1] - gp[1]) < 1.0f) left++;
+            }
+        const int again = g.placeGateForTesting(worker, 3, gp[0], gp[1]);
+        report("gate-lifecycle", gateId && !throughGate && left == 0 && again > 0,
+               "gate " + std::to_string(gateId) + " before " + std::to_string(beforeCross) +
+                   " through " + std::to_string(throughGate) + " around " + std::to_string(around) +
+                   " leftover " + std::to_string(left) + " replaced " + std::to_string(again));
     }
     // 10) Gather point: a trained unit walks to it; removing it works.
     {
@@ -3491,6 +3537,9 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
             nearest = std::min(nearest, std::abs(p[1] - 8.0f));
         }
         const float stashed = g.objectStashForTesting(worker, 0);
+        g.selectObjectForTesting(worker);
+        g.lookAtObject(worker);
+        shot(g, "_carry");
         const bool millUsed = g.resource(1, 1) > carbon0 + 1.0f && nearest > 6.0f;
         const bool manual = g.issueDropOffForTesting(worker, cc);
         for (int f = 0; f < 30 * 30; f++) g.update(1.0f / 30.0f, {});
@@ -3502,13 +3551,266 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
                    " mill " + std::to_string(millUsed) + " nearestCC " + std::to_string(nearest) +
                    " manual " + std::to_string(manual) + " cc " + std::to_string(ccTookAll));
     }
+    // 21) Reseed: the Food Proc Ctr queues prepaid farms; a depleted farm
+    // becomes a foundation, its farmer rebuilds it and farms again.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        g.spawnObjectForTesting(3, 109, 1, 44.0f, 12.0f);
+        const uint32_t mill = g.spawnObjectForTesting(3, 68, 1, 48.0f, 18.0f);
+        const uint32_t worker = g.spawnObjectForTesting(3, 83, 1, 44.0f, 17.0f);
+        g.update(1.0f / 30.0f, {});
+        const uint32_t farm = g.spawnFoundationForTesting(3, 50, 1, 44.5f, 20.5f, {worker});
+        for (int f = 0; f < 30 * 40; f++) g.update(1.0f / 30.0f, {});
+        bool hasFarm = false;
+        for (int id : g.productionOptionIds(mill)) hasFarm |= id == 50;
+        g.setResourceForTesting(1, 1, 500.0f);
+        g.selectObjectForTesting(mill);
+        const bool queued = g.queueUnitForTesting(mill, 50);
+        const int queue = g.reseedQueueForTesting(1);
+        g.setObjectResourceForTesting(farm, 0.5f);
+        for (int f = 0; f < 30 * 10; f++) g.update(1.0f / 30.0f, {});
+        const bool rebuilding = g.objectActive(farm) && g.terrainAtForTesting(44, 20) == 29;
+        for (int f = 0; f < 30 * 40; f++) g.update(1.0f / 30.0f, {});
+        const bool farming = g.objectActive(farm) && g.objectResourceAmount(farm) > 100.0f &&
+                             g.objectGatheringTarget(worker, farm) && g.reseedQueueForTesting(1) == 0;
+        printf("  farm food %.1f active %d worker %s\n", g.objectResourceAmount(farm), g.objectActive(farm), g.describeObjectForTesting(worker).substr(0, 160).c_str());
+        report("reseed", hasFarm && queued && queue == 1 && rebuilding && farming,
+               "button " + std::to_string(hasFarm) + " queued " + std::to_string(queue) + " rebuilding " +
+                   std::to_string(rebuilding) + " farming " + std::to_string(farming));
+    }
+    // 22) Menus: Food Proc Ctr units tab with the reseed button; airbase units.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        for (int t : {1, 2, 3}) g.researchTechnology(1, t);
+        const uint32_t mill = g.spawnFoundationForTesting(3, 68, 1, 46.0f, 18.0f, {});
+        const uint32_t air = g.spawnFoundationForTesting(3, 317, 1, 56.0f, 18.0f, {});
+        const uint32_t fort = g.spawnFoundationForTesting(3, 82, 1, 46.0f, 30.0f, {});
+        for (uint32_t id : {mill, air, fort}) g.completeFoundationForTesting(id);
+        g.update(1.0f / 30.0f, {});
+        auto openMenu = [&](uint32_t id, const char *suffix) {
+            g.clearSelectionForTesting();
+            g.selectObjectForTesting(id);
+            g.lookAtObject(id);
+            InputState in;
+            in.screenW = 960; in.screenH = 544;
+            in.cycleAttackMode = true;
+            g.update(0.001f, in);
+            if (!g.actionMenuOpenForTesting()) g.update(0.001f, in);
+            shot(g, suffix);
+            return g.actionMenuOpenForTesting();
+        };
+        const bool millMenu = openMenu(mill, "_menu_mill");
+        std::string millIds, airIds;
+        for (int id : g.productionOptionIds(mill)) millIds += std::to_string(id) + ",";
+        const bool airMenu = openMenu(air, "_menu_air");
+        for (int id : g.productionOptionIds(air)) airIds += std::to_string(id) + ",";
+        const bool fortMenu = openMenu(fort, "_menu_fort");
+        std::string fortIds;
+        for (int id : g.productionOptionIds(fort)) fortIds += std::to_string(id) + ",";
+        airIds += " fort " + std::to_string(fortMenu) + " [" + fortIds + "]";
+        report("menus", fortMenu && !fortIds.empty() && millMenu && millIds.find("50,") != std::string::npos && airMenu && !airIds.empty(),
+               "mill " + std::to_string(millMenu) + " [" + millIds + "] air " + std::to_string(airMenu) +
+                   " [" + airIds + "]");
+    }
+    // 23) Upgraded Food Proc Ctr (68 -> 129 at TL2) still takes food.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        g.researchTechnology(1, 1);
+        g.spawnObjectForTesting(3, 109, 1, 44.0f, 6.0f);
+        const uint32_t mill = g.spawnFoundationForTesting(3, 68, 1, 44.0f, 26.0f, {});
+        g.completeFoundationForTesting(mill);
+        const uint32_t worker = g.spawnObjectForTesting(3, 83, 1, 44.0f, 23.0f);
+        const uint32_t bush = g.spawnObjectForTesting(0, 59, 0, 42.0f, 22.0f);
+        g.update(1.0f / 30.0f, {});
+        g.issueGatherForTesting(worker, bush);
+        const float food0 = g.resource(1, 0);
+        float nearest = 1e9f;
+        for (int f = 0; f < 30 * 60; f++) {
+            g.update(1.0f / 30.0f, {});
+            nearest = std::min(nearest, std::abs(g.objectPosition(worker)[1] - 6.0f));
+        }
+        report("upgraded-drop-site", g.objectUnitId(mill) == 129 && g.resource(1, 0) > food0 + 5.0f && nearest > 8.0f,
+               "mill unit " + std::to_string(g.objectUnitId(mill)) + " food +" +
+                   std::to_string(g.resource(1, 0) - food0) + " nearestCC " + std::to_string(nearest));
+    }
+    // 24) Hunting: the worker kills the nerf, gathers its carcass; an
+    // untouched carcass rots away.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        g.spawnObjectForTesting(3, 109, 1, 44.0f, 12.0f);
+        const uint32_t worker = g.spawnObjectForTesting(3, 83, 1, 44.0f, 17.0f);
+        const uint32_t nerf = g.spawnObjectForTesting(0, 594, 0, 44.0f, 19.0f);
+        const uint32_t other = g.spawnObjectForTesting(0, 594, 0, 60.0f, 19.0f);
+        g.update(1.0f / 30.0f, {});
+        const bool ordered = g.issueGatherForTesting(worker, nerf);
+        const float food0 = g.resource(1, 0);
+        for (int f = 0; f < 30 * 60; f++) g.update(1.0f / 30.0f, {});
+        const bool nerfDead = !g.objectActive(nerf);
+        const bool gotFood = g.resource(1, 0) > food0 + 5.0f;
+        g.damageObjectForTesting(other, 100);
+        g.update(1.0f / 30.0f, {});
+        g.update(1.0f / 30.0f, {});
+        uint32_t carcass = 0;
+        for (uint32_t id = other + 1; id < other + 400; id++)
+            if (g.objectActive(id) && g.objectUnitId(id) == 595 &&
+                std::abs(g.objectPosition(id)[0] - 60.0f) < 0.5f) carcass = id;
+        const float c0 = carcass ? g.objectResourceAmount(carcass) : 0.0f;
+        for (int f = 0; f < 30 * 20; f++) g.update(1.0f / 30.0f, {});
+        const float c1 = carcass ? g.objectResourceAmount(carcass) : 0.0f;
+        report("hunting", ordered && nerfDead && gotFood && carcass && c0 > 100.0f && c1 < c0 - 4.0f,
+               "ordered " + std::to_string(ordered) + " dead " + std::to_string(nerfDead) + " food " +
+                   std::to_string(gotFood) + " carcass " + std::to_string(carcass) + " " +
+                   std::to_string(c0) + "->" + std::to_string(c1));
+    }
+    // 25) Animal Nursery: a captured nerf garrisons and produces food.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t nursery = g.spawnObjectForTesting(3, 319, 1, 44.0f, 20.0f);
+        const uint32_t nerf = g.spawnObjectForTesting(0, 594, 1, 44.0f, 24.0f);
+        g.update(1.0f / 30.0f, {});
+        const bool entered = g.garrisonForTesting(nerf, nursery);
+        for (int f = 0; f < 30 * 15; f++) g.update(1.0f / 30.0f, {});
+        const float food0 = g.resource(1, 0);
+        for (int f = 0; f < 30 * 30; f++) g.update(1.0f / 30.0f, {});
+        const float gained = g.resource(1, 0) - food0;
+        report("nursery", entered && g.garrisonedCount(nursery) == 1 && gained > 2.0f,
+               "entered " + std::to_string(entered) + " inside " + std::to_string(g.garrisonedCount(nursery)) +
+                   " food +" + std::to_string(gained));
+    }
+    // 26) Transports: a trooper boards an assault mech, rides, and unloads.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t mech = g.spawnObjectForTesting(3, 249, 1, 44.0f, 20.0f);
+        const uint32_t trooper = g.spawnObjectForTesting(3, 460, 1, 44.0f, 23.0f);
+        g.update(1.0f / 30.0f, {});
+        const bool entered = g.garrisonForTesting(trooper, mech);
+        for (int f = 0; f < 30 * 10; f++) g.update(1.0f / 30.0f, {});
+        const size_t inside = g.garrisonedCount(mech);
+        g.groupMoveForTesting({mech}, 52.0f, 20.0f);
+        for (int f = 0; f < 30 * 30; f++) g.update(1.0f / 30.0f, {});
+        const auto ride = g.objectPosition(trooper);
+        const bool ejected = g.ejectGarrisonedUnitForTesting(mech, trooper);
+        report("transport", entered && inside == 1 && std::abs(ride[0] - g.objectPosition(mech)[0]) < 0.01f &&
+                                ride[0] > 48.0f && ejected,
+               "entered " + std::to_string(entered) + " inside " + std::to_string(inside) + " ride " +
+                   std::to_string(ride[0]) + " ejected " + std::to_string(ejected));
+    }
+    // 27) Blast damage: a heavy assault mech's shot splashes nearby troops;
+    // a mech with a trooper on top backs off to its minimum range to fire.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        g.setDiplomacyForTesting(1, 2, 3);
+        g.setDiplomacyForTesting(2, 1, 3);
+        const uint32_t mech = g.spawnObjectForTesting(3, 277, 1, 40.0f, 30.0f);
+        const uint32_t a = g.spawnObjectForTesting(3, 460, 2, 46.0f, 30.0f);
+        const uint32_t b = g.spawnObjectForTesting(3, 460, 2, 46.0f, 30.5f);
+        g.update(1.0f / 30.0f, {});
+        g.setAttackModeForTesting(a, 3); g.setAttackModeForTesting(b, 3);
+        const float hpB = g.objectHitPoints(b);
+        g.issueAttackForTesting(mech, a);
+        for (int f = 0; f < 30 * 12 && g.objectActive(a); f++) g.update(1.0f / 30.0f, {});
+        const bool splashed = !g.objectActive(b) || g.objectHitPoints(b) < hpB;
+        // Min range: an enemy right next to the mech.
+        const uint32_t close = g.spawnObjectForTesting(3, 460, 2, g.objectPosition(mech)[0] + 0.7f,
+                                                       g.objectPosition(mech)[1]);
+        g.setAttackModeForTesting(close, 3);
+        const float hpC = g.objectHitPoints(close);
+        g.issueAttackForTesting(mech, close);
+        for (int f = 0; f < 30 * 25 && g.objectActive(close) && g.objectHitPoints(close) >= hpC; f++)
+            g.update(1.0f / 30.0f, {});
+        const bool firedClose = !g.objectActive(close) || g.objectHitPoints(close) < hpC;
+        report("blast-minrange", splashed && firedClose,
+               "splash " + std::to_string(splashed) + " closeHit " + std::to_string(firedClose));
+    }
     printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;
+}
+
+
+// Counts GL-style batches (texture/mask switches) without rasterizing, to
+// measure the game-side cost of UI states.
+struct CountingRenderer : SoftRenderer {
+    Texture *tex = nullptr, *mask = nullptr;
+    size_t quads = 0, batches = 0; double area = 0; float scale = 1;
+    std::map<std::string, double> big;
+    void note(Texture *t, Texture *m, const Quad &q) {
+        quads++; area += (double)q.w * q.h * scale * scale;
+        if (t != tex || m != mask || !batches) { batches++; tex = t; mask = m; }
+    }
+    void beginFrame(int, int, float sc, uint8_t, uint8_t, uint8_t) override { quads = batches = 0; area = 0; scale = sc; tex = mask = nullptr; }
+    void draw(Texture *t, const Quad &q) override { note(t, nullptr, q); }
+    void drawMasked(Texture *t, const Quad &q, Texture *m, const Quad &) override { note(t, m, q); }
+    void drawMaskedTinted(Texture *t, const Quad &q, Texture *m, const Quad &, uint8_t, uint8_t, uint8_t, uint8_t) override { note(t, m, q); }
+    void fillRect(float x, float y, float w, float h, uint8_t, uint8_t, uint8_t, uint8_t) override { note((Texture *)1, nullptr, Quad{x, y, w, h, 0, 0, 0, 0}); }
+};
+
+static int cmdBenchUi(const char *dataDir) {
+    CountingRenderer renderer;
+    Assets assets(&renderer);
+    std::string err;
+    if (!assets.init(dataDir, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+    Game g(assets);
+    if (!g.initCompactTestMap(0x5A17u, 64, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+    g.setLocalPlayerForTesting(1);
+    const uint32_t cc = g.spawnObjectForTesting(3, 109, 1, 30.0f, 30.0f);
+    const uint32_t worker = g.spawnObjectForTesting(3, 83, 1, 30.0f, 34.0f);
+    g.update(1.0f / 30.0f, {});
+    auto measure = [&](const char *label) {
+        using clock = std::chrono::steady_clock;
+        for (int i = 0; i < 5; i++) { g.update(1.0f / 60.0f, {}); g.render(renderer, 960, 544); }
+        auto t0 = clock::now();
+        double updateMs = 0;
+        const int frames = 120;
+        for (int i = 0; i < frames; i++) {
+            auto u0 = clock::now();
+            InputState in; in.screenW = 960; in.screenH = 544; in.cursorVisible = true;
+            in.pointerX = 480; in.pointerY = 300;
+            g.update(1.0f / 60.0f, in);
+            updateMs += std::chrono::duration<double, std::milli>(clock::now() - u0).count();
+            g.render(renderer, 960, 544);
+        }
+        const double total = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+        printf("  tex %.1f MB builds %zu\n", assets.textureBytes() / 1048576.0, assets.buildCount());
+        printf("%-18s update %.3f ms  render %.3f ms  quads %zu batches %zu  fill %.2f screens\n", label, updateMs / frames,
+               (total - updateMs) / frames, renderer.quads, renderer.batches, renderer.area / (960.0 * 544.0));
+    };
+    g.lookAtObject(cc);
+    measure("nothing selected");
+    g.selectObjectForTesting(worker);
+    measure("worker selected");
+    InputState in; in.screenW = 960; in.screenH = 544; in.cycleAttackMode = true;
+    g.update(0.001f, in);
+    printf("menu open %d\n", g.actionMenuOpenForTesting());
+    measure("worker menu");
+    g.clearSelectionForTesting();
+    g.selectObjectForTesting(cc);
+    g.update(0.001f, in);
+    measure("cc menu");
+    in = {}; in.screenW = 960; in.screenH = 544; in.actionTabRight = true;
+    g.update(0.001f, in);
+    measure("cc research");
+    for (auto &entry : assets.largestSheets(15)) printf("  slp %d %.2f MB\n", entry.second, entry.first / 1048576.0);
+    return 0;
 }
 
 int main(int argc, char **argv) {
     if (argc < 3) return usage();
     const char *cmd = argv[1];
+    if (!strcmp(cmd, "bench-ui")) return cmdBenchUi(argv[2]);
     if (!strcmp(cmd, "info")) return cmdInfo(argv[2]);
     if (!strcmp(cmd, "terrain") && argc >= 4) return cmdTerrain(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "restriction") && argc >= 4) return cmdRestriction(argv[2], atoi(argv[3]));

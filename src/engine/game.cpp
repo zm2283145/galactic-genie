@@ -336,6 +336,8 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     objectIndices_.clear();
     projectiles_.clear();
     remains_.clear();
+    reseedQueue_ = {};
+    pendingCarcasses_.clear();
     combatObjectIndices_.clear();
     combatObjectCells_.clear();
     selectionClickAge_ = 1000.0f;
@@ -347,19 +349,20 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     for (size_t i = 0; i < players_.size(); i++) players_[i].color = (uint32_t)i;
     players_[0].active = true;
     players_[0].human = true;
-    players_[0].civilization = 3;
+    players_[0].civilization = 1;
     players_[0].populationLimit = 200;
     players_[0].diplomacy[2] = 3;
     players_[1].active = true;
-    players_[1].civilization = 1;
+    players_[1].civilization = 3;
     players_[1].diplomacy[1] = 3;
     localPlayer_ = 1;
     mapSize_ = mapSize;
     generateTerrain(mapSize);
 
-    // Two bases: Rebel Alliance (civ 3) vs Galactic Empire (civ 1).
-    spawnBase(1, 3, 'R', mapSize * 0.30f, mapSize * 0.35f);
-    spawnBase(2, 1, 'E', mapSize * 0.62f, mapSize * 0.60f);
+    // Two bases: the player is the Galactic Empire (civ 1), the enemy the
+    // Rebel Alliance (civ 3).
+    spawnBase(1, 1, 'E', mapSize * 0.30f, mapSize * 0.35f);
+    spawnBase(2, 3, 'R', mapSize * 0.62f, mapSize * 0.60f);
     // Keep the generated sandbox quiet until its opposing bases are engaged.
     for (Object &object : objects_)
         if (canAttack(object))
@@ -370,7 +373,8 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     for (int i = 0; i < 8; i++) {
         float x = pos(rng_), y = pos(rng_);
         if (terrainAt((int)x, (int)y) == T_WATER1 || terrainAt((int)x, (int)y) == T_WATER2) continue;
-        if (Object *o = spawn(0, i % 2 ? "ANIMAL-CAPTUREA1" : "ANIMAL-BANTHA", 0, x, y, 0)) (void)o;
+        if (!(i % 2)) continue; // (there is no ANIMAL-BANTHA; keep the layout)
+        spawn(0, "ANIMAL-CAPTUREA1", 0, x, y, 0);
     }
     if (objects_.empty()) {
         if (err) *err = "no units could be spawned (dat/graphics mismatch?)";
@@ -387,26 +391,27 @@ bool Game::initCompactTestMap(
     std::string *err) {
     if (!init(seed, mapSize, err))
         return false;
+    const int civ = civilizationForPlayer(1);
     const float testX = mapSize * 0.30f;
     const float testY = mapSize * 0.35f;
-    spawn(3, "BLDG-TRAINFOOT1", 1,
+    spawn(civ, "BLDG-TRAINFOOT1", 1,
           testX + 10.0f, testY + 7.0f, 0);
-    spawn(3, "BLDG-SHLDGEN1", 1,
+    spawn(civ, "BLDG-SHLDGEN1", 1,
           testX + 15.0f, testY + 7.0f, 0);
     float gateX = testX + 2.0f;
     float gateY = testY + 12.0f;
     const dat::Unit *gateUnit =
-        findUnit(3, "BLDG-ENTRYA1CLOS");
+        findUnit(civ, "BLDG-ENTRYA1CLOS");
     if (gateUnit)
         snapAdjacentBuildingPosition(
             *gateUnit, gateX, gateY);
-    spawn(3, "BLDG-ENTRYA1CLOS", 1,
+    spawn(civ, "BLDG-ENTRYA1CLOS", 1,
           gateX, gateY, 0);
     if (gateUnit) {
         for (const dat::BuildingAnnex &annex :
              gateUnit->annexes) {
             const dat::Unit *part =
-                findUnit(3, annex.unitId);
+                findUnit(civ, annex.unitId);
             if (!part) continue;
             Object *created = addObject(
                 part, 1,
@@ -419,14 +424,14 @@ bool Game::initCompactTestMap(
     for (int side : {-1, 1})
         for (int segment = 0; segment < 5;
              segment++)
-            spawn(3, "BLDG-FENCE", 1,
+            spawn(civ, "BLDG-FENCE", 1,
                   gateX,
                   gateY +
                       side * (2.5f + segment),
                   0);
-    spawn(3, "BLDG-DWELLING1", 1,
+    spawn(civ, "BLDG-DWELLING1", 1,
           testX + 13.0f, testY + 7.0f, 0);
-    spawn(3, "BLDG-DWELLING1", 1,
+    spawn(civ, "BLDG-DWELLING1", 1,
           testX + 26.0f, testY + 7.0f, 0);
     spawn(0, "ANIMAL-CAPTUREA1", 0,
           testX + 8.0f, testY + 12.0f, 0);
@@ -504,6 +509,8 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     objectIndices_.clear();
     projectiles_.clear();
     remains_.clear();
+    reseedQueue_ = {};
+    pendingCarcasses_.clear();
     combatObjectIndices_.clear();
     combatObjectCells_.clear();
     selectionClickAge_ = 1000.0f;
@@ -1786,6 +1793,13 @@ bool Game::canAttack(const Object &object) const {
     return object.unit->attackGraphic >= 0;
 }
 
+// Minimum range with technologies applied (attribute 20): research such as
+// the Rebel heavy assault mech's removes it.
+float Game::minimumRange(const Object &source) const {
+    if (!source.unit || source.unit->minRange <= 0) return 0.0f;
+    return std::max(0.0f, modifiedUnitAttribute(source, 20, source.unit->minRange));
+}
+
 float Game::attackRange(const Object &source, const Object &target) const {
     const float contact = collisionRadius(source) + collisionRadius(target) + 0.08f;
     return std::max(contact, source.unit->maxRange);
@@ -2179,6 +2193,13 @@ void Game::screenToWorld(float screenX, float screenY, int screenW, int screenH,
     }
 }
 
+bool Game::isLiveAnimal(const Object &object) const {
+    return object.active && object.unit && object.carcassClass < 0 &&
+           object.unit->type >= dat::UT_Combatant && object.unit->speed > 0 &&
+           object.resourceType == 0 && object.resourceAmount > 0.001f &&
+           object.hitPoints > 0.0f;
+}
+
 bool Game::isFlatFootprint(const Object &object) const {
     return object.unit && object.unit->cls == 7 && object.unit->type == dat::UT_Building;
 }
@@ -2390,8 +2411,9 @@ bool Game::handleSelectionPanelClick(float screenX, float screenY,
                        isWorker(*object);
             });
     Object *selectedAttacker = nullptr;
+    // Buildings (turrets, fortresses) have no stances in the original.
     for (Object *object : selected)
-        if (object && canAttack(*object)) {
+        if (object && canAttack(*object) && object->unit->type != dat::UT_Building) {
             selectedAttacker = object;
             break;
         }
@@ -2612,6 +2634,13 @@ std::vector<const dat::Unit *> Game::productionOptions(
             continue;
         options.push_back(unit);
     }
+    // Food Processing Centers carry the "Build Farm" reseed button (help
+    // 4146): it prepays farms that are rebuilt when one runs out.
+    if (isFoodProcessingCenter(building) && !building.underConstruction &&
+        unitAvailable(building.player, 50))
+        if (const dat::Unit *farm = effectiveUnitForPlayer(
+                building.player, findUnit(civilization, 50)))
+            options.push_back(farm);
     std::stable_sort(
         options.begin(), options.end(),
         [](const dat::Unit *a, const dat::Unit *b) {
@@ -2620,6 +2649,11 @@ std::vector<const dat::Unit *> Game::productionOptions(
             return a->id < b->id;
         });
     return options;
+}
+
+bool Game::isFoodProcessingCenter(const Object &building) const {
+    return building.unit && building.unit->type == dat::UT_Building &&
+           building.unit->name.rfind("BLDG-DROPCHOW", 0) == 0;
 }
 
 bool Game::buildingMatchesLocation(
@@ -2736,10 +2770,15 @@ void Game::refreshAutomaticTechnologies(int player) {
                     technology.name2.substr(5);
                 bool exists = false;
                 for (const Object &object : objects_)
+                    // A finished building "initiates" its MADE technology
+                    // (the unit's tech id); the name match covers the rest
+                    // (MADE-BLDG-AIRBASE belongs to BLDG-TRAINAIR, 105).
                     if (object.active &&
                         object.player == player &&
                         object.unit->type == dat::UT_Building &&
-                        object.unit->name2 == unitName) {
+                        !object.underConstruction &&
+                        (object.unit->techId == (int)id ||
+                         object.unit->name2 == unitName)) {
                         exists = true;
                         break;
                     }
@@ -3097,10 +3136,36 @@ void Game::sendToGatherPoint(const Object &building, Object &unit) {
     if (!issueMove(unit, building.rallyX, building.rallyY)) unit.moveGoalActive = false;
 }
 
+bool Game::queueFarmReseed(const Object &building, const dat::Unit &farm) {
+    const int player = building.player;
+    int &queued = reseedQueue_[(size_t)player];
+    if (queued >= kReseedQueueMax) {
+        statusMessage_ = assets_.localizedString(3039); // queue is full
+        if (statusMessage_.empty()) statusMessage_ = "THE RESEED FARM QUEUE IS FULL";
+        statusTime_ = 3.0f;
+        return false;
+    }
+    for (const dat::ResourceCost &cost : farm.costs)
+        if (cost.flag && cost.type >= 0 && cost.amount > 0 &&
+            resource(player, cost.type) + 0.001f < cost.amount) {
+            statusMessage_ = "NOT ENOUGH RESOURCES";
+            statusTime_ = 3.0f;
+            return false;
+        }
+    for (const dat::ResourceCost &cost : farm.costs)
+        if (cost.flag && cost.type >= 0 && cost.amount > 0)
+            resources_[(size_t)player][cost.type] -= cost.amount;
+    queued++;
+    statusMessage_ = "FARMS QUEUED FOR RESEEDING: " + std::to_string(queued);
+    statusTime_ = 2.0f;
+    return true;
+}
+
 bool Game::queueUnitForTesting(uint32_t buildingId, int unitId) {
     Object *building = findObject(buildingId);
     const dat::Unit *unit = findUnit(civilizationForPlayer(localPlayer_), unitId);
     if (!building || !unit) return false;
+    if (unit->cls == 7) return queueFarmReseed(*building, *unit);
     ProductionItem item;
     item.unit = unit;
     item.duration = 0.1f;
@@ -3451,7 +3516,7 @@ int Game::civilizationGraphic(int graphicId,
 
 std::string Game::ownershipLabel(int player) const {
     std::string relationship;
-    if (player == 0) return "GAIA";
+    if (player == 0) return ""; // nature: no owner line, like the original
     if (player == localPlayer_) {
         relationship = "PLAYER";
     } else {
@@ -3734,8 +3799,11 @@ const dat::Unit *Game::gathererUnit(
     const Object *target =
         findObject(worker.gatherTargetId);
     if (target && target->unit) {
-        switch (target->unit->cls) {
+        switch (gatherClass(*target)) {
         case 1: variant = 11; break;
+        case 3:
+        case 4:
+        case 60: variant = 7; break; // hunter (action 110 on classes 4/60/3)
         case 7: variant = 3; break; // farm -> farmer (UNIT-WORKERA3)
         case 27: variant = 5; break;
         case 29: variant = 6; break;
@@ -3780,7 +3848,7 @@ const dat::Task *Game::gatherTask(
         findObject(worker.gatherTargetId);
     const int targetClass =
         target && target->unit
-            ? target->unit->cls
+            ? gatherClass(*target)
             : -1;
     for (const dat::Task &task :
          assets_.dat()
@@ -3841,12 +3909,19 @@ bool Game::buildingAcceptsResource(
     if (building.unit->name.rfind(
             "BLDG-MAIN", 0) == 0)
         return true;
-    for (int16_t dropSite : gatherer.dropSites)
-        if (dropSite >= 0 &&
-            (building.unit->id == dropSite ||
-             building.unit->baseId == dropSite ||
-             building.unit->copyId == dropSite))
+    // Upgrades (effect type 3) keep the drop site: the original swaps the
+    // player's master for the same id, so a Food Proc Ctr upgraded 68 -> 129
+    // still takes food.
+    for (int16_t dropSite : gatherer.dropSites) {
+        if (dropSite < 0) continue;
+        if (building.unit->id == dropSite ||
+            building.unit->baseId == dropSite ||
+            building.unit->copyId == dropSite)
             return true;
+        const dat::Unit *site = findUnit(civilizationForPlayer(building.player), dropSite);
+        if (site && effectiveUnitForPlayer(building.player, site) == building.unit)
+            return true;
+    }
     return false;
 }
 
@@ -4220,6 +4295,16 @@ void Game::updateGathering(float dt) {
         }
         Object *resource =
             findObject(worker.gatherTargetId);
+        if (resource && !resource->active && resource->carcassId)
+            if (Object *carcass = findObject(resource->carcassId);
+                carcass && carcass->active) {
+                worker.gatherTargetId = carcass->spawnId;
+                resource = carcass;
+            }
+        if (resource && !resource->active && !resource->carcassId &&
+            std::any_of(pendingCarcasses_.begin(), pendingCarcasses_.end(),
+                        [&](const PendingCarcass &p) { return p.animalId == resource->spawnId; }))
+            continue; // its carcass appears next frame
         const float capacity =
             std::max(
                 1.0f,
@@ -4298,6 +4383,21 @@ void Game::updateGathering(float dt) {
                     worker,
                     task->resourceGatheringSound);
         }
+        // Action 110: a living animal is killed first (nerfs have 7 HP);
+        // its carcass then holds the food.
+        if (isLiveAnimal(*resource)) {
+            worker.state = State::Gather;
+            worker.path.clear();
+            worker.moveGoalActive = false;
+            worker.facing = std::atan2(resource->y - worker.y, resource->x - worker.x);
+            worker.huntTimer += dt;
+            if (worker.huntTimer >= 1.0f) {
+                worker.huntTimer = 0.0f;
+                const int damage = std::max(3, attackDamage(worker, *resource));
+                damageObject(*resource, damage, worker.spawnId);
+            }
+            continue;
+        }
         // Standing carbon (class 31) is felled as soon as a worker starts on
         // it, like the original: the object keeps its resources but drops to
         // 0 hit points and shows its dying graphic (the felled pile). Felled
@@ -4342,6 +4442,22 @@ void Game::updateGathering(float dt) {
                         initialAmount);
         }
         if (resource->resourceAmount <= 0.001f) {
+            if (resource->unit->cls == 7 && resource->player > 0 &&
+                reseedQueue_[(size_t)resource->player] > 0) {
+                // A queued (prepaid) farm: the field turns back into a
+                // foundation and its farmer rebuilds it, then farms again.
+                reseedQueue_[(size_t)resource->player]--;
+                resource->underConstruction = true;
+                resource->constructionTotal = std::max(1.0f, (float)resource->unit->trainTime);
+                resource->constructionRemaining = resource->constructionTotal;
+                resource->hitPoints = 1.0f;
+                resource->resourceAmount = 0.0f;
+                resource->farmStage = -1; // repaint the build terrain
+                syncFarmTerrain(*resource);
+                worker.gatherTargetId = 0;
+                assignBuilder(worker, *resource);
+                continue;
+            }
             killObject(*resource, false);
             depletedResource = true;
         }
@@ -4360,24 +4476,47 @@ uint8_t Game::garrisonCategory(
     case 52: return 2; // infantry
     case 50:
     case 51: return 8; // Jedi/Sith
+    case 1: return 16; // livestock (Animal Nursery, garrison type 16)
     default: return 0;
     }
+}
+
+// The unit's own task list decides where it may garrison: action 3 with the
+// container's class (workers: 17 ships, 18 buildings, 53 assault mechs,
+// 59 air transports; nerfs: 18/17/59) or unit id.
+bool Game::hasGarrisonTask(const Object &unit, const Object &container) const {
+    if (!unit.unit || !container.unit || unit.unit->id < 0 ||
+        (size_t)unit.unit->id >= assets_.dat().unitHeaders.size())
+        return false;
+    for (const dat::Task &task : assets_.dat().unitHeaders[(size_t)unit.unit->id].tasks)
+        if (task.actionType == 3 &&
+            ((task.classId >= 0 && task.classId == container.unit->cls) ||
+             (task.unitId >= 0 && task.unitId == container.unit->id)))
+            return true;
+    return false;
+}
+
+bool Game::isTransport(const Object &object) const {
+    return object.unit && object.unit->type != dat::UT_Building &&
+           object.unit->speed > 0 && object.unit->garrisonCapacity > 0;
 }
 
 bool Game::canGarrison(const Object &unit,
                        const Object &building) const {
     const uint8_t category =
         garrisonCategory(unit);
-    return unit.active && !unit.hidden && unit.unit &&
-           building.active && building.unit &&
-           !building.underConstruction &&
-           unit.player == building.player &&
-           unit.spawnId != building.spawnId &&
-           unit.unit->speed > 0 &&
-           unit.unit->type != dat::UT_Building &&
+    if (!unit.active || unit.hidden || !unit.unit || !building.active || !building.unit ||
+        building.hidden || building.underConstruction || unit.player != building.player ||
+        unit.spawnId == building.spawnId || unit.unit->speed <= 0 ||
+        unit.unit->type == dat::UT_Building || building.unit->garrisonCapacity <= 0 ||
+        unit.garrisonedInId >= 0)
+        return false;
+    // Transports (assault mechs, air transports, transport ships) take any
+    // unit whose tasks allow boarding their class; transports can't nest.
+    if (isTransport(building))
+        return !isTransport(unit) && hasGarrisonTask(unit, building);
+    return building.unit->type == dat::UT_Building &&
            unit.unit->flyMode == 0 &&
-           building.unit->type == dat::UT_Building &&
-           building.unit->garrisonCapacity > 0 &&
            category != 0 &&
            (building.unit->garrisonType & category) != 0;
 }
@@ -4461,8 +4600,16 @@ void Game::updateGarrisoning() {
             continue;
         }
         if (!withinInteractionRange(
-                unit, *building, 0.75f))
+                unit, *building, 0.75f)) {
+            // Transports move: follow them until boarded.
+            if (isTransport(*building) && !unit.moveGoalActive &&
+                unit.state != State::Walk) {
+                float targetX = 0.0f, targetY = 0.0f;
+                interactionPoint(unit, *building, 0.35f, targetX, targetY);
+                issueMove(unit, targetX, targetY, building, 0.35f);
+            }
             continue;
+        }
         unit.hidden = true;
         unit.selected = false;
         unit.garrisonedInId =
@@ -4479,6 +4626,14 @@ void Game::updateGarrisoning() {
         changed = true;
         playWorldUnitSound(
             *building, assets_.dat().garrisonSound);
+    }
+    // Passengers ride along inside their transport.
+    for (Object &unit : objects_) {
+        if (!unit.active || unit.garrisonedInId < 0) continue;
+        const Object *container = findObject((uint32_t)unit.garrisonedInId);
+        if (!container || !container->active || !isTransport(*container)) continue;
+        unit.x = unit.homeX = container->x;
+        unit.y = unit.homeY = container->y;
     }
     if (changed) {
         syncSelectionOrder();
@@ -4497,8 +4652,8 @@ bool Game::ejectGarrisonedUnit(
         collisionRadius(building) +
         collisionRadius(unit) + 0.55f;
     bool placed = false;
-    for (int ring = 0; ring < 3 && !placed; ++ring)
-        for (int slot = 0; slot < 16; ++slot) {
+    for (int ring = 0; ring < 5 && !placed; ++ring)
+        for (int slot = 0; slot < 16 && !placed; ++slot) {
             const float angle =
                 (slot + placementOffset * 5) *
                 (2.0f * kPi / 16.0f);
@@ -4510,7 +4665,8 @@ bool Game::ejectGarrisonedUnit(
                 building.y + std::sin(angle) * radius;
             unit.hidden = false;
             if (positionPassable(
-                    unit, unit.x, unit.y, true))
+                    unit, unit.x, unit.y, true) &&
+                terrainPassable(unit, unit.x, unit.y))
                 placed = true;
             else
                 unit.hidden = true;
@@ -4605,7 +4761,8 @@ bool Game::openSelectedActionMenu() {
             statusTime_ = 3.0f;
             return true;
         }
-    } else if (subject->gate) {
+    } else if (subject->gate ||
+               (isTransport(*subject) && garrisonedCount(*subject, false) > 0)) {
         actionMenuTab_ = ActionMenuTab::Commands;
     } else if (subject->unit->type == dat::UT_Building) {
         actionMenuTab_ =
@@ -4804,6 +4961,14 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
         actionMenuOpen_ = false;
         actionMenuObjectId_ = 0;
         return true;
+    }
+
+    if (actionMenuTab_ != ActionMenuTab::Research) {
+        const std::vector<const dat::Unit *> options = productionOptions(*subject);
+        if (optionIndex < options.size() && options[optionIndex]->cls == 7) {
+            queueFarmReseed(*subject, *options[optionIndex]);
+            return true;
+        }
     }
 
     if (subject->productionQueue.size() >= 5) {
@@ -5371,6 +5536,7 @@ void Game::updateConstruction(float dt) {
             continue;
         building.underConstruction = false;
         building.hitPoints = building.maxHitPoints;
+        if (building.unit->cls == 7) syncFarmTerrain(building); // food + grown field
         // Building set_state 0 -> 2 (0x554710) plays master+0x1c8, the
         // construction sound, for the local player's buildings only.
         if (building.player == localPlayer_ &&
@@ -5407,7 +5573,10 @@ void Game::updateConstruction(float dt) {
                 building.y - annex.misplacementX,
                 building.facing, 0, 0, false, -1,
                 false);
-            if (created) created->wander = false;
+            if (created) {
+                created->wander = false;
+                created->annexParentId = building.spawnId;
+            }
         }
     }
     if (!completed.empty()) {
@@ -5516,6 +5685,22 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
         }
     }
 
+    // Right-click on an own building or transport the selection can enter
+    // garrisons it (workers only board transports this way; on buildings
+    // their right-click means drop-off/repair).
+    if (friendly && friendly->player == localPlayer_ &&
+        friendly->unit->garrisonCapacity > 0) {
+        bool eligible = false;
+        for (Object *object : selected)
+            if (canGarrison(*object, *friendly) &&
+                (isTransport(*friendly) || !isWorker(*object)))
+                eligible = true;
+        if (eligible && issueGarrisonCommand(*friendly)) {
+            flashCommandTarget(*friendly);
+            return;
+        }
+    }
+
     Object *enemy = enemyAtScreen(screenX, screenY, screenW, screenH);
     if (enemy) {
         struct ReservedAttackSlot {
@@ -5554,10 +5739,10 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
             const float maximumDistance =
                 std::max(contact, attackRange(*source, *enemy) - 0.05f);
             const float minimumDistance =
-                source->unit->minRange > 0
+                minimumRange(*source) > 0
                     ? std::min(maximumDistance,
                                std::max(contact,
-                                        source->unit->minRange + 0.2f))
+                                        minimumRange(*source) + 0.2f))
                     : contact;
             const float preferredDistance =
                 std::max(minimumDistance,
@@ -6049,10 +6234,10 @@ void Game::issueAttack(Object &source, Object &target, float approachAngle,
         const float range = attackRange(source, target);
         approachDistance =
             std::max(contact, range * 0.8f);
-        if (source.unit->minRange > 0)
+        if (minimumRange(source) > 0)
             approachDistance =
                 std::max(approachDistance,
-                         source.unit->minRange + 0.2f);
+                         minimumRange(source) + 0.2f);
     }
     source.attackTargetId = target.spawnId;
     source.attackRepathTime = 0;
@@ -6137,10 +6322,10 @@ void Game::retryAttackApproach(Object &source) {
         const float range = attackRange(source, *target);
         source.attackApproachDistance =
             std::max(contact, range * 0.8f);
-        if (source.unit->minRange > 0)
+        if (minimumRange(source) > 0)
             source.attackApproachDistance =
                 std::max(source.attackApproachDistance,
-                         source.unit->minRange + 0.2f);
+                         minimumRange(source) + 0.2f);
         source.targetX =
             target->x +
             std::cos(source.attackApproachAngle) *
@@ -6279,6 +6464,18 @@ void Game::syncFarmTerrain(Object &farm, bool dying) {
 void Game::killObject(Object &object, bool countKill) {
     if (object.unit->cls == 7 && object.unit->type == dat::UT_Building)
         syncFarmTerrain(object, true);
+    // Occupants: a destroyed building lets them out; a destroyed transport
+    // takes its passengers with it.
+    if (object.unit->garrisonCapacity > 0 && object.active) {
+        const bool transport = isTransport(object);
+        if (!transport) ejectGarrisoned(object);
+        for (Object &passenger : objects_)
+            if (passenger.active && passenger.garrisonedInId == (int32_t)object.spawnId) {
+                passenger.garrisonedInId = -1;
+                passenger.hidden = false;
+                killObject(passenger, false);
+            }
+    }
     const bool wasStatic = object.unit->speed <= 0 || object.unit->type == dat::UT_Building;
     object.active = false;
     object.selected = false;
@@ -6289,6 +6486,11 @@ void Game::killObject(Object &object, bool countKill) {
     // Annexes (gate end posts) share their parent's state in the original
     // (building set_state 0x554710 forwards to every annex), so they die
     // with it.
+    if (object.unit->type == dat::UT_Building && object.spawnId) {
+        for (Object &part : objects_)
+            if (part.active && &part != &object && part.annexParentId == object.spawnId)
+                killObject(part, false);
+    }
     if (object.unit->type == dat::UT_Building) {
         const dat::Unit *layout =
             object.gate && object.gateClosedUnit ? object.gateClosedUnit : object.unit;
@@ -6310,6 +6512,27 @@ void Game::killObject(Object &object, bool countKill) {
     remains.dyingGraphic = object.felled ? -1 : object.unit->dyingGraphic;
     remains.deadUnit =
         findUnit(civilizationForPlayer(object.player), object.unit->deadUnitId);
+    // Animals with food leave a gatherable carcass (their dead unit) that
+    // decays; it replaces the plain remains sprite.
+    if (remains.deadUnit && object.resourceType == 0 && object.resourceAmount > 0.001f &&
+        object.unit->type >= dat::UT_Combatant && object.unit->speed > 0) {
+        PendingCarcass pending;
+        pending.deadUnit = remains.deadUnit;
+        remains.deadUnit = nullptr;
+        pending.amount = object.resourceAmount;
+        pending.decay = object.unit->resourceDecay;
+        pending.animalClass = object.unit->cls;
+        pending.owner = object.player;
+        pending.x = object.x;
+        pending.y = object.y;
+        pending.facing = object.facing;
+        pending.animalId = object.spawnId;
+        if (const dat::Graphic *graphic = assets_.dat().graphic(remains.dyingGraphic))
+            pending.dying = std::max(0.1f, graphic->frameCount * graphic->frameDuration);
+        // Created after this call returns (adding objects here would move the
+        // vector under the caller's references).
+        pendingCarcasses_.push_back(pending);
+    }
     remains.player = object.player;
     remains.x = object.x;
     remains.y = object.y;
@@ -6426,6 +6649,11 @@ void Game::launchProjectile(const Object &source, const Object &target, int dama
     projectile.targetId = target.spawnId;
     projectile.sourceId = source.spawnId;
     projectile.damage = damage;
+    projectile.blastWidth = std::max(source.unit->blastWidth, projectileUnit->blastWidth);
+    projectile.blastLevel = projectile.blastWidth > 0
+                                ? (source.unit->blastWidth > 0 ? source.unit->blastAttackLevel
+                                                               : projectileUnit->blastAttackLevel)
+                                : 3;
     projectiles_.push_back(projectile);
     projectilesLaunched_++;
 
@@ -6538,11 +6766,16 @@ void Game::updateProjectiles(float dt) {
             const int damage = projectile.damage;
             const bool groundAimed = projectile.groundAimed;
             const float hitX = destX - target->x, hitY = destY - target->y;
+            const Projectile landed = projectile;
+            const uint32_t targetId = target->spawnId;
             projectiles_[index] = projectiles_.back();
             projectiles_.pop_back();
             const float reach = collisionRadius(*target) + 0.15f;
             if (!groundAimed || hitX * hitX + hitY * hitY <= reach * reach)
-                damageObject(*target, damage, projectile.sourceId);
+                damageObject(*target, damage, landed.sourceId);
+            if (landed.blastWidth > 0)
+                applyBlast(landed.sourceId, landed.player, destX, destY,
+                           groundAimed ? 0 : targetId, landed.blastWidth, landed.blastLevel, damage);
             continue;
         }
         projectile.x += dx * step / distance;
@@ -6550,6 +6783,35 @@ void Game::updateProjectiles(float dt) {
         projectile.z += dz * step / distance;
         projectile.facing = std::atan2(dy, dx);
         index++;
+    }
+}
+
+// Blast (area) damage: everything whose footprint is within the blast width
+// of the impact takes the attacker's damage against it. Blast level 3 hits
+// only the target; lower levels also hit the attacker's own and allied
+// units (friendly fire), as with the original's artillery.
+void Game::applyBlast(uint32_t sourceId, int sourcePlayer, float x, float y, uint32_t primaryId,
+                      float width, int level, int fallbackDamage) {
+    if (width <= 0 || level >= 3) return;
+    const Object *source = findObject(sourceId);
+    std::vector<uint32_t> victims;
+    for (const Object &other : objects_) {
+        if (!other.active || other.hidden || !other.unit || other.spawnId == primaryId ||
+            other.spawnId == sourceId || other.player <= 0 ||
+            other.unit->type < dat::UT_Combatant || other.carcassClass >= 0 || isAirUnit(other))
+            continue;
+        const bool enemy = sourcePlayer > 0 && !isFriendlyPlayer(sourcePlayer, other.player);
+        if (!enemy && level > 2) continue;
+        const float dx = other.x - x, dy = other.y - y;
+        const float reach = width + collisionRadius(other);
+        if (dx * dx + dy * dy > reach * reach) continue;
+        victims.push_back(other.spawnId);
+    }
+    for (uint32_t id : victims) {
+        Object *victim = findObject(id);
+        if (!victim || !victim->active) continue;
+        const int damage = source && source->active ? attackDamage(*source, *victim) : fallbackDamage;
+        damageObject(*victim, std::max(1, damage), sourceId);
     }
 }
 
@@ -6634,7 +6896,7 @@ void Game::updateAttack(Object &source, float dt) {
         }
     }
     if (edgeGap <= source.unit->maxRange + 0.1f &&
-        edgeGap + 0.05f >= source.unit->minRange) {
+        edgeGap + 0.05f >= minimumRange(source)) {
         source.path.clear();
         source.pathIndex = 0;
         source.blockedTime = 0;
@@ -6658,7 +6920,12 @@ void Game::updateAttack(Object &source, float dt) {
             else {
                 const int soundId = graphicSound(source.unit->attackGraphic);
                 playWorldUnitSound(source, soundId);
+                const float tx = target->x, ty = target->y;
+                const uint32_t targetId = target->spawnId;
                 damageObject(*target, damage, source.spawnId);
+                if (source.unit->blastWidth > 0)
+                    applyBlast(source.spawnId, source.player, tx, ty, targetId,
+                               source.unit->blastWidth, source.unit->blastAttackLevel, damage);
             }
             source.attackCooldown = std::max(
                 0.1f, modifiedUnitAttribute(
@@ -6680,12 +6947,17 @@ void Game::updateAttack(Object &source, float dt) {
         source.attackApproachDistance > 0
             ? source.attackApproachDistance
             : std::max(contact, range * 0.8f);
-    if (source.attackApproachDistance <= 0 &&
-        source.unit->minRange > 0)
+    if (minimumRange(source) > 0)
         desiredDistance =
-            std::max(desiredDistance, source.unit->minRange + 0.2f);
-    const float awayX = std::cos(source.attackApproachAngle);
-    const float awayY = std::sin(source.attackApproachAngle);
+            std::max(desiredDistance, minimumRange(source) + contact + 0.3f);
+    // Inside its minimum range (a melee attacker on top of an artillery
+    // unit) it backs straight away from the target to get a shot.
+    const float approachAngle =
+        minimumRange(source) > 0 && edgeGap + 0.05f < minimumRange(source)
+            ? std::atan2(source.y - target->y, source.x - target->x)
+            : source.attackApproachAngle;
+    const float awayX = std::cos(approachAngle);
+    const float awayY = std::sin(approachAngle);
     const float destinationX = target->x + awayX * desiredDistance;
     const float destinationY = target->y + awayY * desiredDistance;
     const float destinationDx = destinationX - source.x;
@@ -7001,6 +7273,24 @@ bool Game::positionPassable(const Object &object, float x, float y, bool dynamic
                 }
     }
     if (air) return true;
+    // Placing a building: gates occupy their full closed footprint even when
+    // open (open gates drop out of the obstruction grid), so nothing can be
+    // built through them.
+    if (object.unit && object.unit->type == dat::UT_Building && !object.gate) {
+        const float ownX = std::max(0.05f, object.unit->collisionSize[0]);
+        const float ownY = std::max(0.05f, object.unit->collisionSize[1]);
+        for (const Object &other : objects_) {
+            if (!other.active || other.hidden || !other.gate || &other == &object) continue;
+            if (placementIgnore_ &&
+                std::find(placementIgnore_->begin(), placementIgnore_->end(), &other) !=
+                    placementIgnore_->end())
+                continue;
+            const dat::Unit *footprint = other.gateClosedUnit ? other.gateClosedUnit : other.unit;
+            const float extentX = std::max(0.05f, footprint->collisionSize[0]) + ownX - 0.01f;
+            const float extentY = std::max(0.05f, footprint->collisionSize[1]) + ownY - 0.01f;
+            if (std::abs(x - other.x) < extentX && std::abs(y - other.y) < extentY) return false;
+        }
+    }
     const int minX = std::max(0, (int)std::floor(x - radius));
     const int maxX = std::min(mapSize_ - 1, (int)std::floor(x + radius));
     const int minY = std::max(0, (int)std::floor(y - radius));
@@ -8536,10 +8826,10 @@ void Game::updateTriggers(float dt) {
 
 int Game::playerColorBase(int player) const {
     const auto &pc = assets_.dat().playerColours;
+    // Nature (uncaptured animals' flags, etc.) is grey (colour 6, base 128);
+    // entry 8 of the table is an unused blue.
     if (player <= 0)
-        return pc.size() > 8
-                   ? pc[8].playerColorBase
-                   : 0;
+        return pc.size() > 6 ? pc[6].playerColorBase : 128;
     const size_t playerIndex = (size_t)(player - 1);
     size_t colorIndex = playerIndex < players_.size() ? players_[playerIndex].color : playerIndex;
     if (localPlayer_ > 0) {
@@ -9095,6 +9385,45 @@ void Game::update(float dt, const InputState &in) {
         if (object.active && object.unit && object.unit->cls == 7 &&
             object.unit->type == dat::UT_Building)
             syncFarmTerrain(object);
+    for (const PendingCarcass &pending : pendingCarcasses_) {
+        Object *carcass = addObject(pending.deadUnit, pending.owner, pending.x, pending.y,
+                                    pending.facing, nextSpawnId_++);
+        if (!carcass) continue;
+        carcass->resourceType = 0;
+        carcass->resourceAmount = pending.amount;
+        carcass->carcassClass = pending.animalClass;
+        carcass->carcassDecay = pending.decay;
+        carcass->carcassHidden = pending.dying;
+        carcass->wander = false;
+        if (Object *animal = findObject(pending.animalId)) animal->carcassId = carcass->spawnId;
+    }
+    pendingCarcasses_.clear();
+    // Carcasses rot away: their food decays until none is left.
+    for (Object &carcass : objects_) {
+        if (!carcass.active || carcass.carcassClass < 0) continue;
+        carcass.carcassHidden = std::max(0.0f, carcass.carcassHidden - dt);
+        carcass.resourceAmount -= carcass.carcassDecay * dt;
+        if (carcass.resourceAmount <= 0.001f) {
+            carcass.resourceAmount = 0.0f;
+            killObject(carcass, false);
+        }
+    }
+    // Animal Nursery (garrison type 16): each garrisoned animal adds the
+    // nursery's work rate in food per second to its owner.
+    for (const Object &nursery : objects_) {
+        if (!nursery.active || nursery.underConstruction || nursery.player <= 0 ||
+            !nursery.unit || nursery.unit->type != dat::UT_Building ||
+            !(nursery.unit->garrisonType & 16))
+            continue;
+        size_t animals = 0;
+        for (const Object &animal : objects_)
+            if (animal.active && animal.garrisonedInId == (int32_t)nursery.spawnId &&
+                animal.unit && animal.unit->cls == 1)
+                animals++;
+        if (animals)
+            resources_[(size_t)nursery.player][0] +=
+                std::max(0.0f, nursery.unit->workRate) * (float)animals * dt;
+    }
     // Damage graphics (fire/smoke stages) carry their own sound, played each
     // animation cycle like any graphic sound while the building is heard.
     for (Object &object : objects_) {
@@ -9419,8 +9748,9 @@ void Game::update(float dt, const InputState &in) {
                 return false;
             }();
         bool garrisonable = false;
-        if (!selectedWorker && hovered && hovered->player == localPlayer_ &&
-            hovered->unit->type == dat::UT_Building && hovered->unit->garrisonCapacity > 0)
+        if (hovered && hovered->player == localPlayer_ &&
+            hovered->unit->garrisonCapacity > 0 &&
+            (!selectedWorker || isTransport(*hovered)))
             for (const Object &object : objects_)
                 if (object.selected && isSelectable(object) && canGarrison(object, *hovered)) {
                     garrisonable = true;
@@ -10129,7 +10459,7 @@ void Game::drawGraphicNow(Renderer &r, int graphicId, float sx, float sy, float 
 void Game::render(Renderer &r, int screenW, int screenH) {
     stats_ = FrameStats{};
     g_textScale = zoom_;
-    assets_.beginTerrainFrame(64u * 1024u * 1024u);
+    assets_.beginTerrainFrame(textureBudget_);
     const float viewW = screenW / zoom_, viewH = screenH / zoom_;
     const float ox = camX_ - viewW / 2, oy = camY_ - viewH / 2; // world-pixel of screen top-left
     const bool overview = zoom_ < 0.6f;
@@ -10159,7 +10489,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         panelShieldPoints += object->shieldPoints;
         panelMaxShieldPoints +=
             object->maxShieldPoints;
-        if (!canAttack(*object)) continue;
+        if (!canAttack(*object) || object->unit->type == dat::UT_Building) continue;
         if (!selectedAttacker)
             selectedAttacker = object;
         else if (selectedAttacker->attackMode != object->attackMode)
@@ -10315,7 +10645,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
 
     g_draws.clear();
     for (const Object &o : objects_) {
-        if (!o.active || o.hidden || !o.draw) continue;
+        if (!o.active || o.hidden || !o.draw || o.carcassHidden > 0.0f) continue;
         if (overview &&
             (o.unit->type == dat::UT_Trees || o.unit->type == dat::UT_AoeTrees)) {
             const uint32_t x = (uint32_t)std::lround(o.x * 2.0f);
@@ -11524,38 +11854,27 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         if (!panelMixedUnits &&
             isWorker(*panelObject) &&
             hasCarry(*panelObject)) {
-            static constexpr const char
-                *resourceNames[] = {
-                    "FOOD", "CARBON", "ORE", "NOVA",
-                };
-            const dat::Unit *gatherer =
-                gathererUnit(*panelObject);
-            const int resourceType =
-                panelObject->carriedResourceType;
-            combatLine =
-                std::string("CARRY ") +
-                (resourceType >= 0 &&
-                         resourceType < 4
-                     ? resourceNames[
-                           (size_t)resourceType]
-                     : "RESOURCE") +
-                " " +
-                std::to_string((int)std::lround(
-                    panelObject->carriedAmount)) +
-                " / " +
-                std::to_string(
-                    gatherer
-                        ? std::max<int16_t>(
-                              1,
-                              gatherer
-                                  ->resourceCapacity)
-                        : 0);
-            // Stashed loads from earlier jobs are shown alongside.
-            if (panelObject->carriedAmount <= 0.001f) combatLine = "CARRY";
-            for (int type = 0; type < 4; type++)
-                if (panelObject->stash[(size_t)type] > 0.001f)
-                    combatLine += std::string("  ") + resourceNames[(size_t)type] + " " +
-                                  std::to_string((int)std::lround(panelObject->stash[(size_t)type]));
+            // Carried resources as item icons (itemicon 2 food, 0 carbon,
+            // 1 ore, 3 nova) beside the stats; the current load shows its
+            // capacity. Rollover: the resource's original help (43201+slot).
+            static constexpr int resourceIcon[] = {2, 0, 1, 3};
+            static constexpr int slotForResource[] = {1, 0, 3, 2};
+            const dat::Unit *gatherer = gathererUnit(*panelObject);
+            for (int type = 0; type < 4; type++) {
+                float amount = panelObject->stash[(size_t)type];
+                std::string text;
+                if (panelObject->carriedResourceType == type &&
+                    panelObject->carriedAmount > 0.001f) {
+                    amount += panelObject->carriedAmount;
+                    text = std::to_string((int)std::lround(amount)) + "/" +
+                           std::to_string(gatherer ? std::max<int16_t>(1, gatherer->resourceCapacity) : 0);
+                } else if (amount > 0.001f) {
+                    text = std::to_string((int)std::lround(amount));
+                } else {
+                    continue;
+                }
+                statRows.push_back({resourceIcon[type], text, 43201 + slotForResource[type]});
+            }
         }
         if (!combatLine.empty())
             drawBitmapText(

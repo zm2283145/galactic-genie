@@ -2,6 +2,7 @@
 // Asset manager: owns the DRS archives, palette and dat, and turns SLPs into
 // GPU texture atlases on demand.
 #pragma once
+#include <algorithm>
 
 #include "../core/blendomatic.h"
 #include "../core/drs.h"
@@ -78,6 +79,17 @@ public:
     void beginTerrainFrame(size_t textureBudget);
 
     size_t textureBytes() const { return textureBytes_; }
+    // Sheets built so far (a steadily rising count means cache thrash).
+    size_t buildCount() const { return buildCount_; }
+    // Largest cached sprite sheets: (bytes, slp id).
+    std::vector<std::pair<size_t, int>> largestSheets(size_t n) const {
+        std::vector<std::pair<size_t, int>> list;
+        for (const auto &entry : sheets_)
+            if (entry.second) list.push_back({entry.second->bytes, (int)(uint32_t)(entry.first >> 16)});
+        std::sort(list.rbegin(), list.rend());
+        if (list.size() > n) list.resize(n);
+        return list;
+    }
     size_t sheetCount() const { return sheets_.size() + slopeFrames_.size() + slopeBlendMasks_.size(); }
 
 private:
@@ -120,6 +132,7 @@ private:
     bool selectionRingAttempted_ = false;
     std::vector<std::vector<SpriteFrame>> blendMasks_;
     size_t textureBytes_ = 0;
+    size_t buildCount_ = 0;
     size_t terrainTextureBudget_ = SIZE_MAX;
     uint64_t terrainGeneration_ = 0;
 };

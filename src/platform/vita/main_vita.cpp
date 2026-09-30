@@ -187,6 +187,8 @@ int main() {
         float cursorX = kScreenW * 0.5f, cursorY = kScreenH * 0.5f;
         int menuStickY = 0;
         uint64_t last = sceKernelGetProcessTimeWide();
+        uint64_t budgetT = 0;
+        size_t lastBuilds = 0;
         uint64_t statT = last;
         int frames = 0;
 
@@ -322,16 +324,30 @@ int main() {
                 touching = false;
             }
 
+            // Sprite cache budget follows the GPU memory actually free: a
+            // fixed 64 MB cap made busy scenes evict and rebuild sheets every
+            // frame (the drops to 4-13 fps).
+            if (now - budgetT >= 1000000) {
+                budgetT = now;
+                const size_t freeBytes = vglMemFree(VGL_MEM_ALL);
+                const size_t reserve = 24u * 1024u * 1024u;
+                size_t budget = assets.textureBytes() + (freeBytes > reserve ? freeBytes - reserve : 0);
+                budget = std::max<size_t>(48u * 1024u * 1024u, std::min<size_t>(budget, 200u * 1024u * 1024u));
+                game.setTextureBudget(budget);
+            }
             game.update(dt, in);
             game.render(renderer, kScreenW, kScreenH);
             vglSwapBuffers(GL_FALSE);
 
             frames++;
             if (now - statT >= 5000000) {
-                logf("fps=%.1f draws=%d quads=%d tiles=%d sprites=%d sheets=%u tex=%.1fMB zoom=%.2f",
+                logf("fps=%.1f draws=%d quads=%d tiles=%d sprites=%d sheets=%u tex=%.1fMB builds=%u free=%.1fMB zoom=%.2f",
                      frames * 1e6 / (double)(now - statT), renderer.drawCalls(), renderer.quads(),
                      game.stats().tiles, game.stats().sprites, (unsigned)assets.sheetCount(),
-                     assets.textureBytes() / 1048576.0, game.zoom());
+                     assets.textureBytes() / 1048576.0,
+                     (unsigned)(assets.buildCount() - lastBuilds),
+                     vglMemFree(VGL_MEM_ALL) / 1048576.0, game.zoom());
+                lastBuilds = assets.buildCount();
                 frames = 0;
                 statT = now;
             }

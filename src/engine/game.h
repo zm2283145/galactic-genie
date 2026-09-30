@@ -119,8 +119,12 @@ public:
     int placeGateForTesting(uint32_t workerId, int civilization, float x, float y);
     bool garrisonForTesting(uint32_t unitId, uint32_t buildingId) {
         Object *u = findObject(unitId);
-        if (!u) return false;
+        Object *b = findObject(buildingId);
+        if (!u || !b || !canGarrison(*u, *b)) return false;
         u->garrisonTargetId = buildingId;
+        float tx = 0, ty = 0;
+        interactionPoint(*u, *b, 0.35f, tx, ty);
+        issueMove(*u, tx, ty, b, 0.35f);
         return true;
     }
     int garrisonVolleyForTesting(uint32_t buildingId) const {
@@ -249,6 +253,19 @@ public:
         const Object *o = findObject(spawnId);
         return o && type >= 0 && type < 4 ? o->stash[(size_t)type] : 0.0f;
     }
+    void setTextureBudget(size_t bytes) { textureBudget_ = bytes; }
+    int reseedQueueForTesting(int player) const { return reseedQueue_[(size_t)player]; }
+    bool issueAttackForTesting(uint32_t sourceId, uint32_t targetId) {
+        Object *a = findObject(sourceId);
+        Object *b = findObject(targetId);
+        if (!a || !b) return false;
+        issueAttack(*a, *b, std::atan2(a->y - b->y, a->x - b->x));
+        return true;
+    }
+    void setAttackModeForTesting(uint32_t spawnId, int mode) {
+        if (Object *o = findObject(spawnId)) o->attackMode = (AttackMode)mode;
+    }
+    void clearSelectionForTesting() { clearSelection(); }
     int terrainAtForTesting(int x, int y) const { return terrainAt(x, y); }
     void setObjectResourceForTesting(uint32_t spawnId, float amount) {
         if (Object *o = findObject(spawnId)) o->resourceAmount = amount;
@@ -387,6 +404,14 @@ private:
         float gateOpenAmount = 0;
         float gateCloseTimer = 0;
         bool felled = false; // carbon tree cut down, still holding resources
+        // Hunted/slaughtered animals leave a carcass object holding their food,
+        // which decays at the animal's resource decay rate (per second).
+        uint32_t annexParentId = 0; // gate posts: the gate they belong to
+        uint32_t carcassId = 0;   // on the dead animal: its carcass
+        int carcassClass = -1;    // on a carcass: the animal's class
+        float carcassDecay = 0.0f;
+        float carcassHidden = 0.0f; // not drawn while the dying animation plays
+        float huntTimer = 0.0f;
         float damageSoundTime = 0.0f; // next fire/damage graphic sound
         int farmStage = -1; // farm terrain applied: 0 build, 1 grown, 2 dead
         std::vector<uint8_t> farmUnderlay; // terrain under a farm foundation
@@ -441,6 +466,8 @@ private:
         // only hurt it if they land on it.
         bool groundAimed = false;
         float aimX = 0, aimY = 0;
+        float blastWidth = 0;   // splash radius (attacker or projectile)
+        int blastLevel = 3;     // 3 = target only; <= 2 also hits friends
     };
 
     struct Remains {
@@ -486,6 +513,17 @@ private:
                       int32_t garrisonedInId = -1, bool triggerAddressable = true);
     Object *findObject(uint32_t spawnId);
     bool isFlatFootprint(const Object &object) const;
+    void applyBlast(uint32_t sourceId, int sourcePlayer, float x, float y, uint32_t primaryId,
+                    float width, int level, int fallbackDamage);
+    float minimumRange(const Object &source) const;
+    bool isLiveAnimal(const Object &object) const;
+    int gatherClass(const Object &target) const {
+        return target.carcassClass >= 0 ? target.carcassClass : (target.unit ? target.unit->cls : -1);
+    }
+    bool hasGarrisonTask(const Object &unit, const Object &container) const;
+    bool isTransport(const Object &object) const;
+    bool isFoodProcessingCenter(const Object &building) const;
+    bool queueFarmReseed(const Object &building, const dat::Unit &farm);
     int carryTypeForSite(const Object &worker) const;
     bool siteAcceptsType(const Object &worker, const Object &building, int type) const;
     bool hasCarry(const Object &worker) const;
@@ -818,6 +856,16 @@ private:
     }
     float selectionClickAge_ = 1000.0f;
     float animClock_ = 0.0f;
+    size_t textureBudget_ = 64u * 1024u * 1024u;
+    static constexpr int kReseedQueueMax = 40;
+    std::array<int, 17> reseedQueue_{}; // prepaid farm reseeds per player
+    struct PendingCarcass {
+        const dat::Unit *deadUnit = nullptr;
+        float amount = 0, decay = 0, x = 0, y = 0, facing = 0, dying = 0;
+        int animalClass = -1, owner = 0;
+        uint32_t animalId = 0;
+    };
+    std::vector<PendingCarcass> pendingCarcasses_;
     float lastSelectionX_ = 0, lastSelectionY_ = 0;
     int lastSelectionUnitId_ = -1;
     std::vector<uint32_t> selectionOrder_;

@@ -510,6 +510,7 @@ const SpriteFrame *Assets::terrainSlopeFrame(int32_t slpId, int slope, size_t fr
 }
 
 const SpriteSheet *Assets::build(ResourceSet &set, int32_t slpId, int playerColorBase, uint64_t key) {
+    buildCount_++;
     std::vector<uint8_t> data;
     if (slpId < 0 || !set.read(slpId, data)) {
         sheets_[key] = nullptr;
