@@ -8,6 +8,7 @@
 #   tools\deploy_vita.ps1 -MusicData     # copies the original streamed soundtrack
 #   tools\deploy_vita.ps1 -TerrainSoundData # copies camera-relative terrain ambience
 #   tools\deploy_vita.ps1 -LanguageData  # copies localized interface strings
+#   tools\deploy_vita.ps1 -AiData        # copies the original .per AI personalities
 #   tools\deploy_vita.ps1 -PullLog      # downloads ux0:data/swgb/swgb.log to build-vita\swgb.log
 param(
     [string]$Vita = "10.1.1.93",
@@ -17,6 +18,7 @@ param(
     [string]$SoundDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Sound\Scenario",
     [string]$MusicDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\MUSIC",
     [string]$TerrainSoundDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Sound\Terrain",
+    [string]$AiDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\AI",
     [int]$CampaignEntry = 2,
     [switch]$Vpk,
     [switch]$GameData,
@@ -26,6 +28,7 @@ param(
     [switch]$MusicData,
     [switch]$TerrainSoundData,
     [switch]$LanguageData,
+    [switch]$AiData,
     [switch]$PullLog
 )
 $ErrorActionPreference = "Stop"
@@ -121,6 +124,12 @@ if ($LanguageData) {
     $gameRoot = Split-Path -Parent $GameDir
     foreach ($f in "language.dll", "language_x1.dll", "language_x2.dll") {
         Ftp-Put (Join-Path $gameRoot $f) "ux0:/data/swgb/Data/$f"
+    }
+}
+if ($AiData) {
+    Ftp-MkDir "ux0:/data/swgb/AI"
+    foreach ($file in Get-ChildItem -LiteralPath $AiDir -File -Filter *.per) {
+        Ftp-Put $file.FullName "ux0:/data/swgb/AI/$($file.Name)"
     }
 }
 if ($Vpk) { Ftp-Put (Join-Path $repo "build-vita\swgb.vpk") "ux0:/data/swgb/swgb.vpk" }

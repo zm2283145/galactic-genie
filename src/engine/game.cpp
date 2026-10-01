@@ -330,6 +330,7 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     players_ = {};
     resources_ = {};
     researchedTechs_ = {};
+    aiPlayers_ = {};
     techGeneration_++;
     disabledTechs_ = {};
     disabledUnits_ = {};
@@ -390,6 +391,7 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     players_[0].diplomacy[2] = 3;
     players_[1].active = true;
     players_[1].civilization = 3;
+    players_[1].populationLimit = 200;
     players_[1].diplomacy[1] = 3;
     localPlayer_ = 1;
     mapSize_ = mapSize;
@@ -521,6 +523,7 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     players_ = scenario.players;
     resources_ = {};
     researchedTechs_ = {};
+    aiPlayers_ = {};
     techGeneration_++;
     disabledTechs_ = {};
     disabledUnits_ = {};
@@ -716,6 +719,128 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     return true;
 }
 
+bool Game::loadAiScript(
+    int player, const std::string &path,
+    const std::unordered_set<std::string> &defines,
+    std::string *err) {
+    if (player <= 0 ||
+        (size_t)player >=
+            aiPlayers_.size()) {
+        if (err) *err = "invalid AI player";
+        return false;
+    }
+    AiPlayerState state;
+    if (!state.program.load(
+            path, defines, err))
+        return false;
+    state.loaded = true;
+    state.age =
+        aiTechLevel(player);
+    aiPlayers_[(size_t)player] =
+        std::move(state);
+    log(
+        "AI player " +
+        std::to_string(player) +
+        " loaded " +
+        std::to_string(
+            aiPlayers_[(size_t)player]
+                .program.rules.size()) +
+        " rules");
+    return true;
+}
+
+bool Game::loadAiSourceForTesting(
+    int player, const std::string &name,
+    const std::string &source,
+    const std::unordered_set<std::string> &defines,
+    std::string *err) {
+    if (player <= 0 ||
+        (size_t)player >=
+            aiPlayers_.size()) {
+        if (err) *err = "invalid AI player";
+        return false;
+    }
+    AiPlayerState state;
+    if (!state.program.loadSource(
+            name, source, defines, err))
+        return false;
+    state.loaded = true;
+    state.age =
+        aiTechLevel(player);
+    aiPlayers_[(size_t)player] =
+        std::move(state);
+    return true;
+}
+
+size_t Game::aiRuleCountForTesting(
+    int player) const {
+    return player > 0 &&
+                   (size_t)player <
+                       aiPlayers_.size()
+               ? aiPlayers_[(size_t)player]
+                     .program.rules.size()
+               : 0;
+}
+
+int Game::aiGoalForTesting(
+    int player, int goal) const {
+    if (player <= 0 ||
+        (size_t)player >=
+            aiPlayers_.size())
+        return 0;
+    const auto &goals =
+        aiPlayers_[(size_t)player].goals;
+    const auto found = goals.find(goal);
+    return found == goals.end()
+               ? 0
+               : found->second;
+}
+
+int Game::aiStrategicNumberForTesting(
+    int player,
+    const std::string &name) const {
+    if (player <= 0 ||
+        (size_t)player >=
+            aiPlayers_.size())
+        return 0;
+    const auto &numbers =
+        aiPlayers_[(size_t)player]
+            .strategicNumbers;
+    const auto found =
+        numbers.find(
+            normalizeAiSymbol(name));
+    return found == numbers.end()
+               ? 0
+               : found->second;
+}
+
+int Game::aiObjectCountForTesting(
+    int player,
+    const std::string &symbol,
+    bool includeFoundations) const {
+    const dat::Unit *unit =
+        aiUnit(player, symbol);
+    return unit
+               ? aiObjectCount(
+                     player, *unit,
+                     includeFoundations)
+               : 0;
+}
+
+size_t Game::aiQueuedUnitCountForTesting(
+    int player, int unitId) const {
+    size_t count = 0;
+    for (const Object &building : objects_)
+        if (building.active &&
+            building.player == player)
+            for (const ProductionItem &item :
+                 building.productionQueue)
+                if (item.unit &&
+                    item.unit->id == unitId)
+                    count++;
+    return count;
+}
+
 void Game::generateTerrain(int size) {
     terrain_.assign((size_t)size * size, T_GRASS1);
     cornerElevation_.assign((size_t)(size + 1) * (size + 1), 0);
@@ -785,10 +910,16 @@ const dat::Unit *Game::findUnit(int civ, const std::string &name) const {
     const auto &civs = assets_.dat().civs;
     if (civ < 0 || (size_t)civ >= civs.size()) return nullptr;
     for (const auto &u : civs[civ].units)
-        if (u.exists && u.name == name) return &u;
+        if (u.exists &&
+            (u.name == name ||
+             u.name2 == name))
+            return &u;
     // Fall back to a substring match (gaia names differ between releases).
     for (const auto &u : civs[civ].units)
-        if (u.exists && u.name.find(name) != std::string::npos) return &u;
+        if (u.exists &&
+            (u.name.find(name) != std::string::npos ||
+             u.name2.find(name) != std::string::npos))
+            return &u;
     return nullptr;
 }
 
@@ -11166,6 +11297,1004 @@ bool Game::selectObjectsForTesting(
     return !selectionOrder_.empty();
 }
 
+const dat::Unit *Game::aiUnit(
+    int player,
+    const std::string &symbol) const {
+    const int civilization =
+        civilizationForPlayer(player);
+    const dat::Unit *unit =
+        findUnit(civilization, symbol);
+    if (!unit && civilization != 0)
+        unit = findUnit(0, symbol);
+    return unit
+               ? effectiveUnitForPlayer(
+                     player, unit)
+               : nullptr;
+}
+
+int Game::aiTechnology(
+    const std::string &symbol) const {
+    const std::string name =
+        normalizeAiSymbol(symbol);
+    if (name == "tech-level-2") return 1;
+    if (name == "tech-level-3") return 2;
+    if (name == "tech-level-4") return 3;
+    const auto &technologies =
+        assets_.dat().techs;
+    for (size_t index = 0;
+         index < technologies.size();
+         ++index) {
+        const dat::Tech &technology =
+            technologies[index];
+        if (normalizeAiSymbol(
+                technology.name) == name ||
+            normalizeAiSymbol(
+                technology.name2) == name)
+            return (int)index;
+    }
+    return -1;
+}
+
+int Game::aiTechLevel(int player) const {
+    if (player <= 0 ||
+        (size_t)player >=
+            researchedTechs_.size())
+        return 1;
+    if (researchedTechs_[(size_t)player]
+            .count(3))
+        return 4;
+    if (researchedTechs_[(size_t)player]
+            .count(2))
+        return 3;
+    if (researchedTechs_[(size_t)player]
+            .count(1))
+        return 2;
+    return 1;
+}
+
+int Game::aiObjectCount(
+    int player, const dat::Unit &unit,
+    bool includeFoundations) const {
+    int count = 0;
+    for (const Object &object : objects_) {
+        if (!object.active ||
+            object.hidden ||
+            object.player != player ||
+            !object.unit ||
+            (!includeFoundations &&
+             object.underConstruction))
+            continue;
+        if (unit.cls == 58) {
+            if (isWorker(object)) count++;
+            continue;
+        }
+        const dat::Unit *effective =
+            effectiveUnitForPlayer(
+                player, &unit);
+        if (object.unit->id == unit.id ||
+            (effective &&
+             object.unit->id ==
+                 effective->id))
+            count++;
+    }
+    return count;
+}
+
+bool Game::aiCanAfford(
+    int player,
+    const dat::Unit &unit) const {
+    if (player <= 0 ||
+        (size_t)player >=
+            resources_.size())
+        return false;
+    for (const dat::ResourceCost &cost :
+         unit.costs)
+        if (cost.flag && cost.type >= 0 &&
+            cost.amount > 0 &&
+            resource(player, cost.type) <
+                cost.amount)
+            return false;
+    return true;
+}
+
+bool Game::aiCanAfford(
+    int player,
+    const dat::Tech &technology) const {
+    if (player <= 0 ||
+        (size_t)player >=
+            resources_.size())
+        return false;
+    for (const dat::Tech::Cost &cost :
+         technology.costs)
+        if (cost.flag && cost.type >= 0 &&
+            cost.amount > 0 &&
+            resource(player, cost.type) <
+                cost.amount)
+            return false;
+    return true;
+}
+
+bool Game::aiBuild(
+    int player, const dat::Unit &unit) {
+    if (unit.type != dat::UT_Building ||
+        !unitAvailable(player, unit.id) ||
+        !aiCanAfford(player, unit))
+        return false;
+    Object *worker = nullptr;
+    for (Object &candidate : objects_)
+        if (candidate.active &&
+            !candidate.hidden &&
+            candidate.player == player &&
+            isWorker(candidate) &&
+            !candidate.constructionTargetId &&
+            !candidate.repairTargetId &&
+            candidate.garrisonedInId < 0) {
+            worker = &candidate;
+            if (!candidate.gatherTargetId)
+                break;
+        }
+    if (!worker) return false;
+
+    float centerX = worker->x;
+    float centerY = worker->y;
+    int resourceType = -1;
+    const std::string symbol =
+        normalizeAiSymbol(
+            unit.name2.empty()
+                ? unit.name
+                : unit.name2);
+    if (symbol.find("dropcarbon") !=
+        std::string::npos)
+        resourceType = 1;
+    else if (
+        symbol.find("dropchow") !=
+        std::string::npos)
+        resourceType = 0;
+    else if (
+        symbol.find("dropnova") !=
+        std::string::npos)
+        resourceType = 3;
+    else if (
+        symbol.find("dropmetal") !=
+        std::string::npos)
+        resourceType = 2;
+    const Object *resource = nullptr;
+    float resourceDistance =
+        std::numeric_limits<float>::max();
+    if (resourceType >= 0)
+        for (const Object &candidate :
+             objects_) {
+            if (!isGatherable(candidate) ||
+                candidate.resourceType !=
+                    resourceType)
+                continue;
+            const float dx =
+                candidate.x - worker->x;
+            const float dy =
+                candidate.y - worker->y;
+            const float distance =
+                dx * dx + dy * dy;
+            if (distance <
+                resourceDistance) {
+                resource = &candidate;
+                resourceDistance = distance;
+            }
+        }
+    if (resource) {
+        centerX = resource->x;
+        centerY = resource->y;
+    } else {
+        for (const Object &building :
+             objects_)
+            if (building.active &&
+                !building.hidden &&
+                !building.underConstruction &&
+                building.player == player &&
+                building.unit &&
+                building.unit->type ==
+                    dat::UT_Building) {
+                centerX = building.x;
+                centerY = building.y;
+                break;
+            }
+    }
+
+    static constexpr int directions[8][2] = {
+        {1, 0},  {1, 1},  {0, 1},
+        {-1, 1}, {-1, 0}, {-1, -1},
+        {0, -1}, {1, -1},
+    };
+    float buildX = 0.0f;
+    float buildY = 0.0f;
+    bool found = false;
+    for (int radius = 3;
+         radius <= 14 && !found;
+         ++radius)
+        for (const auto &direction :
+             directions) {
+            float x =
+                centerX +
+                direction[0] * radius;
+            float y =
+                centerY +
+                direction[1] * radius;
+            snapBuildingPosition(unit, x, y);
+            if (!placementValid(
+                    unit, x, y))
+                continue;
+            buildX = x;
+            buildY = y;
+            found = true;
+            break;
+        }
+    if (!found) return false;
+    for (const dat::ResourceCost &cost :
+         unit.costs)
+        if (cost.flag && cost.type >= 0 &&
+            cost.amount > 0)
+            resources_[(size_t)player]
+                      [cost.type] -=
+                cost.amount;
+    Object *foundation =
+        createFoundation(
+            unit, player, buildX, buildY);
+    if (!foundation) {
+        for (const dat::ResourceCost &cost :
+             unit.costs)
+            if (cost.flag &&
+                cost.type >= 0 &&
+                cost.amount > 0)
+                resources_[(size_t)player]
+                          [cost.type] +=
+                    cost.amount;
+        return false;
+    }
+    rebuildAdjacency();
+    return assignBuilder(
+        *worker, *foundation);
+}
+
+bool Game::aiTrain(
+    int player, const dat::Unit &unit) {
+    if (!unitAvailable(player, unit.id) ||
+        !aiCanAfford(player, unit))
+        return false;
+    const float population =
+        populationUse(unit);
+    if (population > 0.0f &&
+        populationUsed(player) +
+                population >
+            populationCapacity(player) +
+                0.001f)
+        return false;
+    Object *producer = nullptr;
+    for (Object &building : objects_) {
+        if (!building.active ||
+            building.hidden ||
+            building.underConstruction ||
+            building.player != player ||
+            building.productionQueue.size() >=
+                5)
+            continue;
+        const auto &options =
+            productionOptions(building);
+        if (std::find_if(
+                options.begin(),
+                options.end(),
+                [&](const dat::Unit *option) {
+                    return option &&
+                           option->id ==
+                               unit.id;
+                }) != options.end()) {
+            producer = &building;
+            break;
+        }
+    }
+    if (!producer) return false;
+    for (const dat::ResourceCost &cost :
+         unit.costs)
+        if (cost.flag && cost.type >= 0 &&
+            cost.amount > 0)
+            resources_[(size_t)player]
+                      [cost.type] -=
+                cost.amount;
+    ProductionItem item;
+    item.unit = &unit;
+    item.duration =
+        std::max(
+            0.1f,
+            (float)unit.trainTime);
+    producer->productionQueue.push_back(
+        item);
+    if (producer->productionQueue.size() ==
+        1)
+        producer->productionRemaining =
+            item.duration;
+    return true;
+}
+
+bool Game::aiResearch(
+    int player, int technologyId) {
+    if (technologyId < 0 ||
+        (size_t)technologyId >=
+            assets_.dat().techs.size() ||
+        researchedTechs_[(size_t)player]
+            .count(technologyId))
+        return false;
+    const dat::Tech &technology =
+        assets_.dat()
+            .techs[(size_t)technologyId];
+    if (!technologyRequirementsMet(
+            player, technology) ||
+        !aiCanAfford(player, technology))
+        return false;
+    Object *researcher = nullptr;
+    for (Object &building : objects_) {
+        if (!building.active ||
+            building.hidden ||
+            building.underConstruction ||
+            building.player != player ||
+            building.productionQueue.size() >=
+                5)
+            continue;
+        const auto &options =
+            researchOptions(building);
+        if (std::find(
+                options.begin(), options.end(),
+                technologyId) !=
+            options.end()) {
+            researcher = &building;
+            break;
+        }
+    }
+    if (!researcher) return false;
+    for (const dat::Tech::Cost &cost :
+         technology.costs)
+        if (cost.flag && cost.type >= 0 &&
+            cost.amount > 0)
+            resources_[(size_t)player]
+                      [cost.type] -=
+                cost.amount;
+    ProductionItem item;
+    item.technologyId = technologyId;
+    item.duration =
+        std::max(
+            0.1f,
+            (float)technology.researchTime);
+    researcher->productionQueue.push_back(
+        item);
+    if (researcher->productionQueue.size() ==
+        1)
+        researcher->productionRemaining =
+            item.duration;
+    return true;
+}
+
+int Game::resolveAiValue(
+    int player, const AiPlayerState &state,
+    const std::string &value,
+    bool &known) const {
+    if (state.program.hasConstant(value)) {
+        known = true;
+        return state.program.constant(value);
+    }
+    static const std::map<std::string, int>
+        percentages = {
+            {"five-percent", 5},
+            {"ten-percent", 10},
+            {"fifteen-percent", 15},
+            {"twenty-percent", 20},
+            {"twenty-five-percent", 25},
+            {"thirty-percent", 30},
+            {"forty-percent", 40},
+            {"fifty-percent", 50},
+            {"sixty-percent", 60},
+            {"seventy-five-percent", 75},
+    };
+    const auto percentage =
+        percentages.find(
+            normalizeAiSymbol(value));
+    if (percentage != percentages.end()) {
+        known = true;
+        const float limit =
+            player > 0 &&
+                    (size_t)player <=
+                        players_.size()
+                ? players_[(size_t)player - 1]
+                      .populationLimit
+                : 0.0f;
+        return (int)std::lround(
+            limit * percentage->second /
+            100.0f);
+    }
+    known = false;
+    return 0;
+}
+
+bool Game::evaluateAiFactValue(
+    int player, AiPlayerState &state,
+    const AiNode &condition,
+    size_t argumentEnd, int &value) {
+    const std::string fact =
+        normalizeAiSymbol(
+            condition.name());
+    if (fact == "current-age") {
+        value = aiTechLevel(player);
+        return true;
+    }
+    if (fact == "current-age-time") {
+        value =
+            (int)std::floor(state.ageTime);
+        return true;
+    }
+    if (fact == "difficulty") {
+        value = difficulty_;
+        return true;
+    }
+    if (fact == "population") {
+        value = (int)std::floor(
+            populationUsed(player));
+        return true;
+    }
+    if (fact == "housing-headroom") {
+        value = (int)std::floor(
+            populationCapacity(player) -
+            populationUsed(player));
+        return true;
+    }
+    if (fact == "population-headroom") {
+        const float limit =
+            players_[(size_t)player - 1]
+                .populationLimit;
+        value = (int)std::floor(
+            limit -
+            populationUsed(player));
+        return true;
+    }
+    if (fact == "food-amount" ||
+        fact == "carbon-amount" ||
+        fact == "metal-amount" ||
+        fact == "ore-amount" ||
+        fact == "nova-amount") {
+        const int type =
+            fact == "food-amount"
+                ? 0
+                : fact == "carbon-amount"
+                      ? 1
+                      : fact == "nova-amount"
+                            ? 3
+                            : 2;
+        value = (int)std::floor(
+            resource(player, type));
+        return true;
+    }
+    const bool buildingCount =
+        fact == "building-type-count" ||
+        fact ==
+            "building-type-count-total";
+    const bool unitCount =
+        fact == "unit-type-count" ||
+        fact == "unit-type-count-total";
+    if ((buildingCount || unitCount) &&
+        argumentEnd >= 2) {
+        const dat::Unit *unit =
+            aiUnit(
+                player,
+                condition.children[1]
+                    .value);
+        if (!unit) return false;
+        value = aiObjectCount(
+            player, *unit,
+            fact.find("-total") !=
+                std::string::npos);
+        return true;
+    }
+    return false;
+}
+
+Game::AiTruth Game::evaluateAiCondition(
+    int player, AiPlayerState &state,
+    const AiNode &condition) {
+    if (!condition.isList())
+        return AiTruth::Unknown;
+    const std::string fact =
+        normalizeAiSymbol(
+            condition.name());
+    if (fact == "true")
+        return AiTruth::True;
+    if (fact == "false")
+        return AiTruth::False;
+    if (fact == "not") {
+        if (condition.children.size() != 2)
+            return AiTruth::Unknown;
+        const AiTruth nested =
+            evaluateAiCondition(
+                player, state,
+                condition.children[1]);
+        return nested == AiTruth::True
+                   ? AiTruth::False
+               : nested == AiTruth::False
+                   ? AiTruth::True
+                   : AiTruth::Unknown;
+    }
+    if (fact == "and" ||
+        fact == "or" ||
+        fact == "nor") {
+        bool unknown = false;
+        const bool conjunction =
+            fact == "and";
+        for (size_t index = 1;
+             index < condition.children.size();
+             ++index) {
+            const AiTruth nested =
+                evaluateAiCondition(
+                    player, state,
+                    condition.children[index]);
+            if (nested == AiTruth::Unknown)
+                unknown = true;
+            if (conjunction &&
+                nested == AiTruth::False)
+                return AiTruth::False;
+            if (!conjunction &&
+                nested == AiTruth::True)
+                return fact == "nor"
+                           ? AiTruth::False
+                           : AiTruth::True;
+        }
+        if (unknown) return AiTruth::Unknown;
+        if (conjunction) return AiTruth::True;
+        return fact == "nor"
+                   ? AiTruth::True
+                   : AiTruth::False;
+    }
+    if (fact == "goal" &&
+        condition.children.size() == 3) {
+        bool goalKnown = false;
+        bool valueKnown = false;
+        const int goal = resolveAiValue(
+            player, state,
+            condition.children[1].value,
+            goalKnown);
+        const int expected = resolveAiValue(
+            player, state,
+            condition.children[2].value,
+            valueKnown);
+        if (!goalKnown || !valueKnown)
+            return AiTruth::Unknown;
+        const auto found =
+            state.goals.find(goal);
+        const int actual =
+            found == state.goals.end()
+                ? 0
+                : found->second;
+        return actual == expected
+                   ? AiTruth::True
+                   : AiTruth::False;
+    }
+    if (fact == "death-match-game")
+        return AiTruth::False;
+    if (fact == "research-completed" &&
+        condition.children.size() == 2) {
+        const int technology =
+            aiTechnology(
+                condition.children[1]
+                    .value);
+        return technology < 0
+                   ? AiTruth::Unknown
+               : researchedTechs_[
+                     (size_t)player]
+                         .count(technology)
+                   ? AiTruth::True
+                   : AiTruth::False;
+    }
+    if (fact == "research-available" &&
+        condition.children.size() == 2) {
+        const int technology =
+            aiTechnology(
+                condition.children[1]
+                    .value);
+        if (technology < 0)
+            return AiTruth::Unknown;
+        const dat::Tech &tech =
+            assets_.dat().techs[
+                (size_t)technology];
+        return !researchedTechs_[
+                    (size_t)player]
+                    .count(technology) &&
+                       technologyRequirementsMet(
+                           player, tech)
+                   ? AiTruth::True
+                   : AiTruth::False;
+    }
+    if ((fact == "can-build" ||
+         fact == "can-train" ||
+         fact == "can-train-with-escrow") &&
+        condition.children.size() == 2) {
+        const dat::Unit *unit =
+            aiUnit(
+                player,
+                condition.children[1]
+                    .value);
+        if (!unit) return AiTruth::Unknown;
+        if (!unitAvailable(
+                player, unit->id) ||
+            !aiCanAfford(player, *unit))
+            return AiTruth::False;
+        if (fact == "can-build") {
+            const bool worker =
+                std::any_of(
+                    objects_.begin(),
+                    objects_.end(),
+                    [&](const Object &object) {
+                        return object.active &&
+                               !object.hidden &&
+                               object.player ==
+                                   player &&
+                               isWorker(object) &&
+                               object.garrisonedInId <
+                                   0;
+                    });
+            return worker
+                       ? AiTruth::True
+                       : AiTruth::False;
+        }
+        if (populationUse(*unit) > 0 &&
+            populationUsed(player) +
+                    populationUse(*unit) >
+                populationCapacity(player) +
+                    0.001f)
+            return AiTruth::False;
+        for (const Object &building :
+             objects_) {
+            if (!building.active ||
+                building.hidden ||
+                building.underConstruction ||
+                building.player != player ||
+                building.productionQueue.size() >=
+                    5)
+                continue;
+            const auto &options =
+                productionOptions(building);
+            if (std::find_if(
+                    options.begin(),
+                    options.end(),
+                    [&](const dat::Unit *option) {
+                        return option &&
+                               option->id ==
+                                   unit->id;
+                    }) != options.end())
+                return AiTruth::True;
+        }
+        return AiTruth::False;
+    }
+
+    size_t comparison = 0;
+    for (size_t index = 1;
+         index < condition.children.size();
+         ++index) {
+        const std::string &token =
+            condition.children[index].value;
+        if (token == "==" ||
+            token == "!=" ||
+            token == "<" ||
+            token == "<=" ||
+            token == ">" ||
+            token == ">=") {
+            comparison = index;
+            break;
+        }
+    }
+    if (comparison > 0 &&
+        comparison + 1 <
+            condition.children.size()) {
+        int actual = 0;
+        if (!evaluateAiFactValue(
+                player, state, condition,
+                comparison, actual))
+            return AiTruth::Unknown;
+        bool known = false;
+        const int expected =
+            resolveAiValue(
+                player, state,
+                condition
+                    .children[comparison + 1]
+                    .value,
+                known);
+        if (!known)
+            return AiTruth::Unknown;
+        const std::string &op =
+            condition.children[comparison]
+                .value;
+        const bool result =
+            op == "==" ? actual == expected
+            : op == "!="
+                ? actual != expected
+            : op == "<"
+                ? actual < expected
+            : op == "<="
+                ? actual <= expected
+            : op == ">"
+                ? actual > expected
+                : actual >= expected;
+        return result ? AiTruth::True
+                      : AiTruth::False;
+    }
+    if (state.warnedFacts.insert(fact).second)
+        log(
+            "AI fact not implemented: " +
+            fact);
+    return AiTruth::Unknown;
+}
+
+bool Game::executeAiAction(
+    int player, AiPlayerState &state,
+    AiRule &rule, const AiNode &action) {
+    if (!action.isList()) return false;
+    const std::string name =
+        normalizeAiSymbol(action.name());
+    if (name == "disable-self") {
+        rule.enabled = false;
+        return true;
+    }
+    if (name == "set-goal" &&
+        action.children.size() == 3) {
+        bool goalKnown = false;
+        bool valueKnown = false;
+        const int goal = resolveAiValue(
+            player, state,
+            action.children[1].value,
+            goalKnown);
+        const int value = resolveAiValue(
+            player, state,
+            action.children[2].value,
+            valueKnown);
+        if (!goalKnown || !valueKnown)
+            return false;
+        state.goals[goal] = value;
+        return true;
+    }
+    if (name == "set-strategic-number" &&
+        action.children.size() == 3) {
+        bool known = false;
+        const int value = resolveAiValue(
+            player, state,
+            action.children[2].value,
+            known);
+        if (!known) return false;
+        state.strategicNumbers[
+            normalizeAiSymbol(
+                action.children[1].value)] =
+            value;
+        return true;
+    }
+    if ((name == "build" ||
+         name == "build-forward") &&
+        action.children.size() == 2) {
+        const dat::Unit *unit =
+            aiUnit(
+                player,
+                action.children[1].value);
+        return unit &&
+               aiBuild(player, *unit);
+    }
+    if (name == "train" &&
+        action.children.size() == 2) {
+        const dat::Unit *unit =
+            aiUnit(
+                player,
+                action.children[1].value);
+        return unit &&
+               aiTrain(player, *unit);
+    }
+    if (name == "research" &&
+        action.children.size() == 2)
+        return aiResearch(
+            player,
+            aiTechnology(
+                action.children[1].value));
+    if (name == "chat-local-to-self" ||
+        name == "release-escrow")
+        return true;
+    if (state.warnedActions.insert(name).second)
+        log(
+            "AI action not implemented: " +
+            name);
+    return false;
+}
+
+void Game::updateAiPlayer(
+    int player, AiPlayerState &state) {
+    if (state.program.rules.empty())
+        return;
+    constexpr size_t kRulesPerSlice = 96;
+    const size_t count =
+        state.program.rules.size();
+    for (size_t checked = 0;
+         checked < kRulesPerSlice &&
+         checked < count;
+         ++checked) {
+        AiRule &rule =
+            state.program.rules[
+                state.ruleCursor];
+        state.ruleCursor =
+            (state.ruleCursor + 1) %
+            count;
+        if (!rule.enabled) continue;
+        bool matches = true;
+        for (const AiNode &condition :
+             rule.conditions)
+            if (evaluateAiCondition(
+                    player, state,
+                    condition) !=
+                AiTruth::True) {
+                matches = false;
+                break;
+            }
+        if (!matches) continue;
+        for (const AiNode &action :
+             rule.actions)
+            executeAiAction(
+                player, state,
+                rule, action);
+    }
+}
+
+void Game::updateAiGatherers(
+    int player, AiPlayerState &state) {
+    static constexpr const char *names[4] = {
+        "sn-food-gatherer-percentage",
+        "sn-carbon-gatherer-percentage",
+        "sn-metal-gatherer-percentage",
+        "sn-nova-gatherer-percentage",
+    };
+    std::array<int, 4> percentages{};
+    int totalPercentage = 0;
+    for (int type = 0; type < 4;
+         ++type) {
+        const auto found =
+            state.strategicNumbers.find(
+                names[type]);
+        if (found !=
+            state.strategicNumbers.end())
+            percentages[(size_t)type] =
+                std::max(
+                    0, found->second);
+        totalPercentage +=
+            percentages[(size_t)type];
+    }
+    if (totalPercentage <= 0) return;
+    std::vector<Object *> workers;
+    std::array<int, 4> assigned{};
+    for (Object &worker : objects_) {
+        if (!worker.active ||
+            worker.hidden ||
+            worker.player != player ||
+            !isWorker(worker) ||
+            worker.garrisonedInId >= 0 ||
+            worker.constructionTargetId ||
+            worker.repairTargetId)
+            continue;
+        workers.push_back(&worker);
+        const Object *target =
+            findObject(
+                worker.gatherTargetId);
+        if (target &&
+            target->resourceType >= 0 &&
+            target->resourceType < 4)
+            assigned[(size_t)
+                         target->resourceType]++;
+    }
+    if (workers.empty()) return;
+    std::array<int, 4> desired{};
+    int allocated = 0;
+    for (int type = 0; type < 4;
+         ++type) {
+        desired[(size_t)type] =
+            (int)(workers.size() *
+                  percentages[(size_t)type] /
+                  totalPercentage);
+        allocated += desired[(size_t)type];
+    }
+    for (int type = 0;
+         allocated < (int)workers.size();
+         type = (type + 1) % 4)
+        if (percentages[(size_t)type] > 0) {
+            desired[(size_t)type]++;
+            allocated++;
+        }
+    for (int type = 0; type < 4;
+         ++type) {
+        while (assigned[(size_t)type] <
+               desired[(size_t)type]) {
+            Object *worker = nullptr;
+            for (Object *candidate :
+                 workers) {
+                const Object *target =
+                    findObject(
+                        candidate
+                            ->gatherTargetId);
+                const int current =
+                    target
+                        ? target->resourceType
+                        : -1;
+                if (current < 0 ||
+                    (current < 4 &&
+                     assigned[(size_t)current] >
+                         desired[(size_t)current])) {
+                    worker = candidate;
+                    if (current < 0) break;
+                }
+            }
+            if (!worker) break;
+            Object *resourceTarget = nullptr;
+            float best =
+                std::numeric_limits<float>::max();
+            for (Object &resource :
+                 objects_) {
+                if (!isGatherable(resource) ||
+                    resource.resourceType != type)
+                    continue;
+                const float dx =
+                    resource.x - worker->x;
+                const float dy =
+                    resource.y - worker->y;
+                const float distance =
+                    dx * dx + dy * dy;
+                if (distance < best) {
+                    best = distance;
+                    resourceTarget =
+                        &resource;
+                }
+            }
+            if (!resourceTarget) break;
+            const Object *oldTarget =
+                findObject(
+                    worker->gatherTargetId);
+            if (oldTarget &&
+                oldTarget->resourceType >= 0 &&
+                oldTarget->resourceType < 4)
+                assigned[(size_t)
+                             oldTarget
+                                 ->resourceType]--;
+            if (!issueGatherCommand(
+                    *worker,
+                    *resourceTarget))
+                break;
+            assigned[(size_t)type]++;
+        }
+    }
+}
+
+void Game::updateAi(float dt) {
+    for (size_t player = 1;
+         player < aiPlayers_.size();
+         ++player) {
+        AiPlayerState &state =
+            aiPlayers_[player];
+        if (!state.loaded) continue;
+        const int age =
+            aiTechLevel((int)player);
+        if (age != state.age) {
+            state.age = age;
+            state.ageTime = 0.0f;
+        } else {
+            state.ageTime += dt;
+        }
+        state.ruleTime -= dt;
+        if (state.ruleTime <= 0.0f) {
+            state.ruleTime = 0.25f;
+            updateAiPlayer(
+                (int)player, state);
+        }
+        state.economyTime -= dt;
+        if (state.economyTime <= 0.0f) {
+            state.economyTime = 2.0f;
+            updateAiGatherers(
+                (int)player, state);
+        }
+    }
+}
+
 void Game::update(float dt, const InputState &in) {
     // Placement armed by the build menu last frame may now take clicks.
     placementJustBegun_ = false;
@@ -11419,6 +12548,7 @@ void Game::update(float dt, const InputState &in) {
     }
 
     updateTriggers(dt);
+    updateAi(dt);
     struct ProductionSpawn {
         const dat::Unit *unit;
         int player;

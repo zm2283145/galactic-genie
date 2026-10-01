@@ -26,7 +26,47 @@ build and test on Vita.
 | Building attack approach | DAT rectangular collision footprints; attack action and path goal state | Covered; exact original slot ordering remains open |
 | Attack Ground | Command-panel construction at `0x503aca`; opcode `0x6b`; DAT blast/projectile fields | Verified and covered |
 | Firing presentation | DAT attack graphic, frame delay, projectile totals, secondary projectile, and impact data | Partially verified and covered |
-| AI scripts | Original `.per` parser, facts, actions, and managers | Not implemented |
+| AI scripts | Original Computer Expanded `.per` files and DAT `name2` aliases | First economy slice implemented and covered |
+
+## AI scripts
+
+The engine loads the original `.per` files from the user's installation rather
+than embedding or translating a personality. The parser handles comments,
+quoted strings, nested expressions, recursive `load` forms, conditional loads,
+constants, and rules. Loading `Computer Expanded.per` currently resolves 40
+source files into 311 constants and 1,423 rules.
+
+Runtime condition evaluation is three-valued: true, false, or unsupported.
+Unsupported facts remain unknown, including through `not`, so an unimplemented
+negative condition cannot accidentally enable a rule. Rules run in bounded
+slices instead of scanning the complete personality every frame.
+
+The first economy slice supports goals, strategic numbers, Tech Level and age
+time, difficulty, population and housing, resource amounts, unit/building
+counts, technology completion/availability, affordability, and Boolean and
+numeric comparisons. Its actions set goals and strategic numbers, disable
+rules, build, train, and research through the same placement, resource,
+population, production, and research systems used by the player. Gather
+percentages retask real idle workers to compatible original resource nodes.
+Original script symbols resolve against both DAT unit names and the secondary
+AI names stored in `name2`.
+
+Engine contract:
+
+- AI construction uses normal placement validation, creates a real foundation,
+  charges normal DAT costs, and assigns an available worker.
+- Training and research use normal building queues and population/resource
+  checks.
+- Gather allocations preserve builders, repairers, and garrisoned workers and
+  are rebalanced at a bounded cadence.
+- Unsupported facts block a rule and unsupported actions are reported once;
+  neither is silently treated as success.
+- Vita loads player 2's `Computer Expanded.per` from
+  `ux0:data/swgb/AI`; deployment copies the original `.per` directory only
+  when the user explicitly selects `-AiData`.
+- Scenario personality references, timers, escrow, strategic build-forward
+  placement, military managers, and the remaining facts/actions are still
+  open.
 
 ## Production exits
 

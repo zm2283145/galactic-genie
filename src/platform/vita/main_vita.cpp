@@ -29,6 +29,8 @@ namespace {
 
 const char *kRoot = "ux0:data/swgb";
 const char *kDataDir = "ux0:data/swgb/Data";
+const char *kAiPath =
+    "ux0:data/swgb/AI/Computer Expanded.per";
 const char *kCampaignPath = "ux0:data/swgb/Campaign/xcam3.cpx";
 const char *kScenarioSoundDir = "ux0:data/swgb/Sound/Scenario";
 const char *kMusicDir = "ux0:data/swgb/Music";
@@ -180,6 +182,16 @@ int main() {
             sceKernelExitProcess(0);
             return 0;
         }
+        std::string aiError;
+        if (!game.loadAiScript(
+                2, kAiPath,
+                {"DIFFICULTY-MODERATE"},
+                &aiError))
+            logf(
+                "AI player 2 disabled: %s "
+                "(copy the game's AI folder to "
+                "ux0:data/swgb/AI)",
+                aiError.c_str());
 
         SceCtrlData pad{}, prev{};
         SceTouchData touch{};

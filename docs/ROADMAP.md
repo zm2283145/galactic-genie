@@ -152,7 +152,13 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   executable's `archupg.wav` resource. User-facing volume controls remain.
 
 ## Milestone 5: AI and skirmish
-- A subset of the AI script interpreter (`.per` rules), checked against the original using Ghidra where needed.
+- The first original AI economy slice is implemented. The `.per` parser loads the complete 40-file
+  Computer Expanded personality (1,423 rules), including recursive/conditional loads, constants,
+  Boolean expressions, and three-valued unsupported facts. Goals and strategic numbers drive real
+  worker gathering; supported build, train, and research actions use normal placement, costs,
+  population, and queues. The compact Vita match loads player 2's original personality from the
+  separately deployed `AI` directory. Timers, escrow, scenario-selected personalities,
+  build-forward strategy, military managers, and the remaining facts/actions remain.
 - A skirmish setup screen, and victory/defeat conditions.
 
 ## Vita performance notes

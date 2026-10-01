@@ -23,6 +23,7 @@ set(SWGB_CORE_SOURCES
     src/core/genie_dat.cpp
     src/core/language_strings.cpp
     src/engine/assets.cpp
+    src/engine/ai_script.cpp
     src/engine/game.cpp
     src/engine/pathfinding.cpp
 )

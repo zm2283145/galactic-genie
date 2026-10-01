@@ -12,6 +12,7 @@
 #include "../src/core/genie_dat.h"
 #include "../src/core/scenario.h"
 #include "../src/engine/assets.h"
+#include "../src/engine/ai_script.h"
 #include "../src/engine/game.h"
 #include "../src/render/soft_renderer.h"
 
@@ -55,6 +56,8 @@ static int usage() {
             "  swgbtool simulate-scenario <DataDir> <file.cpx> <entry> [seconds] [out.png]\n"
             "  swgbtool test-controls <DataDir> <file.cpx> <entry> [out.png]\n"
             "  swgbtool test-combat <DataDir> [out.png]\n"
+            "  swgbtool ai-script <entry.per>\n"
+            "  swgbtool test-ai <DataDir> <AiDir>\n"
             "  swgbtool mp3 <file.mp3>\n");
     return 2;
 }
@@ -5527,6 +5530,247 @@ static int cmdBenchUi(const char *dataDir) {
     return 0;
 }
 
+static int cmdAiScript(const char *path) {
+    AiProgram program;
+    std::string err;
+    if (!program.load(
+            path,
+            {"DIFFICULTY-MODERATE"},
+            &err)) {
+        fprintf(
+            stderr, "error: %s\n",
+            err.c_str());
+        return 1;
+    }
+    size_t conditions = 0;
+    size_t actions = 0;
+    for (const AiRule &rule :
+         program.rules) {
+        conditions +=
+            rule.conditions.size();
+        actions += rule.actions.size();
+    }
+    printf(
+        "AI: %zu files, %zu constants, "
+        "%zu rules, %zu conditions, "
+        "%zu actions\n",
+        program.files.size(),
+        program.constants.size(),
+        program.rules.size(),
+        conditions, actions);
+    return program.rules.empty() ? 1 : 0;
+}
+
+static int cmdTestAi(
+    const char *dataDir,
+    const char *aiDir) {
+    std::string err;
+    const std::string entry =
+        std::string(aiDir) +
+        "/Computer Expanded.per";
+    AiProgram original;
+    const bool parsed =
+        original.load(
+            entry,
+            {"DIFFICULTY-MODERATE"},
+            &err);
+    if (!parsed) {
+        fprintf(
+            stderr, "error: %s\n",
+            err.c_str());
+        return 1;
+    }
+
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    if (!assets.init(dataDir, &err)) {
+        fprintf(
+            stderr, "error: %s\n",
+            err.c_str());
+        return 1;
+    }
+    Game game(assets);
+    if (!game.initCompactTestMap(
+            0x5A17u, 96, &err)) {
+        fprintf(
+            stderr, "error: %s\n",
+            err.c_str());
+        return 1;
+    }
+    for (int resource = 0;
+         resource < 4; ++resource)
+        game.setResourceForTesting(
+            2, resource, 2000.0f);
+    const uint32_t worker =
+        game.spawnObjectForTesting(
+            3, 83, 2, 69.0f, 69.0f);
+    const uint32_t carbon =
+        game.spawnObjectForTesting(
+            0, 348, 0, 70.0f, 69.0f);
+    static const char script[] =
+        "(defconst test-goal 200)\n"
+        "(defrule\n"
+        "  (true)\n"
+        "=>\n"
+        "  (set-goal test-goal 7)\n"
+        "  (set-strategic-number "
+        "sn-carbon-gatherer-percentage 100)\n"
+        "  (set-strategic-number "
+        "sn-food-gatherer-percentage 0)\n"
+        "  (set-strategic-number "
+        "sn-metal-gatherer-percentage 0)\n"
+        "  (set-strategic-number "
+        "sn-nova-gatherer-percentage 0)\n"
+        "  (disable-self))\n"
+        "(defrule\n"
+        "  (goal test-goal 7)\n"
+        "  (building-type-count-total "
+        "BLDG-DROPCARBON == 0)\n"
+        "  (can-build BLDG-DROPCARBON)\n"
+        "=>\n"
+        "  (build BLDG-DROPCARBON)\n"
+        "  (disable-self))\n"
+        "(defrule\n"
+        "  (goal test-goal 7)\n"
+        "  (building-type-count-total "
+        "BLDG-DROPCHOW == 0)\n"
+        "  (can-build BLDG-DROPCHOW)\n"
+        "=>\n"
+        "  (build BLDG-DROPCHOW)\n"
+        "  (disable-self))\n"
+        "(defrule\n"
+        "  (goal test-goal 7)\n"
+        "  (can-train UNIT-WORKER)\n"
+        "=>\n"
+        "  (train UNIT-WORKER)\n"
+        "  (disable-self))\n";
+    const bool loaded =
+        game.loadAiSourceForTesting(
+            2, "economy-test.per",
+            script, {}, &err);
+    if (!loaded) {
+        fprintf(
+            stderr, "error: %s\n",
+            err.c_str());
+        return 1;
+    }
+    for (int frame = 0;
+         frame < 30 * 3; ++frame)
+        game.update(
+            1.0f / 30.0f, {});
+
+    const bool originalParsed =
+        original.files.size() >= 35 &&
+        original.rules.size() >= 1200 &&
+        original.constants.size() >= 250;
+    const bool initialized =
+        game.aiGoalForTesting(2, 200) == 7 &&
+        game.aiStrategicNumberForTesting(
+            2,
+            "sn-carbon-gatherer-percentage") ==
+            100;
+    const bool gathered =
+        game.objectGatheringTarget(
+            worker, carbon);
+    const int carbonBuildings =
+        game.aiObjectCountForTesting(
+            2, "BLDG-DROPCARBON");
+    const int foodBuildings =
+        game.aiObjectCountForTesting(
+            2, "BLDG-DROPCHOW");
+    const size_t queuedWorkers =
+        game.aiQueuedUnitCountForTesting(
+            2, 83);
+    std::vector<std::string> aiLogs;
+    game.setLogger(
+        [&](const std::string &message) {
+            if (message.rfind("AI ", 0) == 0)
+                aiLogs.push_back(message);
+        });
+    const bool originalLoaded =
+        game.loadAiScript(
+            2, entry,
+            {"DIFFICULTY-MODERATE"},
+            &err);
+    if (!originalLoaded) {
+        fprintf(
+            stderr, "error: %s\n",
+            err.c_str());
+        return 1;
+    }
+    int originalGatherPeak = 0;
+    for (int frame = 0;
+         frame < 30 * 10; ++frame) {
+        game.update(
+            1.0f / 30.0f, {});
+        originalGatherPeak =
+            std::max(
+                originalGatherPeak,
+                game.aiStrategicNumberForTesting(
+                    2,
+                    "sn-food-gatherer-percentage") +
+                    game.aiStrategicNumberForTesting(
+                        2,
+                        "sn-carbon-gatherer-percentage") +
+                    game.aiStrategicNumberForTesting(
+                        2,
+                        "sn-metal-gatherer-percentage") +
+                    game.aiStrategicNumberForTesting(
+                        2,
+                        "sn-nova-gatherer-percentage"));
+    }
+    const int originalGatherTotal =
+        game.aiStrategicNumberForTesting(
+            2,
+            "sn-food-gatherer-percentage") +
+        game.aiStrategicNumberForTesting(
+            2,
+            "sn-carbon-gatherer-percentage") +
+        game.aiStrategicNumberForTesting(
+            2,
+            "sn-metal-gatherer-percentage") +
+        game.aiStrategicNumberForTesting(
+            2,
+            "sn-nova-gatherer-percentage");
+    const bool originalRuntime =
+        game.aiRuleCountForTesting(2) ==
+            original.rules.size() &&
+        originalGatherPeak > 0;
+    printf(
+        "AI parser files/constants/rules "
+        "%zu/%zu/%zu, init %d, gather %d, "
+        "carbon/food buildings %d/%d, "
+        "queued workers %zu, original runtime %d "
+        "(%d%% gather)\n",
+        original.files.size(),
+        original.constants.size(),
+        original.rules.size(),
+        initialized ? 1 : 0,
+        gathered ? 1 : 0,
+        carbonBuildings,
+        foodBuildings,
+        queuedWorkers,
+        originalRuntime ? 1 : 0,
+        originalGatherTotal);
+    if (!originalParsed ||
+        !initialized || !gathered ||
+        carbonBuildings != 1 ||
+        foodBuildings != 1 ||
+        queuedWorkers != 1 ||
+        !originalRuntime) {
+        for (const std::string &message :
+             aiLogs)
+            fprintf(
+                stderr, "%s\n",
+                message.c_str());
+        fprintf(
+            stderr,
+            "error: AI validation failed\n");
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) return usage();
     const char *cmd = argv[1];
@@ -5592,6 +5836,12 @@ int main(int argc, char **argv) {
         return cmdTestFixes(argv[2], argc > 3 ? argv[3] : nullptr);
     if (!strcmp(cmd, "test-combat"))
         return cmdTestCombat(argv[2], argc > 3 ? argv[3] : nullptr);
+    if (!strcmp(cmd, "ai-script"))
+        return cmdAiScript(argv[2]);
+    if (!strcmp(cmd, "test-ai") &&
+        argc >= 4)
+        return cmdTestAi(
+            argv[2], argv[3]);
     if (!strcmp(cmd, "mp3")) return cmdMp3(argv[2]);
     return usage();
 }

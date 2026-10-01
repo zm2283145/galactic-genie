@@ -3,6 +3,7 @@
 #pragma once
 
 #include "assets.h"
+#include "ai_script.h"
 #include "pathfinding.h"
 #include "../core/scenario.h"
 
@@ -15,6 +16,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace swgb {
@@ -102,6 +104,28 @@ public:
         uint32_t seed, int mapSize,
         std::string *err);
     bool initScenario(const Scenario &scenario, std::string *err);
+    bool loadAiScript(
+        int player, const std::string &path,
+        const std::unordered_set<std::string> &defines,
+        std::string *err = nullptr);
+    bool loadAiSourceForTesting(
+        int player, const std::string &name,
+        const std::string &source,
+        const std::unordered_set<std::string> &defines,
+        std::string *err = nullptr);
+    size_t aiRuleCountForTesting(
+        int player) const;
+    int aiGoalForTesting(
+        int player, int goal) const;
+    int aiStrategicNumberForTesting(
+        int player,
+        const std::string &name) const;
+    int aiObjectCountForTesting(
+        int player,
+        const std::string &symbol,
+        bool includeFoundations = true) const;
+    size_t aiQueuedUnitCountForTesting(
+        int player, int unitId) const;
     void update(float dt, const InputState &in);
     void render(Renderer &r, int screenW, int screenH);
 
@@ -645,6 +669,29 @@ private:
         uint16_t initialFrame = 0;
     };
 
+    enum class AiTruth : uint8_t {
+        False,
+        True,
+        Unknown,
+    };
+
+    struct AiPlayerState {
+        AiProgram program;
+        std::unordered_map<int, int> goals;
+        std::unordered_map<std::string, int>
+            strategicNumbers;
+        std::unordered_set<std::string>
+            warnedFacts;
+        std::unordered_set<std::string>
+            warnedActions;
+        size_t ruleCursor = 0;
+        float ruleTime = 0.0f;
+        float economyTime = 0.0f;
+        float ageTime = 0.0f;
+        int age = 1;
+        bool loaded = false;
+    };
+
     struct Projectile {
         const dat::Unit *unit = nullptr;
         int player = 0;
@@ -1024,6 +1071,46 @@ private:
     void playWorldUnitSound(const Object &object, int soundId);
     bool worldSoundAudible(float x, float y) const;
     void updateAmbience(float dt, int screenW, int screenH);
+    void updateAi(float dt);
+    void updateAiPlayer(
+        int player, AiPlayerState &state);
+    void updateAiGatherers(
+        int player, AiPlayerState &state);
+    AiTruth evaluateAiCondition(
+        int player, AiPlayerState &state,
+        const AiNode &condition);
+    bool evaluateAiFactValue(
+        int player, AiPlayerState &state,
+        const AiNode &condition,
+        size_t argumentEnd, int &value);
+    int resolveAiValue(
+        int player, const AiPlayerState &state,
+        const std::string &value,
+        bool &known) const;
+    bool executeAiAction(
+        int player, AiPlayerState &state,
+        AiRule &rule, const AiNode &action);
+    const dat::Unit *aiUnit(
+        int player,
+        const std::string &symbol) const;
+    int aiTechnology(
+        const std::string &symbol) const;
+    int aiTechLevel(int player) const;
+    int aiObjectCount(
+        int player, const dat::Unit &unit,
+        bool includeFoundations) const;
+    bool aiCanAfford(
+        int player,
+        const dat::Unit &unit) const;
+    bool aiCanAfford(
+        int player,
+        const dat::Tech &technology) const;
+    bool aiBuild(
+        int player, const dat::Unit &unit);
+    bool aiTrain(
+        int player, const dat::Unit &unit);
+    bool aiResearch(
+        int player, int technologyId);
     void activateCheat(size_t index, int screenW, int screenH);
     bool spawnCheatUnit(int unitId, bool requireWater,
                         int screenW, int screenH);
@@ -1080,6 +1167,7 @@ private:
     std::array<ScenarioPlayer, 16> players_{};
     std::array<std::map<int, float>, 17> resources_{};
     std::array<std::set<int>, 17> researchedTechs_{};
+    std::array<AiPlayerState, 17> aiPlayers_{};
     std::array<std::set<int>, 17> disabledTechs_{};
     std::array<std::set<int>, 17> disabledUnits_{};
     std::vector<ScenarioTrigger> triggers_;
