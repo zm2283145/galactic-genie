@@ -37,6 +37,15 @@ Texture *SoftRenderer::createMaskTexture(int width, int height, const uint8_t *a
     return t;
 }
 
+bool SoftRenderer::updateTexture(Texture *texture, const uint8_t *rgba) {
+    if (!texture || !rgba || texture->alphaOnly) return false;
+    auto *t = static_cast<SoftTexture *>(texture);
+    t->px.assign(
+        rgba,
+        rgba + (size_t)t->width * t->height * 4);
+    return true;
+}
+
 void SoftRenderer::destroyTexture(Texture *t) { delete static_cast<SoftTexture *>(t); }
 
 void SoftRenderer::beginFrame(int screenW, int screenH, float scale, uint8_t r, uint8_t g, uint8_t b) {

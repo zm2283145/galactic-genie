@@ -27,6 +27,7 @@ public:
     virtual Texture *createTexture(int width, int height, const uint8_t *rgba) = 0;
     // alpha: width*height bytes. Sampling yields white RGB and the stored alpha.
     virtual Texture *createMaskTexture(int width, int height, const uint8_t *alpha) = 0;
+    virtual bool updateTexture(Texture *t, const uint8_t *rgba) = 0;
     virtual void destroyTexture(Texture *t) = 0;
 
     virtual void beginFrame(int screenW, int screenH, float scale, uint8_t r, uint8_t g, uint8_t b) = 0;

@@ -159,12 +159,24 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   spins while attacking, and plays an original synthesized oiia-style vocal/chiptune cue.
   The app now starts at a controller/touch title and main menu rather than a fixed development
   match. Skirmish opens a complete setup lobby; the existing Breaking Bread vertical slice remains
-  available from the main menu, while unavailable Multiplayer and Options entries are visibly
-  disabled. START pauses an active match with resume, same-seed restart, and main-menu controls;
+  available from the main menu, while unavailable Multiplayer is visibly disabled.
+  START pauses an active match with resume, same-seed restart, and main-menu controls;
   victory and defeat provide restart and main-menu controls without restarting the process.
+  A 128-by-128 cached original-style diamond minimap now renders terrain/elevation,
+  explored/current fog, DAT-filtered objects, player colors, the camera viewport, and
+  hostile-damage pings. Touch, cursor presses, and touch drags navigate it without per-tile
+  draw calls. Four Vita control groups support ordered assignment, recall, repeated-recall
+  centering, dead-object cleanup, and visible status/count feedback.
+  The pause menu now freezes simulation and provides save, load, confirmed same-seed restart,
+  options, and confirmed return-to-menu actions. Generated skirmishes use a bounded,
+  checksummed, versioned authoritative save containing map, objects/orders/queues/garrisons,
+  fog, projectiles/remains, AI state, outcome state, camera, selection, formations, and groups.
+  The main menu can continue a validated save. Master, music, dialogue, and effects volume
+  apply live and persist with a constrained Standard/Left-Handed Vita control preset;
+  corrupt settings and incompatible saves are explicitly rejected.
   A Star Wars/Clone Campaigns visual redesign of the remaining temporary panel framing, tabs,
-  typography, resource bar, queues, tooltips, and status areas remains. The replacement minimap
-  and its matching frame, options menu, and control groups also remain.
+  typography, resource bar, queues, tooltips, and status areas remains. Keyboard mappings for
+  control groups 5-10 and campaign save continuity remain.
 - Audio: selection, move, and attack acknowledgements plus camera-relative weapon-fire, impact, and
   death effects are implemented. The original Ogg soundtrack streams from storage, ducks beneath
   scenario dialogue, and mixes with terrain-specific world ambience. Scenario speaker text uses
@@ -174,7 +186,8 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   Garrison/ejection, gate
   transformation, unit-training, construction-start, and building-completion cues use their DAT
   sound groups. Livestock capture uses `capsheep.wav`, and queued Tech Level completion uses the
-  executable's `archupg.wav` resource. User-facing volume controls remain.
+  executable's `archupg.wav` resource. User-facing master, music, dialogue, and effects volume
+  controls are implemented.
 
 ## Milestone 5: AI and skirmish
 - The original AI economy and first military progression slice are implemented. The `.per` parser

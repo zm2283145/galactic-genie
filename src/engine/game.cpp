@@ -335,6 +335,12 @@ inline void toScreen(float x, float y, float &sx, float &sy) {
 
 } // namespace
 
+Game::~Game() {
+    if (minimapTexture_ && minimapRenderer_)
+        minimapRenderer_->destroyTexture(
+            minimapTexture_);
+}
+
 void Game::resetMatchState() {
     players_ = {};
     resources_ = {};
@@ -369,6 +375,10 @@ void Game::resetMatchState() {
     remains_.clear();
     pendingCarcasses_.clear();
     selectionOrder_.clear();
+    for (auto &group : controlGroups_)
+        group.clear();
+    lastRecalledControlGroup_ = -1;
+    controlGroupRecallAge_ = 1000.0f;
     pathGridCache_.clear();
     mobileObjectIndices_.clear();
     mobileObjectCells_.clear();
@@ -434,10 +444,15 @@ void Game::resetMatchState() {
     statusTime_ = 0.0f;
     instructionTime_ = 0.0f;
     attackAlertCooldown_ = 0.0f;
+    simulationTime_ = 0.0f;
     animClock_ = 0.0f;
     camX_ = camY_ = 0.0f;
     zoom_ = 1.0f;
     cursorX_ = cursorY_ = 0.0f;
+    minimapAlerts_.clear();
+    minimapRefreshTime_ = 0.0f;
+    minimapDragging_ = false;
+    generatedMatch_ = false;
     attackOrdersIssued_ = attacksLanded_ =
         unitsKilled_ = 0;
     projectilesLaunched_ = attackPathsComputed_ =
@@ -494,6 +509,8 @@ bool Game::initGenerated(
     bool addStartingResources,
     std::string *err) {
     resetMatchState();
+    currentSkirmishSettings_ = settings;
+    generatedMatch_ = true;
     rng_.seed(settings.seed);
     const int mapSize = settings.mapSize;
     players_ = {};
@@ -868,6 +885,7 @@ bool Game::initCompactTestMap(
 }
 
 bool Game::initScenario(const Scenario &scenario, std::string *err) {
+    generatedMatch_ = false;
     if (!scenario.map.width || scenario.map.width != scenario.map.height) {
         if (err) *err = "only square scenario maps are currently supported";
         return false;
@@ -9668,6 +9686,29 @@ void Game::damageObject(Object &object, int damage, uint32_t attackerId) {
     Object *attacker = findObject(attackerId);
     if (object.player == localPlayer_ &&
         attacker && attacker->active &&
+        isEnemy(object, *attacker)) {
+        const bool nearby =
+            std::any_of(
+                minimapAlerts_.begin(),
+                minimapAlerts_.end(),
+                [&](const MinimapAlert &alert) {
+                    const float dx =
+                        alert.x - object.x;
+                    const float dy =
+                        alert.y - object.y;
+                    return dx * dx + dy * dy <
+                           9.0f;
+                });
+        if (!nearby) {
+            if (minimapAlerts_.size() >= 8)
+                minimapAlerts_.erase(
+                    minimapAlerts_.begin());
+            minimapAlerts_.push_back(
+                {object.x, object.y, 0.0f, true});
+        }
+    }
+    if (object.player == localPlayer_ &&
+        attacker && attacker->active &&
         isEnemy(object, *attacker) &&
         attackAlertCooldown_ <= 0.0f) {
         playInterfaceFeedback(
@@ -12559,7 +12600,183 @@ int Game::playerColorBase(int player) const {
     return colorIndex < pc.size() ? pc[colorIndex].playerColorBase : 16;
 }
 
-void Game::lookAt(float tx, float ty) { toScreen(tx, ty, camX_, camY_); }
+void Game::clampCamera() {
+    const float minX = -mapSize_ * kTileHalfW;
+    const float maxX = mapSize_ * kTileHalfW;
+    const float maxY =
+        2.0f * mapSize_ * kTileHalfH;
+    camX_ = std::max(
+        minX, std::min(maxX, camX_));
+    camY_ = std::max(
+        0.0f, std::min(maxY, camY_));
+}
+
+void Game::lookAt(float tx, float ty) {
+    toScreen(
+        std::max(
+            0.0f,
+            std::min((float)mapSize_ - 0.001f, tx)),
+        std::max(
+            0.0f,
+            std::min((float)mapSize_ - 0.001f, ty)),
+        camX_, camY_);
+    clampCamera();
+}
+
+std::array<float, 2> Game::minimapWorldToPoint(
+    float worldX, float worldY, int mapSize,
+    float left, float top, float size) {
+    if (mapSize <= 0 || size <= 0)
+        return {left, top};
+    const float extent = (float)mapSize;
+    return {
+        left + size *
+                   (0.5f +
+                    (worldX - worldY) /
+                        (2.0f * extent)),
+        top + size *
+                  ((worldX + worldY) /
+                   (2.0f * extent)),
+    };
+}
+
+bool Game::minimapPointToWorld(
+    float pointX, float pointY, int mapSize,
+    float left, float top, float size,
+    float &worldX, float &worldY) {
+    if (mapSize <= 0 || size <= 0)
+        return false;
+    const float u = (pointX - left) / size;
+    const float v = (pointY - top) / size;
+    const float extent = (float)mapSize;
+    const float difference =
+        (u - 0.5f) * 2.0f * extent;
+    const float sum = v * 2.0f * extent;
+    worldX = (sum + difference) * 0.5f;
+    worldY = (sum - difference) * 0.5f;
+    if (worldX < 0.0f || worldY < 0.0f ||
+        worldX >= extent || worldY >= extent)
+        return false;
+    worldX = std::min(
+        extent - 0.001f, worldX);
+    worldY = std::min(
+        extent - 0.001f, worldY);
+    return true;
+}
+
+void Game::syncControlGroups() {
+    for (auto &group : controlGroups_) {
+        group.erase(
+            std::remove_if(
+                group.begin(), group.end(),
+                [&](uint32_t id) {
+                    const Object *object =
+                        findObject(id);
+                    return !object ||
+                           !object->active ||
+                           object->hidden ||
+                           object->player !=
+                               localPlayer_;
+                }),
+            group.end());
+    }
+}
+
+bool Game::assignControlGroup(int group) {
+    if (group < 0 ||
+        group >= (int)controlGroups_.size())
+        return false;
+    syncSelectionOrder();
+    std::vector<uint32_t> assigned;
+    assigned.reserve(selectionOrder_.size());
+    for (uint32_t id : selectionOrder_) {
+        const Object *object = findObject(id);
+        if (object && object->active &&
+            !object->hidden &&
+            object->player == localPlayer_ &&
+            object->selected)
+            assigned.push_back(id);
+    }
+    if (assigned.empty()) return false;
+    controlGroups_[(size_t)group] =
+        std::move(assigned);
+    statusMessage_ =
+        "GROUP " + std::to_string(group + 1) +
+        " ASSIGNED";
+    statusTime_ = 2.0f;
+    return true;
+}
+
+bool Game::recallControlGroup(
+    int group, bool centerCamera) {
+    if (group < 0 ||
+        group >= (int)controlGroups_.size())
+        return false;
+    syncControlGroups();
+    const auto &saved =
+        controlGroups_[(size_t)group];
+    if (saved.empty()) {
+        statusMessage_ =
+            "GROUP " + std::to_string(group + 1) +
+            " IS EMPTY";
+        statusTime_ = 2.0f;
+        return false;
+    }
+    clearSelection();
+    Object *first = nullptr;
+    for (uint32_t id : saved) {
+        Object *object = findObject(id);
+        if (!object || !isSelectable(*object) ||
+            object->player != localPlayer_)
+            continue;
+        if (!first) first = object;
+        selectObject(*object);
+    }
+    if (!first) return false;
+    if (centerCamera)
+        lookAt(first->x, first->y);
+    if (playUnitSound_ &&
+        first->unit->selectionSound >= 0)
+        playUnitSound_(
+            first->unit->selectionSound,
+            civilizationForPlayer(first->player));
+    statusMessage_ =
+        "GROUP " + std::to_string(group + 1) +
+        (centerCamera ? " CENTERED" : " SELECTED");
+    statusTime_ = 2.0f;
+    return true;
+}
+
+bool Game::handleMinimapInput(
+    const InputState &input) {
+    constexpr float size = 168.0f;
+    const float left = input.screenW - size - 10.0f;
+    constexpr float top = 10.0f;
+    const bool inside =
+        input.pointerX >= left &&
+        input.pointerX <= left + size &&
+        input.pointerY >= top &&
+        input.pointerY <= top + size;
+    if (!input.pointerDown)
+        minimapDragging_ = false;
+    if (inside && input.pointerDown)
+        minimapDragging_ = true;
+    const bool activate =
+        inside &&
+        (input.selectPressed ||
+         input.pointerTap ||
+         input.pointerDown);
+    if (!activate && !minimapDragging_)
+        return false;
+    float worldX = 0.0f;
+    float worldY = 0.0f;
+    if (minimapPointToWorld(
+            input.pointerX, input.pointerY,
+            mapSize_, left, top, size,
+            worldX, worldY))
+        lookAt(worldX, worldY);
+    return true;
+}
 
 bool Game::lookAtObject(uint32_t spawnId) {
     const Object *object = findObject(spawnId);
@@ -16566,13 +16783,53 @@ void Game::update(float dt, const InputState &in) {
     }
     if (victoryState_ >= 0)
         return;
+    simulationTime_ += dt;
+    controlGroupRecallAge_ += dt;
+    minimapRefreshTime_ =
+        std::max(0.0f, minimapRefreshTime_ - dt);
+    for (MinimapAlert &alert : minimapAlerts_)
+        alert.age += dt;
+    minimapAlerts_.erase(
+        std::remove_if(
+            minimapAlerts_.begin(),
+            minimapAlerts_.end(),
+            [](const MinimapAlert &alert) {
+                return alert.age >= 6.0f;
+            }),
+        minimapAlerts_.end());
+    syncControlGroups();
 
     if (in.toggleCheatMenu) {
         cheatMenuOpen_ = !cheatMenuOpen_;
         actionMenuOpen_ = false;
         actionMenuObjectId_ = 0;
     }
-    const bool consumeWorldInput = cheatMenuOpen_;
+    if (!cheatMenuOpen_ &&
+        in.controlGroup >= 0) {
+        if (in.controlGroupAssign) {
+            if (!assignControlGroup(
+                    in.controlGroup)) {
+                statusMessage_ =
+                    "SELECT OWN UNITS TO ASSIGN A GROUP";
+                statusTime_ = 2.0f;
+            }
+        } else {
+            const bool center =
+                lastRecalledControlGroup_ ==
+                    in.controlGroup &&
+                controlGroupRecallAge_ <= 0.45f;
+            recallControlGroup(
+                in.controlGroup, center);
+            lastRecalledControlGroup_ =
+                in.controlGroup;
+            controlGroupRecallAge_ = 0.0f;
+        }
+    }
+    const bool minimapInput =
+        !cheatMenuOpen_ &&
+        handleMinimapInput(in);
+    const bool consumeWorldInput =
+        cheatMenuOpen_ || minimapInput;
     if (cheatMenuOpen_) {
         if (in.menuUp)
             cheatMenuSelection_ =
@@ -16779,11 +17036,7 @@ void Game::update(float dt, const InputState &in) {
     camY_ += scrollY * scrollSpeed * dt -
              (consumeCameraInput ? 0.0f
                                  : in.dragY / zoom_);
-    // Clamp the camera to the map diamond's bounding box.
-    float minX = -mapSize_ * kTileHalfW, maxX = mapSize_ * kTileHalfW;
-    float maxY = 2.0f * mapSize_ * kTileHalfH;
-    camX_ = std::max(minX, std::min(maxX, camX_));
-    camY_ = std::max(0.0f, std::min(maxY, camY_));
+    clampCamera();
     updateAmbience(dt, in.screenW, in.screenH);
 
     if (!consumeWorldInput && !actionMenuOpen_) {
@@ -18397,6 +18650,189 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
          outlineCandidate, g->layer != 5});
 }
 
+void Game::updateMinimapTexture(
+    Renderer &renderer) {
+    constexpr int textureSize = 128;
+    if (mapSize_ <= 0) return;
+    if (minimapRenderer_ != &renderer ||
+        minimapTextureSize_ != textureSize) {
+        if (minimapTexture_ && minimapRenderer_)
+            minimapRenderer_->destroyTexture(
+                minimapTexture_);
+        minimapTexture_ = nullptr;
+        minimapRenderer_ = &renderer;
+        minimapTextureSize_ = textureSize;
+        minimapPixels_.assign(
+            (size_t)textureSize * textureSize * 4,
+            0);
+    }
+    if (minimapTexture_ &&
+        minimapRefreshTime_ > 0.0f)
+        return;
+    minimapRefreshTime_ = 0.25f;
+    const auto &terrains =
+        assets_.dat().terrainBlock.terrains;
+    const auto &palette = assets_.palette();
+    std::fill(
+        minimapPixels_.begin(),
+        minimapPixels_.end(), 0);
+    for (int py = 0; py < textureSize; ++py) {
+        for (int px = 0; px < textureSize;
+             ++px) {
+            float worldX = 0.0f;
+            float worldY = 0.0f;
+            if (!minimapPointToWorld(
+                    px + 0.5f, py + 0.5f,
+                    mapSize_, 0.0f, 0.0f,
+                    (float)textureSize,
+                    worldX, worldY))
+                continue;
+            const int tx = std::max(
+                0, std::min(
+                       mapSize_ - 1,
+                       (int)worldX));
+            const int ty = std::max(
+                0, std::min(
+                       mapSize_ - 1,
+                       (int)worldY));
+            const bool explored =
+                localPlayer_ <= 0 ||
+                forceExploreCheat_ ||
+                tileExplored(
+                    localPlayer_, tx, ty);
+            const bool visible =
+                localPlayer_ <= 0 ||
+                forceSightCheat_ ||
+                tileVisible(
+                    localPlayer_, tx, ty);
+            uint8_t red = 0;
+            uint8_t green = 0;
+            uint8_t blue = 0;
+            if (explored) {
+                const int terrainId =
+                    terrainAt(tx, ty);
+                if (terrainId >= 0 &&
+                    (size_t)terrainId <
+                        terrains.size()) {
+                    const dat::Terrain &terrain =
+                        drawTerrain(
+                            terrains, terrainId);
+                    const int color =
+                        terrain.colors[0];
+                    if (color >= 0 &&
+                        color < 256) {
+                        red = palette[(uint8_t)color].r;
+                        green =
+                            palette[(uint8_t)color].g;
+                        blue =
+                            palette[(uint8_t)color].b;
+                    }
+                }
+                const int elevation =
+                    tx < mapSize_ &&
+                            ty < mapSize_
+                        ? tileElevation_[
+                              (size_t)ty *
+                                  mapSize_ +
+                              tx]
+                        : 0;
+                const float light =
+                    (visible ? 0.90f : 0.43f) +
+                    std::min(0.12f,
+                             elevation * 0.012f);
+                red = (uint8_t)std::min(
+                    255, (int)(red * light));
+                green = (uint8_t)std::min(
+                    255, (int)(green * light));
+                blue = (uint8_t)std::min(
+                    255, (int)(blue * light));
+            }
+            const size_t offset =
+                ((size_t)py * textureSize + px) *
+                4;
+            minimapPixels_[offset] = red;
+            minimapPixels_[offset + 1] = green;
+            minimapPixels_[offset + 2] = blue;
+            minimapPixels_[offset + 3] = 255;
+        }
+    }
+    auto setPixel =
+        [&](int x, int y, int radius,
+            uint8_t red, uint8_t green,
+            uint8_t blue) {
+            for (int py = y - radius;
+                 py <= y + radius; ++py)
+                for (int px = x - radius;
+                     px <= x + radius; ++px) {
+                    if (px < 0 || py < 0 ||
+                        px >= textureSize ||
+                        py >= textureSize)
+                        continue;
+                    const size_t offset =
+                        ((size_t)py *
+                             textureSize +
+                         px) *
+                        4;
+                    if (!minimapPixels_[
+                            offset + 3])
+                        continue;
+                    minimapPixels_[offset] = red;
+                    minimapPixels_[
+                        offset + 1] = green;
+                    minimapPixels_[
+                        offset + 2] = blue;
+                }
+        };
+    for (const Object &object : objects_) {
+        if (!object.active || object.hidden ||
+            !object.draw || !object.unit ||
+            object.unit->minimapMode == 0)
+            continue;
+        const bool staticObject =
+            object.unit->type ==
+                dat::UT_Building ||
+            isGatherable(object);
+        if (staticObject
+                ? !objectVisibleToPlayer(
+                      object, localPlayer_)
+                : !objectCurrentlyVisibleToPlayer(
+                      object, localPlayer_))
+            continue;
+        const auto point =
+            minimapWorldToPoint(
+                object.x, object.y, mapSize_,
+                0.0f, 0.0f,
+                (float)textureSize);
+        int colorIndex =
+            object.player > 0
+                ? playerColorBase(object.player) + 4
+                : object.unit->minimapColor;
+        if (colorIndex < 0 ||
+            colorIndex >= 256)
+            colorIndex = 15;
+        const auto &color =
+            palette[(uint8_t)colorIndex];
+        const int radius =
+            object.unit->type ==
+                    dat::UT_Building ||
+                    object.unit->minimapMode >= 2
+                ? 1
+                : 0;
+        setPixel(
+            (int)point[0], (int)point[1],
+            radius, color.r, color.g, color.b);
+    }
+    if (!minimapTexture_)
+        minimapTexture_ =
+            renderer.createTexture(
+                textureSize, textureSize,
+                minimapPixels_.data());
+    else
+        renderer.updateTexture(
+            minimapTexture_,
+            minimapPixels_.data());
+}
+
 void Game::drawGraphicNow(Renderer &r, int graphicId, float sx, float sy, float facing, float t, int player) {
     g_draws.clear();
     drawGraphic(r, graphicId, sx, sy, facing, t, player, 0, 0, true, 0, 0);
@@ -19629,26 +20065,128 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         }
     }
 
-    if (debug_) {
-        // Coarse debug minimap; one quad per full tile is prohibitively
-        // expensive on Vita for large maps.
-        constexpr int step = 8;
-        const float s = 2.0f / zoom_;
-        const float mx = viewW - mapSize_ * s - 8 / zoom_, my = 8 / zoom_;
-        r.fillRect(mx - 2 / zoom_, my - 2 / zoom_, mapSize_ * s + 4 / zoom_, mapSize_ * s + 4 / zoom_, 0, 0, 0, 180);
-        for (int ty = 0; ty < mapSize_; ty += step)
-            for (int tx = 0; tx < mapSize_; tx += step) {
-                const dat::Terrain &t = terrains[terrainAt(tx, ty)];
-                r.fillRect(mx + tx * s, my + ty * s, std::min(step, mapSize_ - tx) * s,
-                           std::min(step, mapSize_ - ty) * s,
-                           t.colors[0] ? assets_.palette()[t.colors[0]].r : 60,
-                           t.colors[0] ? assets_.palette()[t.colors[0]].g : 120,
-                           t.colors[0] ? assets_.palette()[t.colors[0]].b : 60, 255);
-            }
+    constexpr float minimapSize = 168.0f;
+    constexpr float minimapTop = 10.0f;
+    const float minimapLeft =
+        screenW - minimapSize - 10.0f;
+    updateMinimapTexture(r);
+    const float invZoom = 1.0f / zoom_;
+    const float minimapX = minimapLeft * invZoom;
+    const float minimapY = minimapTop * invZoom;
+    r.fillRect(
+        minimapX - 4.0f * invZoom,
+        minimapY - 4.0f * invZoom,
+        (minimapSize + 8.0f) * invZoom,
+        (minimapSize + 8.0f) * invZoom,
+        3, 7, 14, 235);
+    r.fillRect(
+        minimapX - 2.0f * invZoom,
+        minimapY - 2.0f * invZoom,
+        (minimapSize + 4.0f) * invZoom,
+        2.0f * invZoom,
+        187, 154, 74, 255);
+    if (minimapTexture_)
+        r.draw(
+            minimapTexture_,
+            {minimapX, minimapY,
+             minimapSize * invZoom,
+             minimapSize * invZoom,
+             0, 0,
+             (float)minimapTextureSize_,
+             (float)minimapTextureSize_});
+    std::array<std::array<float, 2>, 4>
+        viewport{};
+    const float screenCorners[4][2] = {
+        {0.0f, 0.0f},
+        {(float)screenW, 0.0f},
+        {(float)screenW, (float)screenH},
+        {0.0f, (float)screenH},
+    };
+    for (size_t corner = 0;
+         corner < viewport.size(); ++corner) {
+        float worldX = 0.0f;
+        float worldY = 0.0f;
+        screenToWorld(
+            screenCorners[corner][0],
+            screenCorners[corner][1],
+            screenW, screenH,
+            worldX, worldY);
+        viewport[corner] =
+            minimapWorldToPoint(
+                worldX, worldY, mapSize_,
+                minimapLeft, minimapTop,
+                minimapSize);
     }
+    for (size_t edge = 0; edge < 4; ++edge) {
+        const auto &from = viewport[edge];
+        const auto &to =
+            viewport[(edge + 1) % 4];
+        r.drawLine(
+            from[0] * invZoom,
+            from[1] * invZoom,
+            to[0] * invZoom,
+            to[1] * invZoom,
+            1.5f * invZoom,
+            255, 255, 255, 235);
+    }
+    for (const MinimapAlert &alert :
+         minimapAlerts_) {
+        const auto point =
+            minimapWorldToPoint(
+                alert.x, alert.y, mapSize_,
+                minimapLeft, minimapTop,
+                minimapSize);
+        const float phase =
+            std::fmod(alert.age, 1.0f);
+        const float radius =
+            (5.0f + phase * 12.0f) *
+            invZoom;
+        const float thickness =
+            2.0f * invZoom;
+        const float x = point[0] * invZoom;
+        const float y = point[1] * invZoom;
+        r.fillRect(
+            x - radius, y - radius,
+            radius * 2.0f, thickness,
+            255, 48, 32,
+            (uint8_t)(240 - phase * 160));
+        r.fillRect(
+            x - radius,
+            y + radius - thickness,
+            radius * 2.0f, thickness,
+            255, 48, 32,
+            (uint8_t)(240 - phase * 160));
+        r.fillRect(
+            x - radius, y - radius,
+            thickness, radius * 2.0f,
+            255, 48, 32,
+            (uint8_t)(240 - phase * 160));
+        r.fillRect(
+            x + radius - thickness,
+            y - radius,
+            thickness, radius * 2.0f,
+            255, 48, 32,
+            (uint8_t)(240 - phase * 160));
+    }
+    std::string groupSummary;
+    for (size_t group = 0;
+         group < 4; ++group) {
+        if (!groupSummary.empty())
+            groupSummary += "  ";
+        groupSummary +=
+            std::to_string(group + 1) + ":" +
+            std::to_string(
+                controlGroups_[group].size());
+    }
+    drawBitmapText(
+        r, {groupSummary},
+        minimapX,
+        (minimapTop + minimapSize + 5.0f) *
+            invZoom,
+        0.82f * invZoom,
+        220, 224, 206);
 
     if (panelObject) {
-        const float invZoom = 1.0f / zoom_;
         const float panelHeight = 112.0f;
         const float panelX = 0;
         const float panelY = (screenH - panelHeight) * invZoom;

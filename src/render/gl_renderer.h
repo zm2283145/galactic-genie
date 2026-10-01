@@ -16,6 +16,7 @@ public:
 
     Texture *createTexture(int width, int height, const uint8_t *rgba) override;
     Texture *createMaskTexture(int width, int height, const uint8_t *alpha) override;
+    bool updateTexture(Texture *t, const uint8_t *rgba) override;
     void destroyTexture(Texture *t) override;
     void beginFrame(int screenW, int screenH, float scale, uint8_t r, uint8_t g, uint8_t b) override;
     void draw(Texture *tex, const Quad &q) override;

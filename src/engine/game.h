@@ -31,6 +31,7 @@ struct InputState {
     int zoomStep = 0;               // -1 zoom out, +1 zoom in (edge-triggered)
     bool toggleDebug = false;
     bool cursorVisible = false;
+    bool pointerDown = false;
     bool selectPressed = false;
     bool commandPressed = false;
     bool cycleAttackMode = false;
@@ -47,6 +48,8 @@ struct InputState {
     bool actionTabLeft = false;
     bool actionTabRight = false;
     bool pausePressed = false;
+    int controlGroup = -1;
+    bool controlGroupAssign = false;
 };
 
 struct FrameStats {
@@ -100,6 +103,7 @@ struct MovingObjectInfo {
 class Game {
 public:
     explicit Game(Assets &assets) : assets_(assets) {}
+    ~Game();
 
     bool init(uint32_t seed, int mapSize, std::string *err);
     bool initSkirmish(
@@ -610,6 +614,22 @@ public:
     }
     void update(float dt, const InputState &in);
     void render(Renderer &r, int screenW, int screenH);
+    bool saveMatch(
+        const std::string &path,
+        std::string *err = nullptr) const;
+    bool loadMatch(
+        const std::string &path,
+        std::string *err = nullptr);
+    static bool readSaveSettings(
+        const std::string &path,
+        SkirmishSettings &settings,
+        std::string *err = nullptr);
+    bool generatedMatchForSaving() const {
+        return generatedMatch_;
+    }
+    const SkirmishSettings &currentSkirmishSettings() const {
+        return currentSkirmishSettings_;
+    }
 
     // Centre the camera on a tile (used by tools and at startup).
     void lookAt(float tx, float ty);
@@ -617,6 +637,33 @@ public:
     bool selectObjectForTesting(uint32_t spawnId);
     bool selectObjectsForTesting(
         const std::vector<uint32_t> &spawnIds);
+    bool assignControlGroup(int group);
+    bool recallControlGroup(
+        int group, bool centerCamera = false);
+    const std::vector<uint32_t> &controlGroupForTesting(
+        int group) const {
+        static const std::vector<uint32_t> empty;
+        return group >= 0 &&
+                       group < (int)controlGroups_.size()
+                   ? controlGroups_[(size_t)group]
+                   : empty;
+    }
+    static std::array<float, 2> minimapWorldToPoint(
+        float worldX, float worldY, int mapSize,
+        float left, float top, float size);
+    static bool minimapPointToWorld(
+        float pointX, float pointY, int mapSize,
+        float left, float top, float size,
+        float &worldX, float &worldY);
+    std::array<float, 2> cameraCenterForTesting() const {
+        return {camX_, camY_};
+    }
+    float simulationTimeForTesting() const {
+        return simulationTime_;
+    }
+    size_t minimapAlertCountForTesting() const {
+        return minimapAlerts_.size();
+    }
     // Group move of the given units, as a right-click with them selected.
     std::string describeObjectForTesting(uint32_t spawnId) const;
     // Places a gate at world (x, y) the way the cursor would; returns the
@@ -1393,6 +1440,10 @@ private:
     void buildTileElevation();
     void resetVisibility();
     void updateVisibility();
+    void updateMinimapTexture(Renderer &renderer);
+    bool handleMinimapInput(const InputState &input);
+    void clampCamera();
+    void syncControlGroups();
     bool tileExplored(int player, int x, int y) const;
     bool tileVisible(int player, int x, int y) const;
     bool objectCurrentlyVisibleToPlayer(
@@ -1889,6 +1940,7 @@ private:
     int currentInstructionPlayer_ = -1;
     float instructionTime_ = 0;
     float attackAlertCooldown_ = 0;
+    float simulationTime_ = 0;
     uint32_t nextSpawnId_ = 1;
     uint32_t nextMoveGroupId_ = 1;
     int difficulty_ = 2;
@@ -1927,6 +1979,9 @@ private:
     float lastSelectionX_ = 0, lastSelectionY_ = 0;
     int lastSelectionUnitId_ = -1;
     std::vector<uint32_t> selectionOrder_;
+    std::array<std::vector<uint32_t>, 10> controlGroups_;
+    int lastRecalledControlGroup_ = -1;
+    float controlGroupRecallAge_ = 1000.0f;
     bool cursorVisible_ = false;
     CursorMode cursorMode_ = CursorMode::Normal;
     FormationType selectedFormation_ = FormationType::Line;
@@ -2021,6 +2076,21 @@ private:
     float statusTime_ = 0;
     bool boxSelectActive_ = false;
     bool debug_ = false;
+    struct MinimapAlert {
+        float x = 0;
+        float y = 0;
+        float age = 0;
+        bool attack = false;
+    };
+    std::vector<MinimapAlert> minimapAlerts_;
+    Texture *minimapTexture_ = nullptr;
+    Renderer *minimapRenderer_ = nullptr;
+    std::vector<uint8_t> minimapPixels_;
+    int minimapTextureSize_ = 0;
+    float minimapRefreshTime_ = 0;
+    bool minimapDragging_ = false;
+    SkirmishSettings currentSkirmishSettings_{};
+    bool generatedMatch_ = false;
     FrameStats stats_;
     size_t attackOrdersIssued_ = 0;
     size_t attacksLanded_ = 0;

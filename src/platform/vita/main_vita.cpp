@@ -5,6 +5,7 @@
 #include "../../engine/assets.h"
 #include "../../engine/frontend.h"
 #include "../../engine/game.h"
+#include "../../engine/settings.h"
 #include "../../render/gl_renderer.h"
 #include "vita_audio.h"
 
@@ -35,6 +36,8 @@ const char *kCampaignPath = "ux0:data/swgb/Campaign/xcam3.cpx";
 const char *kScenarioSoundDir = "ux0:data/swgb/Sound/Scenario";
 const char *kMusicDir = "ux0:data/swgb/Music";
 const char *kTerrainSoundDir = "ux0:data/swgb/Sound/Terrain";
+const char *kSettingsPath = "ux0:data/swgb/settings.bin";
+const char *kSavePath = "ux0:data/swgb/skirmish.save";
 const int kScreenW = 960, kScreenH = 544;
 
 FILE *g_log = nullptr;
@@ -112,12 +115,38 @@ int main() {
 
         swgb::Game game(assets);
         swgb::Frontend frontend;
+        swgb::UserSettings userSettings;
+        std::string settingsError;
+        if (!swgb::loadSettings(
+                kSettingsPath, userSettings,
+                &settingsError)) {
+            logf(
+                "settings recovery: %s; using defaults",
+                settingsError.c_str());
+            userSettings = swgb::UserSettings{};
+            frontend.reportMessage(
+                "SETTINGS WERE CORRUPT; DEFAULTS RESTORED");
+        }
+        frontend.setUserSettings(userSettings);
+        swgb::SkirmishSettings savedSettings;
+        std::string saveProbeError;
+        frontend.setContinueAvailable(
+            swgb::Game::readSaveSettings(
+                kSavePath, savedSettings,
+                &saveProbeError));
+        if (!saveProbeError.empty())
+            logf("save probe: %s", saveProbeError.c_str());
         game.setLogger([](const std::string &s) { logf("%s", s.c_str()); });
         swgb::VitaAudio audio(
             kScenarioSoundDir, kMusicDir, kTerrainSoundDir);
         audio.setLogger([](const std::string &s) { logf("audio: %s", s.c_str()); });
         std::string audioError;
         if (!audio.start(&audioError)) logf("audio disabled: %s", audioError.c_str());
+        audio.setVolumes(
+            userSettings.masterVolume,
+            userSettings.musicVolume,
+            userSettings.dialogueVolume,
+            userSettings.effectsVolume);
         game.setSoundPlayer([&audio](const std::string &name) { return audio.play(name); });
         game.setAmbientSoundPlayer(
             [&audio](const std::string &name) {
@@ -287,8 +316,13 @@ int main() {
             if (currentMenuStickY > 0 && menuStickY <= 0)
                 in.menuDown = true;
             menuStickY = currentMenuStickY;
-            in.scrollX = axis(pad.lx);
-            in.scrollY = axis(pad.ly);
+            const bool leftHanded =
+                frontend.userSettings().controls ==
+                swgb::ControlPreset::LeftHanded;
+            in.scrollX =
+                axis(leftHanded ? pad.rx : pad.lx);
+            in.scrollY =
+                axis(leftHanded ? pad.ry : pad.ly);
             if (pad.buttons & SCE_CTRL_LEFT) in.scrollX = -1;
             if (pad.buttons & SCE_CTRL_RIGHT) in.scrollX = 1;
             if (pad.buttons & SCE_CTRL_UP) in.scrollY = -1;
@@ -301,8 +335,12 @@ int main() {
                 stickBoxStartX = cursorX;
                 stickBoxStartY = cursorY;
             }
-            const float cursorMoveX = axis(pad.rx) * 520.0f * dt;
-            const float cursorMoveY = axis(pad.ry) * 520.0f * dt;
+            const float cursorMoveX =
+                axis(leftHanded ? pad.lx : pad.rx) *
+                520.0f * dt;
+            const float cursorMoveY =
+                axis(leftHanded ? pad.ly : pad.ry) *
+                520.0f * dt;
             cursorX += cursorMoveX;
             cursorY += cursorMoveY;
             cursorX = std::max(0.0f, std::min((float)kScreenW, cursorX));
@@ -330,13 +368,48 @@ int main() {
             in.pointerX = cursorX;
             in.pointerY = cursorY;
             in.cursorVisible = true;
-            if (pressed & SCE_CTRL_CROSS) in.selectPressed = true;
-            if (pressed & SCE_CTRL_CIRCLE) in.commandPressed = true;
+            if (pressed &
+                (leftHanded ? SCE_CTRL_CIRCLE
+                            : SCE_CTRL_CROSS))
+                in.selectPressed = true;
+            if (pressed &
+                (leftHanded ? SCE_CTRL_CROSS
+                            : SCE_CTRL_CIRCLE))
+                in.commandPressed = true;
             if (pressed & SCE_CTRL_TRIANGLE) in.cycleAttackMode = true;
+            if ((pad.buttons & SCE_CTRL_SELECT) &&
+                !cheatChord) {
+                if (pressed & SCE_CTRL_UP)
+                    in.controlGroup = 0;
+                else if (pressed & SCE_CTRL_RIGHT)
+                    in.controlGroup = 1;
+                else if (pressed & SCE_CTRL_DOWN)
+                    in.controlGroup = 2;
+                else if (pressed & SCE_CTRL_LEFT)
+                    in.controlGroup = 3;
+                if (in.controlGroup >= 0) {
+                    in.controlGroupAssign =
+                        (pad.buttons &
+                         SCE_CTRL_SQUARE) != 0;
+                    if (in.controlGroupAssign) {
+                        stickBoxArmed = false;
+                        stickBoxMoved = false;
+                        in.boxSelectActive = false;
+                        in.boxSelectCommit = false;
+                    }
+                    in.scrollX = in.scrollY = 0.0f;
+                    in.menuUp = in.menuDown =
+                        in.menuLeft =
+                            in.menuRight = false;
+                }
+            }
 
             sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1);
             if (touch.reportNum > 0) {
                 float tx = touch.report[0].x / 2.0f, ty = touch.report[0].y / 2.0f;
+                in.pointerX = tx;
+                in.pointerY = ty;
+                in.pointerDown = true;
                 if (!touching) {
                     touchStartX = lastTx = tx;
                     touchStartY = lastTy = ty;
@@ -382,12 +455,34 @@ int main() {
             const swgb::FrontendAction action =
                 frontend.update(
                     in, game.victoryStateForTesting());
+            if (frontend.takeSettingsChanged()) {
+                userSettings =
+                    frontend.userSettings();
+                audio.setVolumes(
+                    userSettings.masterVolume,
+                    userSettings.musicVolume,
+                    userSettings.dialogueVolume,
+                    userSettings.effectsVolume);
+                std::string saveError;
+                if (!swgb::saveSettings(
+                        kSettingsPath,
+                        userSettings, &saveError)) {
+                    logf(
+                        "settings save failed: %s",
+                        saveError.c_str());
+                    frontend.reportMessage(
+                        "SETTINGS COULD NOT BE SAVED: " +
+                        saveError);
+                }
+            }
             if (action ==
                     swgb::FrontendAction::StartSkirmish ||
                 action ==
                     swgb::FrontendAction::StartCampaign ||
                 action ==
-                    swgb::FrontendAction::RestartMatch) {
+                    swgb::FrontendAction::RestartMatch ||
+                action ==
+                    swgb::FrontendAction::LoadMatch) {
                 frontend.render(
                     renderer, kScreenW, kScreenH);
                 vglSwapBuffers(GL_FALSE);
@@ -399,13 +494,29 @@ int main() {
                 else if (action ==
                          swgb::FrontendAction::StartCampaign)
                     started = startCampaign();
-                else
+                else if (action ==
+                         swgb::FrontendAction::RestartMatch)
                     started =
                         campaignMatch
                             ? startCampaign()
                             : startSkirmish();
-                frontend.loadingFinished(
-                    started, started ? std::string() : err);
+                else {
+                    swgb::SkirmishSettings loaded;
+                    started =
+                        swgb::Game::readSaveSettings(
+                            kSavePath, loaded, &err);
+                    if (started) {
+                        frontend.settingsForTesting() =
+                            loaded;
+                        started = startSkirmish();
+                    }
+                    if (started)
+                        started = game.loadMatch(
+                            kSavePath, &err);
+                }
+                frontend.actionFinished(
+                    action, started,
+                    started ? std::string() : err);
                 unitSoundChoice = 0;
                 touching = false;
                 touchMoved = false;
@@ -414,6 +525,17 @@ int main() {
                 stickBoxMoved = false;
                 if (!started)
                     game.clearMatch();
+            } else if (
+                action ==
+                swgb::FrontendAction::SaveMatch) {
+                err.clear();
+                const bool saved =
+                    game.saveMatch(kSavePath, &err);
+                frontend.actionFinished(
+                    action, saved,
+                    saved ? std::string() : err);
+                if (saved)
+                    frontend.setContinueAvailable(true);
             } else if (
                 action ==
                 swgb::FrontendAction::ReturnToMainMenu) {

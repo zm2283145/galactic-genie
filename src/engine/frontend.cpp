@@ -17,14 +17,59 @@ constexpr float kLobbyTop = 90.0f;
 constexpr float kLobbyRowHeight = 33.0f;
 
 const char *mainMenuLabel(size_t index) {
-    static constexpr std::array<const char *, 5> labels{{
+    static constexpr std::array<const char *, 6> labels{{
+        "CONTINUE SAVED SKIRMISH",
         "SKIRMISH",
         "CLONE CAMPAIGNS - BREAKING BREAD",
         "MULTIPLAYER - NOT IMPLEMENTED",
-        "OPTIONS - NOT IMPLEMENTED",
+        "OPTIONS",
         "EXIT",
     }};
     return index < labels.size() ? labels[index] : "";
+}
+
+std::string optionValue(
+    const UserSettings &settings, size_t row) {
+    switch (row) {
+    case 0:
+        return std::to_string(
+                   settings.masterVolume) +
+               "%";
+    case 1:
+        return std::to_string(
+                   settings.musicVolume) +
+               "%";
+    case 2:
+        return std::to_string(
+                   settings.dialogueVolume) +
+               "%";
+    case 3:
+        return std::to_string(
+                   settings.effectsVolume) +
+               "%";
+    case 4:
+        return controlPresetName(
+            settings.controls);
+    case 5:
+        return "BACK";
+    }
+    return {};
+}
+
+const char *optionLabel(size_t row) {
+    static constexpr std::array<
+        const char *, 6>
+        labels{{
+            "Master Volume",
+            "Music Volume",
+            "Dialogue Volume",
+            "Effects Volume",
+            "Vita Control Preset",
+            "",
+        }};
+    return row < labels.size()
+               ? labels[row]
+               : "";
 }
 
 std::string lobbyValue(
@@ -230,6 +275,50 @@ void Frontend::adjustLobbyValue(int direction) {
     }
 }
 
+void Frontend::adjustOptionValue(int direction) {
+    int *volume = nullptr;
+    switch (selection_) {
+    case 0:
+        volume = &userSettings_.masterVolume;
+        break;
+    case 1:
+        volume = &userSettings_.musicVolume;
+        break;
+    case 2:
+        volume = &userSettings_.dialogueVolume;
+        break;
+    case 3:
+        volume = &userSettings_.effectsVolume;
+        break;
+    case 4:
+        userSettings_.controls =
+            userSettings_.controls ==
+                    ControlPreset::Standard
+                ? ControlPreset::LeftHanded
+                : ControlPreset::Standard;
+        settingsChanged_ = true;
+        return;
+    default:
+        return;
+    }
+    *volume = std::max(
+        0, std::min(
+               100,
+               *volume +
+                   (direction < 0 ? -5 : 5)));
+    settingsChanged_ = true;
+}
+
+void Frontend::beginConfirmation(
+    FrontendAction action,
+    const std::string &message) {
+    confirmReturnScreen_ = screen_;
+    confirmedAction_ = action;
+    message_ = message;
+    selection_ = 1;
+    screen_ = FrontendScreen::Confirm;
+}
+
 FrontendAction Frontend::update(
     const InputState &input, int matchOutcome) {
     if (screen_ == FrontendScreen::Gameplay &&
@@ -242,7 +331,6 @@ FrontendAction Frontend::update(
         if (input.menuActivate || input.pointerTap) {
             screen_ = FrontendScreen::MainMenu;
             selection_ = 0;
-            message_.clear();
         }
         return FrontendAction::None;
     }
@@ -256,7 +344,7 @@ FrontendAction Frontend::update(
         return FrontendAction::None;
     }
     if (screen_ == FrontendScreen::MainMenu) {
-        constexpr size_t count = 5;
+        constexpr size_t count = 6;
         const size_t touched = rowFromPointer(
             input, kMenuTop, kMenuRowHeight, count);
         if (touched < count) selection_ = touched;
@@ -264,19 +352,31 @@ FrontendAction Frontend::update(
         if (input.menuDown) moveSelection(1, count);
         if (input.menuActivate || touched < count) {
             if (selection_ == 0) {
+                if (!continueAvailable_) {
+                    message_ =
+                        "NO VALID SKIRMISH SAVE IS AVAILABLE";
+                    return FrontendAction::None;
+                }
+                screen_ = FrontendScreen::Loading;
+                message_ = "LOADING SAVED SKIRMISH...";
+                return FrontendAction::LoadMatch;
+            } else if (selection_ == 1) {
                 screen_ = FrontendScreen::SkirmishLobby;
                 selection_ = 0;
                 message_.clear();
-            } else if (selection_ == 1) {
+            } else if (selection_ == 2) {
                 screen_ = FrontendScreen::Loading;
                 message_ = "LOADING BREAKING BREAD...";
                 return FrontendAction::StartCampaign;
-            } else if (selection_ == 2) {
-                message_ =
-                    "MULTIPLAYER IS NOT IMPLEMENTED";
             } else if (selection_ == 3) {
                 message_ =
-                    "OPTIONS ARE NOT IMPLEMENTED";
+                    "MULTIPLAYER IS NOT IMPLEMENTED";
+            } else if (selection_ == 4) {
+                optionsReturnScreen_ =
+                    FrontendScreen::MainMenu;
+                screen_ = FrontendScreen::Options;
+                selection_ = 0;
+                message_.clear();
             } else {
                 return FrontendAction::Quit;
             }
@@ -310,9 +410,11 @@ FrontendAction Frontend::update(
         return FrontendAction::None;
     }
     if (screen_ == FrontendScreen::Pause) {
-        constexpr size_t count = 3;
+        constexpr size_t count = 6;
+        constexpr float pauseTop = 146.0f;
+        constexpr float pauseRow = 47.0f;
         const size_t touched = rowFromPointer(
-            input, kMenuTop, kMenuRowHeight, count);
+            input, pauseTop, pauseRow, count);
         if (touched < count) selection_ = touched;
         if (input.menuUp) moveSelection(-1, count);
         if (input.menuDown) moveSelection(1, count);
@@ -322,14 +424,94 @@ FrontendAction Frontend::update(
             if (selection_ == 0)
                 screen_ = FrontendScreen::Gameplay;
             else if (selection_ == 1) {
-                screen_ = FrontendScreen::Loading;
-                message_ = "RESTARTING MATCH...";
-                return FrontendAction::RestartMatch;
+                message_ = "SAVING MATCH...";
+                return FrontendAction::SaveMatch;
+            } else if (selection_ == 2) {
+                if (!continueAvailable_) {
+                    message_ =
+                        "NO VALID SKIRMISH SAVE IS AVAILABLE";
+                } else {
+                    beginConfirmation(
+                        FrontendAction::LoadMatch,
+                        "LOAD SAVE AND REPLACE THIS MATCH?");
+                }
+            } else if (selection_ == 3) {
+                beginConfirmation(
+                    FrontendAction::RestartMatch,
+                    "RESTART THIS MATCH FROM THE BEGINNING?");
+            } else if (selection_ == 4) {
+                optionsReturnScreen_ =
+                    FrontendScreen::Pause;
+                screen_ = FrontendScreen::Options;
+                selection_ = 0;
+                message_.clear();
             } else {
+                beginConfirmation(
+                    FrontendAction::ReturnToMainMenu,
+                    "ABANDON THIS MATCH?");
+            }
+        }
+        return FrontendAction::None;
+    }
+    if (screen_ == FrontendScreen::Options) {
+        constexpr size_t count = 6;
+        const size_t touched = rowFromPointer(
+            input, 154.0f, 48.0f, count);
+        if (touched < count) selection_ = touched;
+        if (input.menuUp) moveSelection(-1, count);
+        if (input.menuDown) moveSelection(1, count);
+        if (input.menuLeft)
+            adjustOptionValue(-1);
+        if (input.menuRight)
+            adjustOptionValue(1);
+        if ((input.menuActivate || touched < count) &&
+            selection_ < 5)
+            adjustOptionValue(1);
+        if (input.menuBack ||
+            ((input.menuActivate || touched < count) &&
+             selection_ == 5)) {
+            screen_ = optionsReturnScreen_;
+            selection_ = 0;
+        }
+        return FrontendAction::None;
+    }
+    if (screen_ == FrontendScreen::Confirm) {
+        constexpr size_t count = 2;
+        const size_t touched = rowFromPointer(
+            input, 282.0f, kMenuRowHeight,
+            count);
+        if (touched < count) selection_ = touched;
+        if (input.menuUp || input.menuLeft)
+            moveSelection(-1, count);
+        if (input.menuDown || input.menuRight)
+            moveSelection(1, count);
+        if (input.menuBack) {
+            screen_ = confirmReturnScreen_;
+            selection_ = 0;
+            message_.clear();
+        } else if (input.menuActivate ||
+                   touched < count) {
+            if (selection_ == 0) {
+                screen_ = confirmReturnScreen_;
+                selection_ = 0;
+                message_.clear();
+                return FrontendAction::None;
+            }
+            const FrontendAction action =
+                confirmedAction_;
+            if (action ==
+                FrontendAction::ReturnToMainMenu) {
                 screen_ = FrontendScreen::MainMenu;
                 selection_ = 0;
-                return FrontendAction::ReturnToMainMenu;
+            } else {
+                screen_ = FrontendScreen::Loading;
+                message_ =
+                    action ==
+                            FrontendAction::LoadMatch
+                        ? "LOADING SAVED SKIRMISH..."
+                        : "RESTARTING MATCH...";
             }
+            return action;
         }
         return FrontendAction::None;
     }
@@ -369,6 +551,23 @@ void Frontend::loadingFinished(
                        ? "COULD NOT START MATCH"
                        : error;
     }
+}
+
+void Frontend::actionFinished(
+    FrontendAction action, bool success,
+    const std::string &error) {
+    if (action == FrontendAction::SaveMatch) {
+        screen_ = FrontendScreen::Pause;
+        selection_ = 0;
+        message_ = success
+                       ? "MATCH SAVED"
+                       : error.empty()
+                             ? "MATCH COULD NOT BE SAVED"
+                             : error;
+        if (success) continueAvailable_ = true;
+        return;
+    }
+    loadingFinished(success, error);
 }
 
 void Frontend::showGameplay() {
@@ -446,6 +645,68 @@ void Frontend::render(
             renderer,
             {"D-PAD: SELECT / CHANGE   X: ACCEPT   O: BACK"},
             245, 507, 1.0f, 160, 180, 202);
+    } else if (
+        screen_ == FrontendScreen::Options) {
+        centeredText(
+            renderer, "OPTIONS", 30, 2.8f,
+            screenW, 230, 211, 143);
+        drawPanel(renderer, 170, 128, 620, 342);
+        for (size_t row = 0; row < 6; ++row) {
+            const float y = 154.0f + row * 48.0f;
+            if (row == selection_)
+                renderer.fillRect(
+                    188, y - 10, 584, 42,
+                    35, 65, 96, 255);
+            if (*optionLabel(row))
+                drawUiText(
+                    renderer, {optionLabel(row)},
+                    218, y, 1.35f,
+                    row == selection_ ? 255 : 208,
+                    row == selection_ ? 226 : 218,
+                    row == selection_ ? 154 : 228);
+            drawUiText(
+                renderer, {
+                    optionValue(
+                        userSettings_, row)},
+                row < 5 ? 545.0f : 440.0f,
+                y, 1.35f,
+                row == selection_ ? 255 : 224,
+                row == selection_ ? 226 : 230,
+                row == selection_ ? 154 : 236);
+        }
+        centeredText(
+            renderer,
+            userSettings_.controls ==
+                    ControlPreset::Standard
+                ? "STANDARD: SELECT+D-PAD GROUPS, SQUARE ASSIGNS"
+                : "LEFT-HANDED: STICKS AND X/O ROLES SWAPPED",
+            492, 0.95f, screenW,
+            160, 180, 202);
+    } else if (
+        screen_ == FrontendScreen::Confirm) {
+        centeredText(
+            renderer, "CONFIRM", 92, 2.8f,
+            screenW, 255, 184, 96);
+        drawPanel(renderer, 170, 194, 620, 202);
+        centeredText(
+            renderer, message_, 222, 1.25f,
+            screenW, 232, 226, 210);
+        const char *entries[] = {
+            "CANCEL", "CONFIRM"};
+        for (size_t row = 0; row < 2; ++row) {
+            const float y =
+                282.0f + row * kMenuRowHeight;
+            if (row == selection_)
+                renderer.fillRect(
+                    188, y - 10, 584, 42,
+                    76, 48, 35, 255);
+            centeredText(
+                renderer, entries[row], y,
+                1.55f, screenW,
+                row == selection_ ? 255 : 208,
+                row == selection_ ? 226 : 218,
+                row == selection_ ? 154 : 228);
+        }
     } else {
         const bool pause =
             screen_ == FrontendScreen::Pause;
@@ -466,22 +727,33 @@ void Frontend::render(
             outcome_ == 0 ? 92 : 143);
         drawPanel(
             renderer, 170,
-            outcome ? 280.0f : 164.0f,
-            620, outcome ? 132.0f : 280.0f);
+            outcome ? 280.0f
+                    : pause ? 122.0f : 164.0f,
+            620,
+            outcome ? 132.0f
+                    : pause ? 332.0f : 310.0f);
         std::vector<std::string> entries;
         float top = kMenuTop;
         if (pause) {
             entries = {
-                "RESUME", "RESTART MATCH",
-                "RETURN TO MAIN MENU"};
+                "RESUME", "SAVE MATCH",
+                "LOAD MATCH", "RESTART MATCH",
+                "OPTIONS", "RETURN TO MAIN MENU"};
+            top = 146.0f;
         } else if (outcome) {
             entries = {
                 "RESTART MATCH",
                 "RETURN TO MAIN MENU"};
             top = 310.0f;
         } else {
-            for (size_t i = 0; i < 5; ++i)
-                entries.push_back(mainMenuLabel(i));
+            for (size_t i = 0; i < 6; ++i) {
+                std::string label =
+                    mainMenuLabel(i);
+                if (i == 0 &&
+                    !continueAvailable_)
+                    label += " - NONE";
+                entries.push_back(label);
+            }
         }
         for (size_t row = 0; row < entries.size();
              ++row) {

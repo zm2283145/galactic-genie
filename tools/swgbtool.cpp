@@ -61,6 +61,7 @@ static int usage() {
             "  swgbtool ai-script <entry.per>\n"
             "  swgbtool test-ai <DataDir> <AiDir>\n"
             "  swgbtool test-skirmish <DataDir>\n"
+            "  swgbtool test-interface <DataDir>\n"
             "  swgbtool mp3 <file.mp3>\n");
     return 2;
 }
@@ -250,7 +251,7 @@ static int cmdUnit(const char *dataDir, int id) {
                    "special ability %u, adjacent mode %u, graphics angle %d, speed %.2f, "
                    "restriction %d, fly %u, obstruction %u/%u, collision %.2f,%.2f, "
                    "outline %.2f,%.2f,%.2f, enabled/disabled %u/%u, unit civ %u, "
-                   "sounds select/move/attack %d/%d/%d\n", civ,
+                   "minimap mode/color %u/%u, sounds select/move/attack %d/%d/%d\n", civ,
                    assets.dat().civs[civ].name.c_str(), unit.name.c_str(), unit.type, unit.cls,
                    unit.hideInEditor, unit.heroMode, graphicId,
                    graphic ? graphic->slp : -1, graphic ? graphic->frameCount : 0,
@@ -262,6 +263,7 @@ static int cmdUnit(const char *dataDir, int id) {
                    unit.collisionSize[0], unit.collisionSize[1],
                    unit.outlineSize[0], unit.outlineSize[1], unit.outlineSize[2],
                    unit.enabled, unit.disabled, unit.civilization,
+                   unit.minimapMode, unit.minimapColor,
                    unit.selectionSound, unit.moveSound, unit.attackSound);
             printf("  combat hp %d base armor %d level %u range %.2f..%.2f reload %.2f "
                    "garrison capacity/type/heal %.0f/%u/%.2f "
@@ -7391,6 +7393,11 @@ static int cmdTestSkirmish(const char *dataDir) {
     InputState input;
     input.menuActivate = true;
     frontend.update(input, -1);
+    input = {};
+    input.menuDown = true;
+    frontend.update(input, -1);
+    input = {};
+    input.menuActivate = true;
     frontend.update(input, -1);
     input = {};
     input.menuDown = true;
@@ -7406,9 +7413,11 @@ static int cmdTestSkirmish(const char *dataDir) {
     frontend.update(input, -1);
     input = {};
     input.menuDown = true;
-    frontend.update(input, -1);
+    for (int row = 0; row < 3; ++row)
+        frontend.update(input, -1);
     input = {};
     input.menuActivate = true;
+    frontend.update(input, -1);
     const FrontendAction restart =
         frontend.update(input, -1);
     frontend.loadingFinished(true);
@@ -7443,6 +7452,324 @@ static int cmdTestSkirmish(const char *dataDir) {
             std::to_string((int)outcomeRestart) +
             "/" +
             std::to_string((int)outcomeMenu));
+
+    return failures ? 1 : 0;
+}
+
+static int cmdTestInterface(const char *dataDir) {
+    std::string err;
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    int failures = 0;
+    auto report = [&](const char *name, bool ok,
+                      const std::string &detail) {
+        printf(
+            "%s %s %s\n",
+            ok ? "PASS" : "FAIL",
+            name, detail.c_str());
+        if (!ok) ++failures;
+    };
+
+    bool transforms = true;
+    float maximumError = 0.0f;
+    for (int mapSize : {48, 96, 192}) {
+        for (const auto &world :
+             std::array<std::array<float, 2>, 5>{{
+                 {{0.1f, 0.1f}},
+                 {{(float)mapSize - 0.1f, 0.1f}},
+                 {{0.1f, (float)mapSize - 0.1f}},
+                 {{mapSize * 0.5f, mapSize * 0.5f}},
+                 {{mapSize * 0.25f, mapSize * 0.75f}},
+             }}) {
+            const auto point =
+                Game::minimapWorldToPoint(
+                    world[0], world[1], mapSize,
+                    17.0f, 9.0f, 168.0f);
+            float x = 0.0f, y = 0.0f;
+            const bool valid =
+                Game::minimapPointToWorld(
+                    point[0], point[1], mapSize,
+                    17.0f, 9.0f, 168.0f,
+                    x, y);
+            const float error =
+                std::max(
+                    std::abs(x - world[0]),
+                    std::abs(y - world[1]));
+            maximumError =
+                std::max(maximumError, error);
+            transforms =
+                transforms && valid &&
+                error < 0.001f;
+        }
+    }
+    float outsideX = 0.0f, outsideY = 0.0f;
+    transforms =
+        transforms &&
+        !Game::minimapPointToWorld(
+            17.0f, 9.0f, 96,
+            17.0f, 9.0f, 168.0f,
+            outsideX, outsideY);
+    report(
+        "minimap-transform-roundtrip",
+        transforms,
+        "max-error=" +
+            std::to_string(maximumError));
+
+    SkirmishSettings settings;
+    settings.seed = 0xC0FFEEu;
+    settings.mapSize = 96;
+    settings.playerCivilization = 3;
+    settings.computerCivilization = 3;
+    settings.mapStyle =
+        SkirmishMapStyle::Grasslands;
+    settings.startingResources = 1000;
+    Game game(assets);
+    if (!game.initSkirmish(settings, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    const uint32_t first =
+        game.spawnObjectForTesting(
+            3, 83, 1, 30.0f, 30.0f);
+    const uint32_t second =
+        game.spawnObjectForTesting(
+            3, 83, 1, 31.0f, 30.0f);
+    const uint32_t enemy =
+        game.spawnObjectForTesting(
+            3, 83, 2, 32.0f, 30.0f);
+    const bool groupAssigned =
+        first && second && enemy &&
+        game.selectObjectsForTesting(
+            {first, second}) &&
+        game.assignControlGroup(0);
+    game.damageObjectForTesting(
+        second, 100000, enemy);
+    const bool groupRecall =
+        game.recallControlGroup(0, true) &&
+        game.controlGroupForTesting(0).size() ==
+            1 &&
+        game.selectedObjectIds().size() == 1 &&
+        game.selectedObjectIds().front() == first;
+    report(
+        "control-groups-cleanup-order",
+        groupAssigned && groupRecall,
+        "members=" +
+            std::to_string(
+                game.controlGroupForTesting(0)
+                    .size()));
+
+    const size_t exploredBefore =
+        game.exploredTileCountForTesting(1);
+    game.damageObjectForTesting(first, 1, enemy);
+    InputState minimapInput;
+    minimapInput.screenW = 960;
+    minimapInput.screenH = 544;
+    minimapInput.pointerX = 866.0f;
+    minimapInput.pointerY = 94.0f;
+    minimapInput.cursorVisible = true;
+    minimapInput.pointerTap = true;
+    game.update(0.05f, minimapInput);
+    const auto camera =
+        game.cameraCenterForTesting();
+    const bool minimapNavigation =
+        std::abs(camera[0]) < 0.01f &&
+        std::abs(
+            camera[1] -
+            settings.mapSize *
+                Game::kTileHalfH) <
+            0.1f;
+    game.render(renderer, 960, 544);
+    const bool fogAndAlerts =
+        exploredBefore > 0 &&
+        exploredBefore <
+            (size_t)settings.mapSize *
+                settings.mapSize &&
+        game.minimapAlertCountForTesting() > 0 &&
+        renderer.drawCalls() > 0;
+    report(
+        "minimap-fog-navigation-alerts",
+        minimapNavigation && fogAndAlerts,
+        "explored=" +
+            std::to_string(exploredBefore) +
+            " alerts=" +
+            std::to_string(
+                game.minimapAlertCountForTesting()) +
+            " camera=" +
+            std::to_string(camera[0]) + "," +
+            std::to_string(camera[1]));
+
+    const char *settingsPath =
+        "swgb-interface-settings.tmp";
+    std::remove(settingsPath);
+    UserSettings savedOptions;
+    savedOptions.masterVolume = 55;
+    savedOptions.musicVolume = 35;
+    savedOptions.dialogueVolume = 80;
+    savedOptions.effectsVolume = 25;
+    savedOptions.controls =
+        ControlPreset::LeftHanded;
+    UserSettings loadedOptions;
+    const bool settingsSaved =
+        saveSettings(
+            settingsPath, savedOptions, &err);
+    const bool settingsLoaded =
+        settingsSaved &&
+        loadSettings(
+            settingsPath, loadedOptions, &err) &&
+        loadedOptions.masterVolume == 55 &&
+        loadedOptions.musicVolume == 35 &&
+        loadedOptions.dialogueVolume == 80 &&
+        loadedOptions.effectsVolume == 25 &&
+        loadedOptions.controls ==
+            ControlPreset::LeftHanded;
+    FILE *corrupt =
+        std::fopen(settingsPath, "wb");
+    if (corrupt) {
+        std::fwrite("bad", 1, 3, corrupt);
+        std::fclose(corrupt);
+    }
+    std::string corruptError;
+    const bool corruptRejected =
+        !loadSettings(
+            settingsPath, loadedOptions,
+            &corruptError) &&
+        !corruptError.empty();
+    std::remove(settingsPath);
+    report(
+        "settings-persistence-rejection",
+        settingsLoaded && corruptRejected,
+        corruptError);
+
+    const char *savePath =
+        "swgb-interface-match.tmp";
+    std::remove(savePath);
+    game.moveObjectForTesting(
+        first, 34.0f, 35.0f);
+    game.selectObjectForTesting(first);
+    game.assignControlGroup(1);
+    game.update(0.75f, InputState{});
+    const auto savedPosition =
+        game.objectPosition(first);
+    const int savedHealth =
+        game.objectHealthForTesting(first);
+    const size_t savedObjects =
+        game.activeObjectCount();
+    const size_t savedExplored =
+        game.exploredTileCountForTesting(1);
+    const float savedTime =
+        game.simulationTimeForTesting();
+    bool roundTrip =
+        game.saveMatch(savePath, &err);
+    if (roundTrip) {
+        game.damageObjectForTesting(
+            first, 100000, enemy);
+        game.update(1.0f, InputState{});
+        roundTrip =
+            game.loadMatch(savePath, &err);
+    }
+    const auto loadedPosition =
+        game.objectPosition(first);
+    roundTrip =
+        roundTrip &&
+        game.objectActive(first) &&
+        game.objectHealthForTesting(first) ==
+            savedHealth &&
+        std::abs(
+            loadedPosition[0] -
+            savedPosition[0]) < 0.001f &&
+        std::abs(
+            loadedPosition[1] -
+            savedPosition[1]) < 0.001f &&
+        game.activeObjectCount() ==
+            savedObjects &&
+        game.exploredTileCountForTesting(1) ==
+            savedExplored &&
+        std::abs(
+            game.simulationTimeForTesting() -
+            savedTime) < 0.001f &&
+        game.controlGroupForTesting(1).size() ==
+            1;
+    bool repeated = roundTrip;
+    for (int cycle = 0;
+         cycle < 3 && repeated; ++cycle) {
+        game.update(0.2f, InputState{});
+        repeated =
+            game.saveMatch(savePath, &err) &&
+            game.loadMatch(savePath, &err);
+    }
+    report(
+        "save-load-authoritative-roundtrip",
+        roundTrip && repeated,
+        roundTrip
+            ? "objects=" +
+                  std::to_string(savedObjects) +
+                  " time=" +
+                  std::to_string(savedTime)
+            : err);
+
+    FILE *versionFile =
+        std::fopen(savePath, "r+b");
+    if (versionFile) {
+        std::fseek(versionFile, 8, SEEK_SET);
+        const uint32_t unsupported = 99;
+        std::fwrite(
+            &unsupported, 1,
+            sizeof unsupported, versionFile);
+        std::fclose(versionFile);
+    }
+    SkirmishSettings probed;
+    std::string versionError;
+    const bool versionRejected =
+        !Game::readSaveSettings(
+            savePath, probed, &versionError) &&
+        versionError.find("version") !=
+            std::string::npos;
+    std::remove(savePath);
+    report(
+        "save-version-rejection",
+        versionRejected, versionError);
+
+    Frontend frontend;
+    InputState input;
+    input.menuActivate = true;
+    frontend.update(input, -1);
+    input = {};
+    input.menuDown = true;
+    frontend.update(input, -1);
+    input = {};
+    input.menuActivate = true;
+    frontend.update(input, -1);
+    input = {};
+    input.menuDown = true;
+    for (int row = 0; row < 11; ++row)
+        frontend.update(input, -1);
+    input = {};
+    input.menuActivate = true;
+    frontend.update(input, -1);
+    frontend.loadingFinished(true);
+    game.update(0.1f, InputState{});
+    const float beforePause =
+        game.simulationTimeForTesting();
+    input = {};
+    input.pausePressed = true;
+    frontend.update(input, -1);
+    if (frontend.screen() ==
+        FrontendScreen::Gameplay)
+        game.update(10.0f, InputState{});
+    const bool paused =
+        frontend.screen() ==
+            FrontendScreen::Pause &&
+        game.simulationTimeForTesting() ==
+            beforePause;
+    report(
+        "pause-freezes-simulation",
+        paused,
+        "time=" +
+            std::to_string(beforePause));
 
     return failures ? 1 : 0;
 }
@@ -7523,6 +7850,8 @@ int main(int argc, char **argv) {
             argv[2], argv[3]);
     if (!strcmp(cmd, "test-skirmish"))
         return cmdTestSkirmish(argv[2]);
+    if (!strcmp(cmd, "test-interface"))
+        return cmdTestInterface(argv[2]);
     if (!strcmp(cmd, "mp3")) return cmdMp3(argv[2]);
     return usage();
 }

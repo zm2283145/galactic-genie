@@ -19,8 +19,8 @@ It is written clean-room style: file formats come from public documentation (ope
 | Initial trigger runtime: timers, object/area/resource conditions, ordered effects, voiced dialogue, and collision-aware scripted movement | in progress |
 | Units: idle/walk animation, 8-way facing with mirroring, graphic deltas for buildings | done |
 | Combat: contextual attack orders, pursuit, projectiles, DAT-driven range/reload/damage, health, building damage, and death | in progress |
-| Vita: renderer, camera controls, original cursors, unit selection/status markers, formation movement, and debug minimap | done |
-| Vita frontend: title/main menu, campaign entry, configurable skirmish lobby, loading, pause/restart/menu, and outcome flow | done |
+| Vita: renderer, camera controls, original cursors, unit selection/status markers, formation movement, and fog-aware navigable minimap | done |
+| Vita frontend: title/main menu, campaign entry, skirmish lobby, real pause/options, save/continue, and outcome flow | done |
 | Deterministic random maps: grasslands, archipelago, and compact two-island regression layout | done |
 | PC `swgbtool`: data inspection, CPX/SCX listing, and procedural/scenario PNG rendering | done |
 
@@ -71,8 +71,10 @@ cmake -B build-pc && cmake --build build-pc
 
 Frontend controls: d-pad or left-stick up/down selects an entry, left/right changes a lobby
 value, X activates, and O returns. Touching an entry selects and activates it. START pauses an
-active match; the pause and outcome screens can restart with the exact same settings and seed or
-return to the main menu.
+active match. The pause menu can resume, save/load a generated skirmish, restart with the exact
+same settings and seed, open options, or return to the main menu. Loading, restarting, and
+abandoning a match require confirmation. The main menu Continue entry only enables for a validated
+save. Campaign saving is explicitly unavailable.
 
 Gameplay controls: left stick, d-pad, or a touch drag scrolls; L/R zoom. The right stick moves the
 command cursor, and holding it against a screen edge scrolls the camera. X selects a visible
@@ -86,7 +88,16 @@ combat units through defensive, stand-ground, passive, and aggressive stances. T
 panel's garrison command enters original-cursor building targeting; Triangle on a selected
 production building opens its Units, Research, and Commands pages, where queued items can be
 cancelled, while a gate opens only its lock/unlock command. Selected buildings show power and
-shield-coverage state. SELECT toggles the minimap overlay.
+shield-coverage state. The upper-right minimap is always available: tap or drag it directly, or
+move the right-stick cursor over it and press X. Select+d-pad recalls groups 1-4; hold Square
+during the same chord to assign the current ordered local selection. Recalling a group twice
+centers its first unit. The Options screen provides live master/music/dialogue/effects levels
+and a Left-Handed preset that swaps the camera/cursor sticks and X/O gameplay roles.
+
+Settings are stored in `ux0:data/swgb/settings.bin`; generated-skirmish continuation is stored in
+`ux0:data/swgb/skirmish.save`. Both formats are versioned and validated. Corrupt settings are
+reported and reset to defaults; corrupt, oversized, mismatched, or unsupported saves are rejected
+without replacing the current match.
 
 Combat currently includes pursuit with collision-aware A* pathfinding, attack animations and
 acknowledgements, original projectile graphics and weapon sounds, DAT attack/armor classes,

@@ -248,6 +248,20 @@ void VitaAudio::resetSession() {
     sceKernelUnlockMutex(mutex_, 1);
 }
 
+void VitaAudio::setVolumes(
+    int master, int music,
+    int dialogue, int effects) {
+    const auto volume = [](int value) {
+        return std::max(
+                   0, std::min(100, value)) /
+               100.0f;
+    };
+    masterVolume_ = volume(master);
+    musicVolume_ = volume(music);
+    dialogueVolume_ = volume(dialogue);
+    effectsVolume_ = volume(effects);
+}
+
 int VitaAudio::threadEntry(SceSize args, void *argp) {
     if (args != sizeof(VitaAudio *) || !argp) return -1;
     VitaAudio *self = *static_cast<VitaAudio **>(argp);
@@ -366,8 +380,12 @@ int VitaAudio::run() {
                 closeMusic();
             }
         }
+        const float masterGain =
+            masterVolume_.load();
         const float musicGain =
-            current ? kDuckedMusicGain : kMusicGain;
+            (current ? kDuckedMusicGain
+                     : kMusicGain) *
+            masterGain * musicVolume_.load();
         for (size_t sample = 0;
              sample < musicBytes / sizeof(int16_t);
              ++sample)
@@ -387,7 +405,8 @@ int VitaAudio::run() {
                         current->samples[
                             frame * AudioClip::kChannels +
                             sample] *
-                        kDialogueGain);
+                        kDialogueGain * masterGain *
+                        dialogueVolume_.load());
                 buffer[sample] =
                     (int16_t)std::max(
                         -32768, std::min(32767, mixed));
@@ -408,7 +427,9 @@ int VitaAudio::run() {
                                               AudioClip::kChannels +
                                           sample] *
                                       effect.gain /
-                                      effectDivisor);
+                                      effectDivisor *
+                                      masterGain *
+                                      effectsVolume_.load());
                 buffer[sample] = (int16_t)std::max(-32768, std::min(32767, mixed));
             }
             effect.frame += frames;

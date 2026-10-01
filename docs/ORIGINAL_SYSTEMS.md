@@ -32,6 +32,106 @@ build and test on Vita.
 | Compact island map | Shipyard terrain `1/4`, side terrain `2/35`, and DAT movement restrictions | Covered |
 | Skirmish setup and random-map launch | Preset fields at `0x443440`; seeded generation at `0x4940f0`; AI defines at `0x57eff0` | Verified and covered |
 | Match-to-menu transition | Cleanup and `"Main Menu"` transition at `0x45f916` | Verified and covered |
+| Minimap and fog | `diam_map` draw dispatcher at `0x4560a0`; DAT `minimapMode`/`minimapColor` | Verified and covered |
+| Control groups | `groupnum.shp` string at `0x689920`, referenced at `0x42745d` | Verified and covered |
+| Pause/options/audio | Pause request path at `0x4359a9`; sound/music controls at `0x42701f`/`0x427247` | Verified and covered |
+| Save/load | `"Save Game Screen"` constructor at `0x5286f0` | Native generated-skirmish format covered |
+
+## Minimap, controls, pause, audio, and saves
+
+Research used the same GOG Clone Campaigns executable and DAT hashes recorded
+below. Addresses are image virtual addresses for the preferred `0x400000`
+base. The evidence was collected from executable string cross-references and
+focused disassembly; behavior not established by those sources is identified
+as an implementation contract rather than attributed to the original.
+
+The original diamond-map dispatcher begins at `0x4560a0`. It validates the map,
+surface, and view members before drawing, derives a player mask at
+`0x456113`-`0x456122`, and branches through separate subordinate paths according
+to map state. This is the executable evidence behind the already-researched
+`draw_explored_tiles`/`draw_all_tiles` behavior. The Clone Campaigns DAT adds
+`Unit::minimapMode` and `Unit::minimapColor`; representative records verify that
+Worker 83 and Command Center 109 use mode 1, while tree 348 uses mode 0. Player
+color records separately provide `playerColorBase` and `minimapColor`.
+
+Native minimap contract:
+
+- Terrain is projected into a diamond rather than drawn as an unprojected
+  debug grid. Terrain palette color and elevation distinguish land, water, and
+  raised ground.
+- Unexplored pixels are black. Explored pixels remain but are dimmed; currently
+  visible pixels use their normal minimap brightness.
+- A DAT mode of zero suppresses an object. Mobile objects require current
+  visibility. Discovered buildings and static gatherables may remain according
+  to the same remembered-object fog rule used in the world renderer.
+- Player objects use player colors. Gaia objects use the DAT minimap color.
+  The camera viewport and short-lived hostile-damage pings are independent
+  overlays.
+- The CPU image is bounded at 128 by 128 pixels and rebuilt at 4 Hz. Rendering
+  uses one dynamic texture plus a bounded number of viewport/ping lines; it
+  never emits one draw call per map tile.
+
+The executable contains the interface asset name `groupnum.shp` at `0x689920`;
+its only direct pointer reference is `0x42745d`. Original play observation
+establishes assign, recall, and repeated-recall camera centering. The native
+implementation retains existing leader-first selection order, stores object
+IDs rather than pointers, removes dead/non-local objects before every recall,
+and plays the ordinary first-unit selection acknowledgement. Vita exposes four
+immediate groups through Select plus the d-pad; holding Square during that chord
+assigns instead of recalling. Groups 5-10 remain represented in the save
+format and engine API for future keyboard input.
+
+The pause request diagnostic string at `0x68ac84` is referenced by
+`0x4359a9`. That path sets the game state at `+0x1e3c` to 4 at `0x4359c3` and
+sends message `0x17a2`, confirming pause is simulation state rather than a
+visual overlay. The native frontend stops calling `Game::update` while paused,
+but continues polling controls and rendering the menu. Resume, save, load,
+same-seed restart, options, and return-to-menu are available. Load, restart,
+and abandon actions require confirmation; unsupported campaign saving and I/O
+failures remain on the pause screen with an explicit error.
+
+The Options transition pushes the `"Options"` screen name at `0x45b050`.
+`"Sound Volume"` at `0x6898f8` is referenced by the control creation path at
+`0x42701f` and teardown path at `0x427b7d`. `"Music Volume"` at `0x689910` is
+referenced by corresponding paths at `0x427247` and `0x427d7b`. The original
+also exposes `"Scroll Speed"` at `0x6896d8`, referenced at `0x424d93` and
+`0x4253ed`. The reimplementation exposes master, music, dialogue, and effects
+from 0-100 in five-point increments. Gains apply live in the audio thread and
+persist in a checksummed, versioned settings file. Two constrained,
+conflict-free presets are offered: Standard and Left-Handed (camera/cursor
+sticks and X/O roles swapped). Corrupt and unsupported settings are rejected,
+reported, and recovered to documented defaults.
+
+The original hostile-warning resource name `atakwarn.wav` is stored at
+`0x69a1d8` and referenced at `0x5e60b7`; the native attack notification uses
+the matching DRS resource 50315 and now also creates a coalesced minimap ping.
+
+The single-player save-screen constructor starts at `0x5286f0`, pushes the
+`"Save Game Screen"` identifier at `0x528711`, initializes its owned fields,
+and records its mode arguments at `0x528760`-`0x528789`. The new generated
+skirmish save format is intentionally native rather than an SCX writer. It has
+an eight-byte magic, version, bounded payload size, and payload checksum, and
+is replaced through a temporary file with rollback backup. Reads are capped at
+32 MiB before allocation.
+
+Save contract:
+
+- The file stores setup/seed, RNG state, simulation time, map/elevation, player
+  resources/research/diplomacy/active state, fog, objects and stable IDs, HP and
+  shields, production/construction, paths and orders, garrisons, projectiles,
+  remains, AI goals/timers/escrow/groups/rule cursor, conquest state, camera,
+  selection, formations, and control groups.
+- The original AI personality is loaded from disk before mutable AI state is
+  applied. A different personality/rule count is rejected rather than partly
+  loaded.
+- Loading parses and validates into temporary state first; the running match is
+  replaced only after the complete payload validates.
+- Cursor modes, open action/cheat menus, queued spoken instructions, ambient
+  cadence, attack-ping cooldowns, and pathfinder caches are deliberately
+  normalized. These presentation/transient caches are reconstructed after
+  load; active simulation orders, projectiles, and AI timers are not discarded.
+- Campaign scenarios are not presented as saveable until trigger and campaign
+  archive continuity have a separately verified contract.
 
 ## Skirmish setup, random maps, and match lifecycle
 

@@ -72,6 +72,19 @@ Texture *GlRenderer::createMaskTexture(int width, int height, const uint8_t *alp
     return t;
 }
 
+bool GlRenderer::updateTexture(Texture *texture, const uint8_t *rgba) {
+    if (!texture || !rgba || texture->alphaOnly) return false;
+    flush();
+    auto *t = static_cast<GlTexture *>(texture);
+    glBindTexture(GL_TEXTURE_2D, t->id);
+    glTexSubImage2D(
+        GL_TEXTURE_2D, 0, 0, 0,
+        t->width, t->height,
+        GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    current_ = currentMask_ = nullptr;
+    return glGetError() == GL_NO_ERROR;
+}
+
 void GlRenderer::destroyTexture(Texture *t) {
     if (!t) return;
     auto *gt = static_cast<GlTexture *>(t);
