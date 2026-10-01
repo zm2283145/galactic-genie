@@ -175,6 +175,70 @@ bool VitaAudio::playEffect(int resourceId, const std::vector<uint8_t> &data) {
     return true;
 }
 
+void VitaAudio::playOiiaEffect() {
+    if (!running_) return;
+    if (!oiiaClip_) {
+        oiiaClip_ = std::make_shared<AudioClip>();
+        constexpr float duration = 1.05f;
+        const size_t frames =
+            (size_t)(AudioClip::kSampleRate * duration);
+        oiiaClip_->samples.resize(
+            frames * AudioClip::kChannels);
+        const float notes[] = {
+            220.0f, 330.0f, 392.0f, 330.0f,
+            247.0f, 370.0f, 440.0f, 370.0f};
+        for (size_t frame = 0;
+             frame < frames; ++frame) {
+            const float time =
+                frame / (float)AudioClip::kSampleRate;
+            const int syllable =
+                std::min(
+                    7,
+                    (int)(time / (duration / 8.0f)));
+            const float local =
+                std::fmod(
+                    time, duration / 8.0f) /
+                (duration / 8.0f);
+            const float envelope =
+                std::min(1.0f, local * 10.0f) *
+                std::min(1.0f, (1.0f - local) * 7.0f);
+            const float vibrato =
+                1.0f + 0.018f *
+                           std::sin(
+                               2.0f * 3.14159265f *
+                               7.0f * time);
+            const float phase =
+                2.0f * 3.14159265f *
+                notes[syllable] * vibrato * time;
+            const float vowel =
+                std::sin(phase) * 0.58f +
+                std::sin(phase * 2.0f) * 0.25f +
+                std::sin(phase * 3.0f) * 0.10f +
+                std::sin(phase * 5.0f) * 0.07f;
+            const float sample =
+                std::max(
+                    -1.0f,
+                    std::min(
+                        1.0f,
+                        vowel * envelope * 0.72f));
+            const int16_t pcm =
+                (int16_t)(sample * 32767.0f);
+            oiiaClip_->samples[
+                frame * AudioClip::kChannels] = pcm;
+            oiiaClip_->samples[
+                frame * AudioClip::kChannels + 1] = pcm;
+        }
+    }
+    sceKernelLockMutex(mutex_, 1, nullptr);
+    if (pendingEffects_.size() >=
+        kMaxPendingEffects)
+        pendingEffects_.pop_front();
+    pendingEffects_.push_back(
+        {oiiaClip_, kEffectGain});
+    sceKernelUnlockMutex(mutex_, 1);
+    log("playing original oiia effect");
+}
+
 int VitaAudio::threadEntry(SceSize args, void *argp) {
     if (args != sizeof(VitaAudio *) || !argp) return -1;
     VitaAudio *self = *static_cast<VitaAudio **>(argp);

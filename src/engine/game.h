@@ -117,9 +117,336 @@ public:
         int player) const;
     int aiGoalForTesting(
         int player, int goal) const;
+    int aiConstantForTesting(
+        int player,
+        const std::string &name) const {
+        if (player <= 0 ||
+            (size_t)player >=
+                aiPlayers_.size())
+            return 0;
+        const AiProgram &program =
+            aiPlayers_[(size_t)player]
+                .program;
+        return program.hasConstant(name)
+                   ? program.constant(name)
+                   : 0;
+    }
+    size_t aiActionCountForTesting(
+        int player,
+        const std::string &actionName,
+        const std::string &argument) const {
+        if (player <= 0 ||
+            (size_t)player >=
+                aiPlayers_.size())
+            return 0;
+        size_t count = 0;
+        for (const AiRule &rule :
+             aiPlayers_[(size_t)player]
+                 .program.rules)
+            for (const AiNode &action :
+                 rule.actions)
+                if (normalizeAiSymbol(
+                        action.name()) ==
+                        normalizeAiSymbol(
+                            actionName) &&
+                    action.children.size() >
+                        1 &&
+                    normalizeAiSymbol(
+                        action.children[1]
+                            .value) ==
+                        normalizeAiSymbol(
+                            argument))
+                    count++;
+        return count;
+    }
+    size_t aiMatchingActionCountForTesting(
+        int player,
+        const std::string &actionName,
+        const std::string &argument) {
+        if (player <= 0 ||
+            (size_t)player >=
+                aiPlayers_.size())
+            return 0;
+        AiPlayerState &state =
+            aiPlayers_[(size_t)player];
+        size_t count = 0;
+        for (AiRule &rule :
+             state.program.rules) {
+            if (!rule.enabled) continue;
+            const bool hasAction =
+                std::any_of(
+                    rule.actions.begin(),
+                    rule.actions.end(),
+                    [&](const AiNode &action) {
+                        return normalizeAiSymbol(
+                                   action.name()) ==
+                                   normalizeAiSymbol(
+                                       actionName) &&
+                               action.children.size() >
+                                   1 &&
+                               normalizeAiSymbol(
+                                   action.children[1]
+                                       .value) ==
+                                   normalizeAiSymbol(
+                                       argument);
+                    });
+            if (!hasAction) continue;
+            bool matches = true;
+            for (const AiNode &condition :
+                 rule.conditions)
+                if (evaluateAiCondition(
+                        player, state,
+                        condition) !=
+                    AiTruth::True) {
+                    matches = false;
+                    break;
+                }
+            if (matches) count++;
+        }
+        return count;
+    }
+    std::string aiActionConditionReportForTesting(
+        int player,
+        const std::string &actionName,
+        const std::string &argument) {
+        if (player <= 0 ||
+            (size_t)player >=
+                aiPlayers_.size())
+            return {};
+        AiPlayerState &state =
+            aiPlayers_[(size_t)player];
+        std::string report;
+        for (AiRule &rule :
+             state.program.rules) {
+            const bool hasAction =
+                std::any_of(
+                    rule.actions.begin(),
+                    rule.actions.end(),
+                    [&](const AiNode &action) {
+                        return normalizeAiSymbol(
+                                   action.name()) ==
+                                   normalizeAiSymbol(
+                                       actionName) &&
+                               action.children.size() >
+                                   1 &&
+                               normalizeAiSymbol(
+                                   action.children[1]
+                                       .value) ==
+                                   normalizeAiSymbol(
+                                       argument);
+                    });
+            if (!hasAction) continue;
+            report += "[";
+            for (const AiNode &condition :
+                 rule.conditions) {
+                const AiTruth truth =
+                    evaluateAiCondition(
+                        player, state,
+                        condition);
+                report += normalizeAiSymbol(
+                    condition.name());
+                report += truth == AiTruth::True
+                              ? ":T "
+                          : truth == AiTruth::False
+                              ? ":F "
+                              : ":? ";
+            }
+            report += "]";
+        }
+        return report;
+    }
     int aiStrategicNumberForTesting(
         int player,
         const std::string &name) const;
+    int aiTechLevelForTesting(
+        int player) const {
+        return aiTechLevel(player);
+    }
+    uint32_t aiAttacksIssuedForTesting(
+        int player) const {
+        return player > 0 &&
+                       (size_t)player <
+                           aiPlayers_.size()
+                   ? aiPlayers_[(size_t)player]
+                         .attacksIssued
+                   : 0;
+    }
+    uint32_t aiFormationOrdersForTesting(
+        int player) const {
+        return player > 0 &&
+                       (size_t)player <
+                           aiPlayers_.size()
+                   ? aiPlayers_[(size_t)player]
+                         .formationOrders
+                   : 0;
+    }
+    uint32_t aiTransportLandingsForTesting(
+        int player) const {
+        return player > 0 &&
+                       (size_t)player <
+                           aiPlayers_.size()
+                   ? aiPlayers_[(size_t)player]
+                         .transportLandings
+                   : 0;
+    }
+    size_t exploredTileCountForTesting(
+        int player) const {
+        if (player <= 0 ||
+            (size_t)player >=
+                exploredTiles_.size())
+            return 0;
+        return (size_t)std::count(
+            exploredTiles_[(size_t)player]
+                .begin(),
+            exploredTiles_[(size_t)player]
+                .end(),
+            (uint8_t)1);
+    }
+    bool aiBuildForTesting(
+        int player,
+        const std::string &symbol) {
+        const dat::Unit *unit =
+            aiUnit(player, symbol);
+        return unit &&
+               aiBuild(player, *unit);
+    }
+    int aiUnitIdForTesting(
+        int player,
+        const std::string &symbol) const {
+        const dat::Unit *unit =
+            aiUnit(player, symbol);
+        return unit ? unit->id : -1;
+    }
+    int civilizationForPlayerForTesting(
+        int player) const {
+        return civilizationForPlayer(player);
+    }
+    float populationLimitForTesting(
+        int player) const {
+        return player > 0 &&
+                       (size_t)player <=
+                           players_.size()
+                   ? players_[(size_t)player - 1]
+                         .populationLimit
+                   : 0.0f;
+    }
+    bool aiUnitAvailableForTesting(
+        int player,
+        const std::string &symbol) const {
+        const dat::Unit *unit =
+            aiUnit(player, symbol);
+        return unit &&
+               unitAvailable(
+                   player, unit->id);
+    }
+    size_t aiFreeWorkerCountForTesting(
+        int player) const {
+        return (size_t)std::count_if(
+            objects_.begin(), objects_.end(),
+            [&](const Object &object) {
+                return object.active &&
+                       !object.hidden &&
+                       object.player == player &&
+                       isWorker(object) &&
+                       !object.constructionTargetId &&
+                       !object.repairTargetId &&
+                       object.garrisonedInId < 0;
+            });
+    }
+    size_t aiFoundationCountForTesting(
+        int player) const {
+        return (size_t)std::count_if(
+            objects_.begin(), objects_.end(),
+            [&](const Object &object) {
+                return object.active &&
+                       object.player == player &&
+                       object.underConstruction;
+            });
+    }
+    std::string aiFoundationReportForTesting(
+        int player) const {
+        std::string report;
+        char buffer[256];
+        for (const Object &foundation :
+             objects_) {
+            if (!foundation.active ||
+                foundation.player != player ||
+                !foundation.underConstruction ||
+                !foundation.unit)
+                continue;
+            const Object *builder =
+                findObject(
+                    foundation
+                        .constructionBuilderId);
+            snprintf(
+                buffer, sizeof buffer,
+                "[%s %.1f/%.1f at %.1f,%.1f "
+                "builder=%u state=%d goal=%d "
+                "pos=%.1f,%.1f path=%zu/%zu "
+                "blocked=%.1f] ",
+                foundation.unit->name2.c_str(),
+                foundation.constructionRemaining,
+                foundation.constructionTotal,
+                foundation.x, foundation.y,
+                foundation.constructionBuilderId,
+                builder ? (int)builder->state
+                        : -1,
+                builder
+                    ? (int)builder
+                          ->moveGoalActive
+                    : -1,
+                builder ? builder->x : -1.0f,
+                builder ? builder->y : -1.0f,
+                builder ? builder->pathIndex : 0,
+                builder ? builder->path.size() : 0,
+                builder ? builder->blockedTime : 0.0f);
+            report += buffer;
+        }
+        return report;
+    }
+    size_t aiKnownResourceCountForTesting(
+        int player, int resourceType) const {
+        return (size_t)std::count_if(
+            objects_.begin(), objects_.end(),
+            [&](const Object &object) {
+                return isGatherable(object) &&
+                       object.resourceType ==
+                           resourceType &&
+                       objectVisibleToPlayer(
+                           object, player);
+            });
+    }
+    size_t aiReachableResourceCountForTesting(
+        int player, int resourceType) const {
+        size_t count = 0;
+        for (const Object &resource :
+             objects_) {
+            if (!isGatherable(resource) ||
+                resource.resourceType !=
+                    resourceType ||
+                !objectVisibleToPlayer(
+                    resource, player))
+                continue;
+            const bool reachable =
+                std::any_of(
+                    objects_.begin(),
+                    objects_.end(),
+                    [&](const Object &worker) {
+                        return worker.active &&
+                               !worker.hidden &&
+                               worker.player ==
+                                   player &&
+                               isWorker(worker) &&
+                               worker.garrisonedInId <
+                                   0 &&
+                               canReachObject(
+                                   worker, resource,
+                                   0.1f);
+                    });
+            if (reachable) count++;
+        }
+        return count;
+    }
     int aiObjectCountForTesting(
         int player,
         const std::string &symbol,
@@ -128,6 +455,133 @@ public:
         int player, int unitId) const;
     size_t aiGathererCountForTesting(
         int player, int resourceType) const;
+    int aiForceTargetForTesting(
+        int player, int domain) const {
+        return player > 0 &&
+                       (size_t)player <
+                           aiPlayers_.size() &&
+                       domain >= 0 &&
+                       domain < 3
+                   ? aiPlayers_[(size_t)player]
+                         .forceTargets[
+                             (size_t)domain]
+                   : 0;
+    }
+    int aiForceCountForTesting(
+        int player, int domain) const {
+        return player > 0 &&
+                       (size_t)player <
+                           aiPlayers_.size() &&
+                       domain >= 0 &&
+                       domain < 3
+                   ? aiPlayers_[(size_t)player]
+                         .forceCounts[
+                             (size_t)domain]
+                   : 0;
+    }
+    uint32_t aiReplenishmentQueuedForTesting(
+        int player) const {
+        return player > 0 &&
+                       (size_t)player <
+                           aiPlayers_.size()
+                   ? aiPlayers_[(size_t)player]
+                         .replenishmentQueued
+                   : 0;
+    }
+    uint32_t aiRetreatsForTesting(
+        int player) const {
+        return player > 0 &&
+                       (size_t)player <
+                           aiPlayers_.size()
+                   ? aiPlayers_[(size_t)player]
+                         .retreats
+                   : 0;
+    }
+    uint32_t aiEscortAssignmentsForTesting(
+        int player) const {
+        return player > 0 &&
+                       (size_t)player <
+                           aiPlayers_.size()
+                   ? aiPlayers_[(size_t)player]
+                         .escortAssignments
+                   : 0;
+    }
+    bool aiSurrenderedForTesting(
+        int player) const {
+        return player > 0 &&
+                       (size_t)player <
+                           aiPlayers_.size() &&
+                       aiPlayers_[(size_t)player]
+                           .surrendered;
+    }
+    int aiGroupTargetUnitForTesting(
+        int player) const {
+        if (player <= 0 ||
+            (size_t)player >=
+                aiPlayers_.size() ||
+            aiPlayers_[(size_t)player]
+                .militaryGroups.empty())
+            return -1;
+        const Object *target =
+            findObject(
+                aiPlayers_[(size_t)player]
+                    .militaryGroups.front()
+                    .targetId);
+        return target && target->unit
+                   ? target->unit->id
+                   : -1;
+    }
+    int aiGroupPhaseForTesting(
+        int player) const {
+        return player > 0 &&
+                       (size_t)player <
+                           aiPlayers_.size() &&
+                       !aiPlayers_[(size_t)player]
+                            .militaryGroups
+                            .empty()
+                   ? (int)aiPlayers_[
+                             (size_t)player]
+                         .militaryGroups.front()
+                         .phase
+                   : -1;
+    }
+    size_t aiGroupMemberCountForTesting(
+        int player) const {
+        return player > 0 &&
+                       (size_t)player <
+                           aiPlayers_.size() &&
+                       !aiPlayers_[(size_t)player]
+                            .militaryGroups
+                            .empty()
+                   ? aiPlayers_[(size_t)player]
+                         .militaryGroups.front()
+                         .members.size()
+                   : 0;
+    }
+    int victoryStateForTesting() const {
+        return victoryState_;
+    }
+    bool playerActiveForTesting(
+        int player) const {
+        return player > 0 &&
+               (size_t)player <=
+                   players_.size() &&
+               players_[(size_t)player - 1]
+                   .active;
+    }
+    void setPlayerActiveForTesting(
+        int player, bool active) {
+        if (player > 0 &&
+            (size_t)player <=
+                players_.size())
+            players_[(size_t)player - 1]
+                .active = active;
+    }
+    void eliminatePlayerForTesting(
+        int player, bool surrendered = false) {
+        eliminatePlayer(
+            player, surrendered);
+    }
     void update(float dt, const InputState &in);
     void render(Renderer &r, int screenW, int screenH);
 
@@ -151,6 +605,34 @@ public:
         interactionPoint(*u, *b, 0.35f, tx, ty);
         issueMove(*u, tx, ty, b, 0.35f);
         return true;
+    }
+    bool canGarrisonForTesting(
+        uint32_t unitId,
+        uint32_t buildingId) const {
+        const Object *unit =
+            findObject(unitId);
+        const Object *building =
+            findObject(buildingId);
+        return unit && building &&
+               canGarrison(*unit, *building);
+    }
+    int objectHealthForTesting(
+        uint32_t spawnId) const {
+        const Object *object =
+            findObject(spawnId);
+        return object
+                   ? (int)std::round(
+                         object->hitPoints)
+                   : 0;
+    }
+    int objectMaxHealthForTesting(
+        uint32_t spawnId) const {
+        const Object *object =
+            findObject(spawnId);
+        return object
+                   ? (int)std::round(
+                         object->maxHitPoints)
+                   : 0;
     }
     int garrisonVolleyForTesting(uint32_t buildingId) const {
         const Object *b = findObject(buildingId);
@@ -182,6 +664,9 @@ public:
     void setUnitSoundPlayer(std::function<void(int, int)> fn) {
         playUnitSound_ = std::move(fn);
     }
+    void setOiiaSoundPlayer(std::function<void()> fn) {
+        playOiiaSound_ = std::move(fn);
+    }
     void setAmbientSoundPlayer(
         std::function<float(const std::string &)> fn) {
         playAmbientSound_ = std::move(fn);
@@ -212,6 +697,25 @@ public:
     float resource(int player, int resourceId) const;
     bool researchTechnology(int player, int technologyId);
     const std::string &currentInstruction() const { return currentInstruction_; }
+    const std::string &statusMessageForTesting() const {
+        return statusMessage_;
+    }
+    bool statusMessageIsAttackAlertForTesting() const {
+        return !attackAlertMessage_.empty() &&
+               statusMessage_ ==
+                   attackAlertMessage_;
+    }
+    void setEnemyIntelligenceForTesting(
+        bool enabled) {
+        enemyIntelligenceCheat_ = enabled;
+    }
+    bool canInspectProductionForTesting(
+        uint32_t spawnId) const {
+        const Object *object =
+            findObject(spawnId);
+        return object &&
+               canInspectProduction(*object);
+    }
     int currentInstructionPlayerForTesting() const {
         return currentInstructionPlayer_;
     }
@@ -332,6 +836,8 @@ public:
         if (Object *o = findObject(spawnId)) o->attackMode = (AttackMode)mode;
     }
     size_t projectileCountForTesting() const { return projectiles_.size(); }
+    float farthestProjectileDistanceForTesting(
+        uint32_t sourceId) const;
     int firstProjectileUnitForTesting() const {
         return projectiles_.empty() || !projectiles_.front().unit
                    ? -1
@@ -349,6 +855,15 @@ public:
             findObject(spawnId);
         return object &&
                object->attackShotPending;
+    }
+    uint32_t spawnOiiaCatForTesting(
+        int player, float x, float y);
+    bool objectIsOiiaCatForTesting(
+        uint32_t spawnId) const {
+        const Object *object =
+            findObject(spawnId);
+        return object &&
+               object->customKind == 1;
     }
     uint32_t attackTargetForTesting(
         uint32_t spawnId) const {
@@ -454,6 +969,12 @@ public:
     void setObjectResourceForTesting(uint32_t spawnId, float amount) {
         if (Object *o = findObject(spawnId)) o->resourceAmount = amount;
     }
+    void setResourceTypeAmountsForTesting(
+        int type, float amount) {
+        for (Object &object : objects_)
+            if (object.resourceType == type)
+                object.resourceAmount = amount;
+    }
     bool objectFelled(uint32_t spawnId) const {
         const Object *o = findObject(spawnId);
         return o && o->felled;
@@ -487,6 +1008,26 @@ public:
     bool objectScreenPosition(uint32_t spawnId, int screenW, int screenH,
                               float &screenX, float &screenY) const;
     std::vector<MovingObjectInfo> movingObjects() const;
+    bool tileExploredForTesting(int player, int x, int y) const {
+        return tileExplored(player, x, y);
+    }
+    bool tileVisibleForTesting(int player, int x, int y) const {
+        return tileVisible(player, x, y);
+    }
+    bool objectVisibleForTesting(
+        int player, uint32_t spawnId) const {
+        const Object *object = findObject(spawnId);
+        return object &&
+               objectVisibleToPlayer(*object, player);
+    }
+    void updateVisibilityForTesting() {
+        updateVisibility();
+    }
+    void setVisibilityCheatsForTesting(
+        bool explore, bool sight) {
+        forceExploreCheat_ = explore;
+        forceSightCheat_ = sight;
+    }
 
     static constexpr int kTileHalfW = 48;
     static constexpr int kTileHalfH = 24;
@@ -610,6 +1151,7 @@ private:
         bool manualDropOff = false;
         bool selected = false;
         bool triggerAddressable = true;
+        uint8_t customKind = 0;
         float flashTime = 0;
         float gateOpenAmount = 0;
         float gateCloseTimer = 0;
@@ -668,7 +1210,9 @@ private:
         uint32_t dropOffTargetId = 0;
         uint32_t repairTargetId = 0;
         uint32_t garrisonTargetId = 0;
+        bool garrisonDamageLocked = false;
         uint32_t spawnId = 0;
+        uint32_t discoveredByPlayers = 0;
         int32_t garrisonedInId = -1;
         uint16_t initialFrame = 0;
     };
@@ -679,11 +1223,42 @@ private:
         Unknown,
     };
 
+    enum class AiGroupPhase : uint8_t {
+        Advance,
+        EmbarkMove,
+        Boarding,
+        Crossing,
+        Unloading,
+        Engage,
+        Retreat,
+    };
+
+    struct AiMilitaryGroup {
+        uint32_t id = 0;
+        uint32_t targetId = 0;
+        std::vector<uint32_t> members;
+        std::vector<uint32_t> transports;
+        std::vector<uint32_t> escorts;
+        std::unordered_map<uint32_t, uint32_t>
+            boardingAssignments;
+        AiGroupPhase phase =
+            AiGroupPhase::Advance;
+        FormationType formation =
+            FormationType::Line;
+        float destinationX = 0.0f;
+        float destinationY = 0.0f;
+        float retryTime = 0.0f;
+        float initialStrength = 0.0f;
+    };
+
     struct AiPlayerState {
         AiProgram program;
         std::unordered_map<int, int> goals;
         std::unordered_map<std::string, int>
             strategicNumbers;
+        std::unordered_map<int, float> timers;
+        std::array<int, 4> escrowPercent{};
+        std::array<float, 4> escrowResources{};
         std::unordered_set<std::string>
             warnedFacts;
         std::unordered_set<std::string>
@@ -691,8 +1266,31 @@ private:
         size_t ruleCursor = 0;
         float ruleTime = 0.0f;
         float economyTime = 0.0f;
+        float militaryTime = 0.0f;
+        float defenseTime = 0.0f;
+        float strategyTime = 0.0f;
+        float townSafeTime = 0.0f;
+        float scoutTime = 0.0f;
+        float surrenderTime = 0.0f;
+        float rebuildUntil = 0.0f;
+        float gameTime = 0.0f;
         float ageTime = 0.0f;
         int age = 1;
+        uint32_t nextMilitaryGroupId = 1;
+        uint32_t attacksIssued = 0;
+        uint32_t formationOrders = 0;
+        uint32_t transportLandings = 0;
+        uint32_t replenishmentQueued = 0;
+        uint32_t retreats = 0;
+        uint32_t regroupOrders = 0;
+        uint32_t escortAssignments = 0;
+        std::array<int, 3> forceTargets{};
+        std::array<int, 3> forceCounts{};
+        std::vector<AiMilitaryGroup>
+            militaryGroups;
+        std::unordered_set<uint32_t>
+            shelteredWorkers;
+        bool surrendered = false;
         bool loaded = false;
     };
 
@@ -749,6 +1347,14 @@ private:
 
     void generateTerrain(int size);
     void buildTileElevation();
+    void resetVisibility();
+    void updateVisibility();
+    bool tileExplored(int player, int x, int y) const;
+    bool tileVisible(int player, int x, int y) const;
+    bool objectCurrentlyVisibleToPlayer(
+        const Object &object, int player) const;
+    bool objectVisibleToPlayer(
+        const Object &object, int player) const;
     void spawnBase(int player, int civ, char civLetter, float cx, float cy);
     const dat::Unit *findUnit(int civ, const std::string &name) const;
     const dat::Unit *findUnit(int civ, int id) const;
@@ -808,6 +1414,9 @@ private:
     bool findPath(const Object &object, float targetX, float targetY,
                   std::vector<std::array<float, 2>> &path,
                   const Object *goalObject = nullptr, float clearance = 0.0f) const;
+    bool canReachObject(
+        const Object &mover, const Object &target,
+        float clearance = 0.0f) const;
     bool segmentClear(const Object &object, float ax, float ay, float bx, float by) const;
     bool staticPassableAt(const Object &object, float x, float y) const;
     const Object *unitBlockerAt(const Object &object, float x, float y) const;
@@ -963,9 +1572,14 @@ private:
     std::string unitDisplayName(const dat::Unit &unit) const;
     std::string ownershipLabel(int player) const;
     std::string factionName(int civilization) const;
+    std::string playerDisplayName(int player) const;
     char factionAbbreviation(int civilization) const;
+    bool canInspectProduction(
+        const Object &object) const;
     int civilizationGraphic(int graphicId, int player) const;
     bool isWorker(const Object &object) const;
+    bool isBuilder(const Object &object) const;
+    bool isRepairer(const Object &object) const;
     bool isPowerCore(const Object &object) const;
     bool isPowerSource(const Object &object) const;
     bool isShieldGenerator(const Object &object) const;
@@ -1081,6 +1695,46 @@ private:
         int player, AiPlayerState &state);
     void updateAiGatherers(
         int player, AiPlayerState &state);
+    void updateAiWorkerShelter(
+        int player, AiPlayerState &state,
+        float dt);
+    void updateAiScouting(
+        int player, AiPlayerState &state);
+    void updateAiMilitaryGroups(
+        int player, AiPlayerState &state,
+        float dt);
+    void updateAiStrategy(
+        int player, AiPlayerState &state);
+    bool aiAttackNow(
+        int player, AiPlayerState &state);
+    bool aiStartGroupAdvance(
+        AiPlayerState &state,
+        AiMilitaryGroup &group,
+        Object &target);
+    void aiMoveTransports(
+        AiPlayerState &state,
+        const std::vector<Object *> &transports,
+        float x, float y);
+    void aiMoveEscorts(
+        AiPlayerState &state,
+        const std::vector<Object *> &escorts,
+        float x, float y);
+    int aiMilitaryDomain(
+        const dat::Unit &unit) const;
+    float aiObjectStrength(
+        const Object &object) const;
+    float aiGroupStrength(
+        const AiMilitaryGroup &group) const;
+    bool aiBasePoint(
+        int player, float &x, float &y) const;
+    int aiTargetPriority(
+        const Object &target) const;
+    bool aiFindTransportPoint(
+        const Object &transport,
+        const std::vector<Object *> &members,
+        const Object *target,
+        bool unloading,
+        float &x, float &y) const;
     AiTruth evaluateAiCondition(
         int player, AiPlayerState &state,
         const AiNode &condition);
@@ -1118,8 +1772,13 @@ private:
         int player, int technologyId);
     void activateCheat(size_t index, int screenW, int screenH);
     bool spawnCheatUnit(int unitId, bool requireWater,
-                        int screenW, int screenH);
+                        int screenW, int screenH,
+                        uint8_t customKind = 0);
     void defeatCheatPlayer(int player);
+    void updateConquest(float dt);
+    void eliminatePlayer(
+        int player, bool surrendered);
+    void setMatchOutcome(int outcome);
     void startInstruction(Instruction instruction);
     void queueInstruction(const std::string &text, float duration,
                           const std::string &sound = std::string(),
@@ -1148,6 +1807,9 @@ private:
     std::mt19937 rng_;
     int mapSize_ = 0;
     std::vector<uint8_t> terrain_;
+    std::array<std::vector<uint8_t>, 17> exploredTiles_;
+    std::array<std::vector<uint8_t>, 17> visibleTiles_;
+    float visibilityTime_ = 0.0f;
     std::vector<uint8_t> cornerElevation_;
     std::vector<uint8_t> tileElevation_;
     std::vector<uint8_t> tileSlope_;
@@ -1187,6 +1849,8 @@ private:
     uint32_t nextMoveGroupId_ = 1;
     int difficulty_ = 2;
     int victoryState_ = -1;
+    bool conquestEnabled_ = false;
+    float conquestCheckTime_ = 0.0f;
     std::set<int> warnedEffects_;
     std::set<int> warnedConditions_;
     int localPlayer_ = 0;
@@ -1295,6 +1959,7 @@ private:
         researchMenuCache_;
     bool forceExploreCheat_ = false;
     bool forceSightCheat_ = false;
+    bool enemyIntelligenceCheat_ = false;
     bool garrisonCursorActive_ = false;
     bool repairCursorActive_ = false;
     bool attackGroundCursorActive_ = false;
@@ -1306,6 +1971,7 @@ private:
     float ambienceTime_ = 2.0f;
     uint32_t ambienceSequence_ = 0;
     std::string statusMessage_;
+    std::string attackAlertMessage_;
     float statusTime_ = 0;
     bool boxSelectActive_ = false;
     bool debug_ = false;
@@ -1324,6 +1990,7 @@ private:
     std::function<float(const std::string &)> playSound_;
     std::function<void(int)> playInterfaceSound_;
     std::function<void(int, int)> playUnitSound_;
+    std::function<void()> playOiiaSound_;
     std::function<float(const std::string &)> playAmbientSound_;
 };
 

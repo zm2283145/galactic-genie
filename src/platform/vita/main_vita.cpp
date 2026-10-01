@@ -172,6 +172,10 @@ int main() {
             if (!audio.playEffect(resourceId, data))
                 logf("unit sound %s (%d) could not play", fileName.c_str(), resourceId);
         });
+        game.setOiiaSoundPlayer(
+            [&audio]() {
+                audio.playOiiaEffect();
+            });
         const bool initialized =
             kUseCompactTestMap
                 ? game.initCompactTestMap(
@@ -185,7 +189,8 @@ int main() {
         std::string aiError;
         if (!game.loadAiScript(
                 2, kAiPath,
-                {"DIFFICULTY-MODERATE"},
+                {"DIFFICULTY-MODERATE",
+                 "LAND-SATELLITES-MAP"},
                 &aiError))
             logf(
                 "AI player 2 disabled: %s "

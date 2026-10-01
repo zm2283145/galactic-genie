@@ -21,12 +21,12 @@ build and test on Vita.
 | Formations | Layout/update routines at `0x478e30`, `0x479760`, `0x47c280`, `0x47e780`, `0x480060` | Layout verified; automatic line/column switching remains open |
 | Pathfinding | Long-range routines at `0x4982f0`, `0x498820`, `0x4989f0`, `0x499010` | Partially verified and covered |
 | Unit information UI | Panel rows at `0x5d98a0`/`0x5db840`; resource rows at `0x5daf72` | Partially verified |
-| Workers | DAT class 58 and `UNIT-WORKER[A/B]1..11` task variants | Partially verified and covered |
+| Workers and Utility Trawlers | DAT class 58 variants; unit 13 action-101/action-106 tasks and naval train locations | Partially verified and covered |
 | Combat target eligibility | Attack-task validation at `0x5b9930`; class filter at `0x41c530`; DAT effect 129 | Verified and covered |
 | Building attack approach | DAT rectangular collision footprints; attack action and path goal state | Covered; exact original slot ordering remains open |
 | Attack Ground | Command-panel construction at `0x503aca`; opcode `0x6b`; DAT blast/projectile fields | Verified and covered |
-| Firing presentation | DAT attack graphic, frame delay, projectile totals, secondary projectile, and impact data | Partially verified and covered |
-| AI scripts | Original Computer Expanded `.per` files and DAT `name2` aliases | First economy slice implemented and covered |
+| Firing presentation | DAT attack graphic, frame delay, projectile totals, spawning area, secondary projectile, and impact data | Partially verified and covered |
+| AI scripts | Original Computer Expanded `.per` files and DAT `name2` aliases | Economy, advancement, balanced force replenishment, scouting, formations, escorted transport invasions, retreat, and worker shelter covered |
 | Civilization technology trees | Each DAT civilization's `techTreeId` effect; type-102 disabled-technology commands | Verified and covered |
 | Air/naval transports | DAT `AVAIL-*` technologies and Airbase/Shipyard train locations | Verified and covered |
 | Compact island map | Shipyard terrain `1/4`, side terrain `2/35`, and DAT movement restrictions | Covered |
@@ -38,15 +38,27 @@ and Rebel Alliance on separate land masses. A full-height ocean channel prevents
 ground units from walking around either map edge, while aircraft retain their
 DAT flying movement and cross normally. Each coast has shore terrain beside
 shallow water wide enough for the Shipyard's complete clearance footprint; deep
-water fills the channel center. Both economies retain guaranteed nearby
-resource clusters: each island receives 12 nodes of food, carbon, ore, and
-nova (48 deterministic nodes per side), placed on cleared accessible land.
+water fills the channel center. Both economies retain guaranteed nearby resources arranged like a random-map
+start rather than equal test grids. Each island receives a 24-tree carbon
+forest, 12 food nodes, and separate 8-node ore and nova deposits on cleared,
+accessible land. The AI's starting processing centers are placed beside their
+matching food and carbon patches.
 
 Airbases and Shipyards expose transports through the original data rather than
 hardcoded menu entries. At their normal prerequisite levels the Empire receives
 Air Transport 1036 and Transport Ship 838, while the Rebel Alliance receives
 Air Transport 1046 and Transport Ship 841. Deterministic coverage queues and
 completes all four through normal production-exit handling.
+
+## Custom OIIA Cat
+
+The optional `OIIA OIIA` cheat-menu entry is intentionally outside the
+original DAT contract. Its 94-frame cat animation comes from the
+[OIIA Scratch project](https://scratch.mit.edu/projects/1363024859) by
+`bust0588`, with redistribution permission confirmed by the contributor. The
+frames are downsampled into one compressed runtime atlas. The Scratch project's
+credited commercial music is not bundled; attacks use a newly synthesized
+oiia-style vocal/chiptune cue generated in the Vita audio mixer.
 
 ## Civilization technology restrictions
 
@@ -74,24 +86,72 @@ Unsupported facts remain unknown, including through `not`, so an unimplemented
 negative condition cannot accidentally enable a rule. Rules run in bounded
 slices instead of scanning the complete personality every frame.
 
-The first economy slice supports goals, strategic numbers, Tech Level and age
-time, difficulty, population and housing, resource amounts, unit/building
-counts, technology completion/availability, affordability, and Boolean and
-numeric comparisons. Its actions set goals and strategic numbers, disable
-rules, build, train, and research through the same placement, resource,
-population, production, and research systems used by the player. Gather
-percentages retask real idle workers to compatible original resource nodes.
-Original script symbols resolve against both DAT unit names and the secondary
-AI names stored in `name2`.
+The runtime supports goals, strategic numbers, Tech Level and age time,
+difficulty, player number, named timers, population and housing, resource
+amounts, unit/building counts, player age and military comparisons,
+technology completion/availability, affordability with escrow, town attack
+state, and Boolean/numeric comparisons. Actions set goals and strategic
+numbers, control timers and escrow, disable rules, build, train, research, and
+execute `attack-now` through the same simulation systems used by the player.
+Gather percentages retask real idle workers to compatible original resource
+nodes. Original script symbols resolve against DAT names, secondary `name2`
+aliases, abstract `*-LINE` names, and the player's enabled
+civilization-specific unit entry.
 
 Engine contract:
 
 - AI construction uses normal placement validation, creates a real foundation,
-  charges normal DAT costs, and assigns an available worker.
+  charges normal DAT costs, and selects a worker/site pair with a valid route.
+  At most three construction plans remain active, and one pending foundation
+  of a particular building type suppresses duplicates.
 - Training and research use normal building queues and population/resource
   checks.
 - Gather allocations preserve builders, repairers, and garrisoned workers and
-  are rebalanced at a bounded cadence.
+  are rebalanced at a bounded cadence. Percentage rounding uses largest
+  remainders, low resource banks receive a real minimum 25% worker share, and
+  tree workers spread across separate trees.
+- Escrow percentages divert deposited income into per-resource reserves;
+  `release-escrow` returns that reserve to the spendable bank. SEA strategies
+  also retain enough resources for their first Shipyard and primary combat
+  ship so lower-priority plans cannot consume the plan between rule slices.
+- Idle military units scout unexplored, passable tiles physically. They reveal
+  fog through ordinary line of sight and never receive hidden enemy
+  locations. `attack-now` selects only currently visible hostile players,
+  separates land, naval, and air forces, and gives each persistent group an
+  original formation march before its members enter individual combat.
+  Equivalent later `attack-now` pulses do not replace active movement,
+  boarding, or attack orders.
+- A land group with no route to a discovered enemy building reserves available
+  DAT-compatible Air Transports or Transport Ships. Transports move to a
+  reachable embarkation shore, passengers reserve capacity and board through
+  their action-3 tasks, and the group crosses only through terrain valid for
+  the transport. Landing selection requires both a reachable transport route
+  and passable ejection positions from which the passengers can route to
+  weapon range. After unloading, the passengers reform and continue the same
+  attack. Multiple transport groups may move in formation.
+- A bounded strategic pass derives land, naval, and air force targets from
+  Tech Level and population capacity. It ensures Troop Center, Shipyard, and
+  Airbase infrastructure where terrain and prerequisites permit, replenishes
+  the domain with the largest proportional deficit, and distributes training
+  across the available DAT unit types instead of repeating one unit. Available
+  Air Transports and Transport Ships are maintained as land armies grow.
+- Target selection ranks Command Centers, military production, armed defenses,
+  workers, combat units, and ordinary buildings in that order, then compares
+  compatible force count and travel distance. Naval and air units join
+  transport groups as escorts, assemble at embarkation, cover the crossing,
+  and continue toward the landing target.
+- Scattered groups receive another formation order. A group that loses its
+  target regroups at its base; a group that has suffered losses and is
+  outmatched by at least 1.8-to-1 also retreats. An immediately overwhelming
+  force triggers retreat at 4-to-1. Survivors become available to the next
+  muster, attacks pause for a 20-second rebuilding window, and normal
+  replenishment continues during that pause.
+- When an owned Command Center is threatened by an active hostile attack
+  within 14 tiles, the defense manager sends nearby class-58 workers into it
+  through normal garrison orders and capacity reservations. Economy balancing
+  leaves both incoming and sheltered workers alone. Five seconds after the
+  nearby attacks stop, only workers sheltered by this manager are ejected;
+  the ordinary economy pass then returns them to work.
 - The compact opponent starts in the personality's original opening state
   without a prebuilt Troop Center. Five nodes of each resource are guaranteed
   beside its base, so its opening 100%-carbon rule can assign every worker
@@ -102,9 +162,64 @@ Engine contract:
 - Vita loads player 2's `Computer Expanded.per` from
   `ux0:data/swgb/AI`; deployment copies the original `.per` directory only
   when the user explicitly selects `-AiData`.
-- Scenario personality references, timers, escrow, strategic build-forward
-  placement, military managers, and the remaining facts/actions are still
-  open.
+- Scenario personality references, strategic build-forward placement, and the
+  remaining facts/actions are still open.
+
+## Conquest, defeat, and surrender
+
+Generated skirmishes use conquest state independently of campaign trigger
+victory. An active player is defeated after losing every live unit and
+building; garrisoned units still count, while annex graphics and carcasses do
+not. Trigger condition 13 (`Player Defeated`) reads the same player state.
+When no hostile active player remains, the local player wins. Losing the
+local player's final asset produces defeat.
+
+An AI with no Command Center, fewer than three workers, no military production
+building, fewer than four military units, and at least a four-to-one enemy
+strength disadvantage begins a 15-second surrender countdown. Recovery resets
+the countdown. Surrender removes that player from conquest, clears its AI
+orders, and names the surrendering player in the status message.
+
+Victory and defeat stop at a full-screen outcome panel. The original
+`Sound/Stream/WON1.MP3` and `lost.mp3` cues play once through the existing
+dialogue stream path. Campaign scenarios remain trigger-controlled and do not
+enable automatic conquest.
+
+## Fog of war and exploration
+
+The original executable's `diam_map` renderer has separate
+`draw_explored_tiles` and `draw_all_tiles` paths (`0x4560a0`). The DAT supplies
+each unit and building's `lineOfSight`, and technology attribute 1 modifies
+that value through the normal researched player-unit tables.
+
+Engine contract:
+
+- Every player has a transient currently-visible tile grid and a persistent
+  explored tile grid. Active, ungarrisoned units and buildings reveal a
+  circular area using their researched DAT line of sight; allied players share
+  those revealers.
+- Visibility is simulation state, not merely a dark screen overlay. Enemy
+  objects cannot be selected or automatically acquired outside current sight.
+  Enemy projectiles and remains are likewise hidden. Static gatherable nodes
+  and buildings that have been discovered remain drawn after current sight is
+  lost, while mobile units and moving Gaia animals require live sight.
+- The AI consults its own explored map for resources and resource-oriented
+  drop-site placement. Ground workers also verify that a candidate path
+  reaches the node's interaction boundary; a closest-point route ending at an
+  ocean shore is not accepted as reachability.
+- AI scouts choose unexplored destinations from their own persistent fog map.
+  Attack targets must be currently visible, and non-air attackers must be able
+  to route to their weapon range.
+- Unexplored terrain is fully shrouded, explored but non-visible terrain is
+  dimmed, and visible terrain is unmodified. A continuous screen-space mask
+  samples and interpolates the surrounding tile states after reversing the
+  isometric projection. This preserves tile-accurate simulation while
+  avoiding stair-stepped boundaries and prevents elevated terrain or blend
+  sprites from leaking through seams between fog diamonds.
+- `FORCEEXPLORE` reveals terrain, static resources, and buildings to the human
+  player without exposing mobile enemy units. `FORCESIGHT` reveals terrain and
+  grants live object vision to that player. Neither cheat changes any other
+  player's explored or currently-visible grid.
 
 ## Production exits
 
@@ -302,6 +417,11 @@ instead of looping for the whole reload interval. Mobile units with
 Artillery therefore launches projectile 656 followed by 369; the existing
 building/garrison volley path remains separately sequenced.
 
+`projectileSpawningArea[0..1]` are bounded source offsets rotated by the
+attacker's facing. The third value is independent target scatter and may be
+zero. Bongo Marauder 1314 uses a 2-by-2 spawning area with zero scatter, so
+the zero value must never be used as a divisor for the source offsets.
+
 Engine contract:
 
 - Every unit with original blast-projectile eligibility shows command icon 60
@@ -325,12 +445,27 @@ reservation path. A rally target may therefore be a different compatible
 building or a mobile transport; incoming units reserve capacity before they
 arrive. The original boarding cursor is `mcursors.shp` frame 13.
 
+A unit's own carrying capacity does not make it a transport for boarding
+eligibility. Mech Factory units 469, 485, and 500 and Heavy Weapons Factory
+units 631, 651, and 681 retain explicit action-3 tasks for both class-17 sea
+transports and class-59 air transports, even when the boarding unit can carry
+units itself. Transport nesting remains rejected because the transports do not
+declare the reciprocal action-3 task.
+
 Animal Nursery unit 319 accepts class-1 livestock through category 16. Each
 occupant adds the building's DAT `workRate` to food per second. The selection
 panel shows the occupants in the same clickable portrait strip as every other
 garrison, allows one animal to be ejected by pressing its portrait, and shows
 the current aggregate food-per-second rate. Ejecting an animal immediately
 reduces that rate.
+
+Completed non-transport buildings with garrison capacity enter a critical
+damage lock at or below 20 percent health. Every occupant is ejected through a
+normal passable exit and new garrison orders are rejected with
+`BUILDING TOO DAMAGED TO GARRISON`. If an exit is temporarily blocked,
+evacuation retries on later updates. Repairing the building above 20 percent
+clears the lock. The threshold is deterministic and covered, but still needs
+confirmation against the original executable.
 
 The original interface sound table maps `button1.wav`, `button2.wav`, and
 `cantdo.wav` to resources 50300, 50301, and 50303. Successful menu choices use
@@ -352,15 +487,24 @@ string 3005 and `needhous.wav` resource 50354.
 
 The executable interface table at `0x544ba0` binds `atakwarn.wav` to resource
 50315. Hostile damage to a local object emits that warning and a visible
-under-attack notice, with a cooldown so repeated damage ticks do not restart
-the alert.
+red `YOUR ARMIES ARE UNDER ATTACK BY <player name>` notice. The attacker uses
+the scenario player name when present and otherwise the civilization name.
+A ten-second cooldown prevents repeated damage ticks from restarting the alert.
 
 The same interface table binds `archupg.wav` to resource 50325. Completing
-queued Tech Level technologies 1, 2, or 3 for the local player plays that cue.
-Those effects directly replace base Command Center 109 at each level
+queued Tech Level technologies 1, 2, or 3 plays that cue. Local ordinary
+research still reports `<technology> COMPLETE`; ordinary research by other
+players is silent. A remote Tech Level completion is the sole remote research
+announcement and reads `<player name> ADVANCED TO <Tech Level>`. Those effects
+directly replace base Command Center 109 at each level
 (`109 -> 71`, `109 -> 141`, and `109 -> 142`), so replacement caching aliases
 the previously displayed level to the newest result instead of preserving the
 first replacement.
+
+Enemy selections retain identity, ownership, health, and shields, but hide
+unit/research queue names and progress. Construction progress remains visible.
+The custom `MANY BOTHANS` cheat toggles `ENEMY PRODUCTION INTELLIGENCE` and
+reveals the hidden queue strip without changing fog or object visibility.
 
 Display Instruction effects retain their source player when supplied.
 Campaign dialogue often leaves that field unset, so the speaker prefix before
@@ -427,3 +571,10 @@ Engine contract:
   inside the same radius.
 - Clone Campaigns assault mechs (class 53) and air transports (class 59) are
   also repairable.
+- Utility Trawler 13 is class 14 rather than a land worker. Its own task header
+  supplies action 101 construction and action 106 repair, so build/repair UI,
+  placement assignment, work animation, and contextual commands are
+  capability-driven. Its build menu uses naval structures whose
+  `trainLocationId` is 13; after the Shipyard's automatic technology 27,
+  Aqua Harvester 199 and Sensor Buoy 1576 are available. Utility Trawlers
+  repair owned or allied naval classes 13 through 17.

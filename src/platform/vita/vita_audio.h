@@ -25,6 +25,7 @@ public:
     float play(const std::string &name);
     float playAmbient(const std::string &name);
     bool playEffect(int resourceId, const std::vector<uint8_t> &data);
+    void playOiiaEffect();
     void setLogger(std::function<void(const std::string &)> logger) { log_ = std::move(logger); }
 
 private:
@@ -48,6 +49,7 @@ private:
     std::deque<std::shared_ptr<AudioClip>> queue_;
     std::map<int, std::shared_ptr<AudioClip>> effectCache_;
     std::map<std::string, std::shared_ptr<AudioClip>> ambientCache_;
+    std::shared_ptr<AudioClip> oiiaClip_;
     std::deque<PendingVoice> pendingEffects_;
 };
 

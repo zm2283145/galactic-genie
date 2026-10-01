@@ -4,6 +4,7 @@
 #   tools\deploy_vita.ps1 -GameData     # one-time: copies the SWGB:CC files to ux0:data/swgb/Data
 #   tools\deploy_vita.ps1 -CampaignData # copies XCAM3.CPX for the Breaking Bread scenario
 #   tools\deploy_vita.ps1 -SoundData    # copies voices referenced by the selected campaign mission
+#   tools\deploy_vita.ps1 -OutcomeSoundData # copies original conquest victory/defeat streams
 #   tools\deploy_vita.ps1 -UnitSoundData # copies the DAT-referenced unit sound archives
 #   tools\deploy_vita.ps1 -MusicData     # copies the original streamed soundtrack
 #   tools\deploy_vita.ps1 -TerrainSoundData # copies camera-relative terrain ambience
@@ -24,6 +25,7 @@ param(
     [switch]$GameData,
     [switch]$CampaignData,
     [switch]$SoundData,
+    [switch]$OutcomeSoundData,
     [switch]$UnitSoundData,
     [switch]$MusicData,
     [switch]$TerrainSoundData,
@@ -98,6 +100,18 @@ if ($SoundData) {
         $local = Join-Path $SoundDir "$name.mp3"
         if (-not (Test-Path $local)) { throw "missing scenario sound $local" }
         Ftp-Put $local "ux0:/data/swgb/Sound/Scenario/$($name.ToLower()).mp3"
+    }
+}
+if ($OutcomeSoundData) {
+    $streamDir = Join-Path (Split-Path -Parent $SoundDir) "Stream"
+    Ftp-MkDir "ux0:/data/swgb/Sound"
+    Ftp-MkDir "ux0:/data/swgb/Sound/Scenario"
+    foreach ($f in "lost.mp3", "WON1.MP3", "won2.mp3") {
+        $local = Join-Path $streamDir $f
+        if (-not (Test-Path $local)) {
+            throw "missing match outcome sound $local"
+        }
+        Ftp-Put $local "ux0:/data/swgb/Sound/Scenario/$($f.ToLower())"
     }
 }
 if ($UnitSoundData) {

@@ -264,7 +264,7 @@ static int cmdUnit(const char *dataDir, int id) {
             printf("  combat hp %d base armor %d level %u range %.2f..%.2f reload %.2f "
                    "garrison capacity/type/heal %.0f/%u/%.2f "
                    "attack graphic %d projectile %d/%d frame delay %d displacement %.2f,%.2f,%.2f "
-                   "displayed attack/armor %d/%d\n",
+                   "projectiles %.2f/%u spawn %.2f,%.2f,%.2f displayed attack/armor %d/%d\n",
                    unit.hitPoints, unit.baseArmor, unit.combatLevel,
                    unit.minRange, unit.maxRange,
                    unit.reloadTime, (float)unit.garrisonCapacity,
@@ -273,6 +273,11 @@ static int cmdUnit(const char *dataDir, int id) {
                    unit.secondaryProjectileUnit,
                    unit.frameDelay, unit.graphicDisplacement[0], unit.graphicDisplacement[1],
                    unit.graphicDisplacement[2],
+                   unit.totalProjectiles,
+                   unit.maxTotalProjectiles,
+                   unit.projectileSpawningArea[0],
+                   unit.projectileSpawningArea[1],
+                   unit.projectileSpawningArea[2],
                    unit.displayedAttack, unit.displayedMeleeArmour);
             if (graphic)
                 for (const auto &delta : graphic->deltas) {
@@ -1513,6 +1518,11 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         fprintf(stderr, "error: %s\n", err.c_str());
         return 1;
     }
+    // This broad compatibility fixture predates fog and intentionally
+    // exercises commands against objects across the whole map. Dedicated
+    // fog regressions below cover visibility-gated interaction.
+    game.setVisibilityCheatsForTesting(
+        true, true);
     auto saveStage = [&](const char *suffix) {
         if (!out) return true;
         game.render(renderer, 960, 544);
@@ -3988,6 +3998,13 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         g.update(10.1f, {});
         g.damageObjectForTesting(
             victim, 1, attacker);
+        const std::string attackMessage =
+            g.statusMessageForTesting();
+        const bool originalMessage =
+            attackMessage ==
+                "YOUR ARMIES ARE UNDER ATTACK BY "
+                "Rebel Alliance" &&
+            g.statusMessageIsAttackAlertForTesting();
         const size_t laterAlerts =
             std::count(
                 interfaceSounds.begin(),
@@ -3996,11 +4013,112 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         report(
             "under-attack-alert",
             firstAlerts == 1 &&
-                laterAlerts == 2,
+                laterAlerts == 2 &&
+                originalMessage,
             "first=" +
                 std::to_string(firstAlerts) +
                 " later=" +
-                std::to_string(laterAlerts));
+                std::to_string(laterAlerts) +
+                " message=[" +
+                attackMessage + "]");
+    }
+    // Other players expose only Tech Level completion; ordinary research and
+    // production queues remain private unless enemy intelligence is enabled.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) {
+            fprintf(
+                stderr, "%s\n",
+                err.c_str());
+            return 1;
+        }
+        g.setLocalPlayerForTesting(1);
+        std::vector<int> interfaceSounds;
+        g.setInterfaceSoundPlayer(
+            [&](int soundId) {
+                interfaceSounds.push_back(
+                    soundId);
+            });
+        const uint32_t enemyCenter =
+            g.spawnObjectForTesting(
+                3, 109, 2, 60.0f, 60.0f);
+        const uint32_t enemyProducer =
+            g.spawnObjectForTesting(
+                3, 87, 2, 64.0f, 60.0f);
+        const uint32_t localCenter =
+            g.spawnObjectForTesting(
+                1, 109, 1, 36.0f, 36.0f);
+        const bool ordinaryQueued =
+            g.queueTechnologyForTesting(
+                enemyCenter, 10);
+        g.update(0.2f, {});
+        const bool ordinarySilent =
+            g.statusMessageForTesting()
+                .empty() &&
+            std::count(
+                interfaceSounds.begin(),
+                interfaceSounds.end(),
+                50325) == 0;
+        const bool levelQueued =
+            g.queueTechnologyForTesting(
+                enemyCenter, 1);
+        g.update(0.2f, {});
+        const std::string levelMessage =
+            g.statusMessageForTesting();
+        const bool levelAnnounced =
+            levelMessage.find(
+                "Rebel Alliance ADVANCED TO") ==
+                    0 &&
+            std::count(
+                interfaceSounds.begin(),
+                interfaceSounds.end(),
+                50325) == 1;
+        const bool localQueued =
+            g.queueTechnologyForTesting(
+                localCenter, 11);
+        g.update(0.2f, {});
+        const bool localAnnounced =
+            g.statusMessageForTesting().find(
+                " COMPLETE") !=
+            std::string::npos;
+        const bool enemyProductionQueued =
+            g.queueUnitForTesting(
+                enemyProducer, 460);
+        const bool privateQueue =
+            enemyProductionQueued &&
+            !g.canInspectProductionForTesting(
+                enemyProducer) &&
+            g.canInspectProductionForTesting(
+                localCenter);
+        g.setEnemyIntelligenceForTesting(
+            true);
+        const bool cheatReveals =
+            g.canInspectProductionForTesting(
+                enemyProducer);
+        report(
+            "player-notification-privacy",
+            ordinaryQueued &&
+                ordinarySilent &&
+                levelQueued &&
+                levelAnnounced &&
+                localQueued &&
+                localAnnounced &&
+                privateQueue &&
+                cheatReveals,
+            "ordinary silent " +
+                std::to_string(
+                    ordinarySilent) +
+                " level [" +
+                levelMessage +
+                "] local " +
+                std::to_string(
+                    localAnnounced) +
+                " queue private/cheat " +
+                std::to_string(
+                    privateQueue) +
+                "/" +
+                std::to_string(
+                    cheatReveals));
     }
     // Display-instruction speakers inherit the owning player's color.
     {
@@ -4155,6 +4273,7 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
         g.setLocalPlayerForTesting(1);
         const uint32_t tree = g.spawnObjectForTesting(0, 348, 0, 44.5f, 16.5f);
+        g.setVisibilityCheatsForTesting(true, false);
         g.update(1.0f / 30.0f, {});
         const bool selected = g.selectObjectForTesting(tree);
         g.lookAtObject(tree);
@@ -4171,7 +4290,163 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
                "selected=" + std::to_string(selected) + " amount=" +
                    std::to_string(g.objectResourceAmount(tree)));
     }
-    // 14) Formations keep their shape while marching.
+    // 15) Sight moves with units, exploration persists, and the two
+    // visibility cheats retain their distinct original meanings.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t scout =
+            g.spawnObjectForTesting(
+                1, 83, 1, 5.5f, 5.5f);
+        const bool initiallyVisible =
+            g.tileVisibleForTesting(1, 5, 5);
+        g.moveObjectForTesting(
+            scout, 90.5f, 90.5f);
+        const bool persisted =
+            g.tileExploredForTesting(1, 5, 5) &&
+            !g.tileVisibleForTesting(1, 5, 5) &&
+            g.tileVisibleForTesting(1, 90, 90);
+        const uint32_t enemy =
+            g.spawnObjectForTesting(
+                3, 460, 2, 50.5f, 50.5f);
+        const uint32_t enemyBuilding =
+            g.spawnObjectForTesting(
+                3, 87, 2, 52.5f, 50.5f);
+        const uint32_t unseenBuilding =
+            g.spawnObjectForTesting(
+                3, 87, 2, 72.5f, 50.5f);
+        const bool hiddenEnemy =
+            !g.objectVisibleForTesting(1, enemy);
+        g.moveObjectForTesting(
+            scout, 51.0f, 50.5f);
+        const bool discovered =
+            g.objectVisibleForTesting(1, enemy) &&
+            g.objectVisibleForTesting(
+                1, enemyBuilding);
+        g.moveObjectForTesting(
+            scout, 90.5f, 90.5f);
+        const bool buildingMemory =
+            !g.objectVisibleForTesting(1, enemy) &&
+            g.objectVisibleForTesting(
+                1, enemyBuilding);
+        g.lookAt(40.0f, 42.0f);
+        shot(g, "_shroud");
+        g.lookAt(5.0f, 90.0f);
+        shot(g, "_deep_shroud");
+        g.lookAt(40.0f, 42.0f);
+        g.setVisibilityCheatsForTesting(
+            true, false);
+        const bool exploreOnly =
+            g.tileExploredForTesting(1, 50, 50) &&
+            !g.tileVisibleForTesting(1, 50, 50) &&
+            !g.objectVisibleForTesting(1, enemy) &&
+            g.objectVisibleForTesting(
+                1, unseenBuilding);
+        shot(g, "_fog_of_war");
+        g.setVisibilityCheatsForTesting(
+            true, true);
+        const bool forceSight =
+            g.tileVisibleForTesting(1, 50, 50) &&
+            g.objectVisibleForTesting(1, enemy);
+        const bool playerOnly =
+            !g.tileExploredForTesting(2, 5, 5) &&
+            !g.tileVisibleForTesting(2, 5, 5);
+        report(
+            "fog-of-war-state",
+            initiallyVisible && persisted &&
+                hiddenEnemy && discovered &&
+                buildingMemory && exploreOnly &&
+                forceSight && playerOnly,
+            "initial=" +
+                std::to_string(initiallyVisible) +
+                " persistent=" +
+                std::to_string(persisted) +
+                " hidden=" +
+                std::to_string(hiddenEnemy) +
+                " discovered=" +
+                std::to_string(discovered) +
+                " memory=" +
+                std::to_string(
+                    buildingMemory) +
+                " explore=" +
+                std::to_string(exploreOnly) +
+                " sight=" +
+                std::to_string(forceSight) +
+                " local-only=" +
+                std::to_string(playerOnly));
+    }
+    // 16) AI gatherers know only resources their own player has explored.
+    {
+        Game g(assets);
+        if (!g.initCompactTestMap(
+                7, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        g.setResourceTypeAmountsForTesting(1, 0);
+        const uint32_t hiddenCarbon =
+            g.spawnObjectForTesting(
+                0, 348, 0, 30.5f, 45.5f);
+        const char *script =
+            "(defrule\n"
+            "  (true)\n"
+            "=>\n"
+            "  (set-strategic-number "
+            "sn-food-gatherer-percentage 0)\n"
+            "  (set-strategic-number "
+            "sn-carbon-gatherer-percentage 100)\n"
+            "  (set-strategic-number "
+            "sn-metal-gatherer-percentage 0)\n"
+            "  (set-strategic-number "
+            "sn-nova-gatherer-percentage 0)\n"
+            "  (disable-self))\n";
+        const bool loaded =
+            g.loadAiSourceForTesting(
+                2, "fog-test.per", script,
+                {}, &err);
+        for (int frame = 0;
+             loaded && frame < 90; frame++)
+            g.update(
+                1.0f / 30.0f, {});
+        const bool unseen =
+            hiddenCarbon &&
+            !g.objectVisibleForTesting(
+                2, hiddenCarbon);
+        g.setLocalPlayerForTesting(2);
+        g.setVisibilityCheatsForTesting(
+            true, false);
+        const bool knownButFogged =
+            g.objectVisibleForTesting(
+                2, hiddenCarbon) &&
+            !g.tileVisibleForTesting(
+                2, 30, 45);
+        for (int frame = 0;
+             loaded && frame < 90; frame++)
+            g.update(
+                1.0f / 30.0f, {});
+        const size_t gatherers =
+            g.aiGathererCountForTesting(
+                2, 1);
+        report(
+            "ai-unseen-resource",
+            loaded && unseen &&
+                knownButFogged &&
+                gatherers == 0,
+            "loaded=" +
+                std::to_string(loaded) +
+                " unseen=" +
+                std::to_string(unseen) +
+                " known=" +
+                std::to_string(
+                    knownButFogged) +
+                " gatherers=" +
+                std::to_string(gatherers));
+    }
+    // 17) Formations keep their shape while marching.
     for (int formation = 0; formation < 4; formation++) {
         static const char *names[] = {"line", "box", "staggered", "flank"};
         Game g(assets);
@@ -5454,6 +5729,143 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
                 " food +" +
                 std::to_string(foodGained));
     }
+    // Critically damaged garrison buildings evacuate their occupants, reject
+    // new entries, and unlock after repairs lift them above the threshold.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t center =
+            g.spawnObjectForTesting(
+                3, 109, 1, 44.0f, 68.0f);
+        const uint32_t first =
+            g.spawnObjectForTesting(
+                3, 83, 1, 43.0f, 73.0f);
+        const uint32_t second =
+            g.spawnObjectForTesting(
+                3, 83, 1, 45.0f, 73.0f);
+        const bool ordered =
+            g.garrisonForTesting(
+                first, center) &&
+            g.garrisonForTesting(
+                second, center);
+        for (int frame = 0;
+             frame < 900 &&
+             g.garrisonedCount(center) < 2;
+             ++frame)
+            g.update(
+                1.0f / 30.0f, {});
+        const int maxHealth =
+            g.objectMaxHealthForTesting(
+                center);
+        const bool damaged =
+            maxHealth > 0 &&
+            g.damageObjectForTesting(
+                center,
+                maxHealth -
+                    std::max(
+                        1, maxHealth / 5),
+                0);
+        step(g, 0.25f);
+        const bool evacuated =
+            g.garrisonedCount(center) == 0;
+        const bool rejected =
+            !g.canGarrisonForTesting(
+                first, center);
+        for (int resource = 0;
+             resource < 4; ++resource)
+            g.setResourceForTesting(
+                1, resource, 10000.0f);
+        const bool repairing =
+            g.issueRepairForTesting(
+                first, center);
+        for (int frame = 0;
+             frame < 1800 &&
+             g.objectHealthForTesting(
+                 center) * 4 <=
+                 maxHealth;
+             ++frame)
+            g.update(
+                1.0f / 30.0f, {});
+        const bool unlocked =
+            g.canGarrisonForTesting(
+                second, center);
+        report(
+            "critical-garrison-evacuation",
+            ordered && damaged &&
+                evacuated && rejected &&
+                repairing && unlocked,
+            "inside " +
+                std::to_string(
+                    g.garrisonedCount(
+                        center)) +
+                " hp " +
+                std::to_string(
+                    g.objectHealthForTesting(
+                        center)) +
+                "/" +
+                std::to_string(maxHealth) +
+                " rejected/unlocked " +
+                std::to_string(rejected) +
+                "/" +
+                std::to_string(unlocked));
+    }
+    // The AI shelters nearby workers while its Command Center is under
+    // attack, then releases them after five safe seconds.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        g.setLocalPlayerForTesting(1);
+        g.setDiplomacyForTesting(3, 1, 3);
+        g.setDiplomacyForTesting(1, 3, 3);
+        const uint32_t center =
+            g.spawnObjectForTesting(
+                3, 109, 3, 66.0f, 68.0f);
+        for (int offset = -1;
+             offset <= 1; ++offset)
+            g.spawnObjectForTesting(
+                3, 83, 3,
+                66.0f + offset * 1.5f,
+                73.0f);
+        const uint32_t attacker =
+            g.spawnObjectForTesting(
+                1, 460, 1, 66.0f, 76.0f);
+        const char *defenseScript =
+            "(defrule\n"
+            "  (true)\n"
+            "=>\n"
+            "  (disable-self))\n";
+        const bool loaded =
+            g.loadAiSourceForTesting(
+                3, "shelter-test.per",
+                defenseScript, {}, &err);
+        const bool attacked =
+            g.issueAttackForTesting(
+                attacker, center);
+        bool sheltered = false;
+        for (int frame = 0;
+             frame < 600 && !sheltered;
+             ++frame) {
+            g.update(
+                1.0f / 30.0f, {});
+            sheltered =
+                g.garrisonedCount(
+                    center) > 0;
+        }
+        g.damageObjectForTesting(
+            attacker, 100000, center);
+        step(g, 6.0f);
+        const bool released =
+            g.garrisonedCount(center) == 0;
+        report(
+            "ai-worker-shelter",
+            loaded && attacked &&
+                sheltered && released,
+            "sheltered/released " +
+                std::to_string(sheltered) +
+                "/" +
+                std::to_string(released));
+    }
     // Formation members retain their walking state when they consume the
     // short moving-slot path each frame.
     {
@@ -5541,11 +5953,11 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
             g.aiObjectCountForTesting(
                 0, "OBJ-VEGETABLE") >= 24 &&
             g.aiObjectCountForTesting(
-                0, "OBJ-BULLION") >= 24 &&
+                0, "OBJ-BULLION") >= 16 &&
             g.aiObjectCountForTesting(
-                0, "OBJ-MINERAL") >= 24 &&
+                0, "OBJ-MINERAL") >= 16 &&
             g.aiObjectCountForTesting(
-                0, "OBJ-TIMBERA") >= 24;
+                0, "OBJ-TIMBERA") >= 48;
         report(
             "compact-island-channel",
             workerPosition[0] < 47.0f &&
@@ -5710,6 +6122,699 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
                 " completed " +
                 std::to_string(completed));
     }
+    // Utility Trawlers derive their build and repair controls from their DAT
+    // tasks rather than the land-worker class.
+    {
+        Game g(assets);
+        if (!g.initCompactTestMap(
+                0x5A17u, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        g.setLocalPlayerForTesting(1);
+        for (int technology : {1, 2, 3})
+            g.researchTechnology(1, technology);
+        for (int resource = 0; resource < 4; ++resource)
+            g.setResourceForTesting(
+                1, resource, 5000.0f);
+        const uint32_t shipyard =
+            g.spawnObjectForTesting(
+                1, 45, 1, 44.0f, 28.0f);
+        g.researchTechnology(1, 27);
+        const uint32_t trawler =
+            g.spawnObjectForTesting(
+                1, 13, 1, 47.0f, 28.0f);
+        g.update(1.0f / 30.0f, {});
+        const std::vector<int> options =
+            g.buildingOptionIds(trawler);
+        const auto hasOption = [&](int unitId) {
+            return std::find(
+                       options.begin(),
+                       options.end(),
+                       unitId) != options.end();
+        };
+        g.selectObjectForTesting(trawler);
+        InputState openMenu;
+        openMenu.screenW = 960;
+        openMenu.screenH = 544;
+        openMenu.cycleAttackMode = true;
+        g.update(0.001f, openMenu);
+        const bool menuOpened =
+            g.actionMenuOpenForTesting();
+        const uint32_t foundation =
+            g.spawnFoundationForTesting(
+                1, 199, 1,
+                47.0f, 32.0f,
+                {trawler});
+        const bool assigned =
+            foundation != 0 &&
+            g.constructionBuilderId(
+                foundation) == trawler;
+        const float progressBefore =
+            foundation
+                ? g.objectHitPoints(foundation)
+                : 0.0f;
+        step(g, 8.0f);
+        const bool building =
+            foundation != 0 &&
+            (g.objectHitPoints(foundation) >
+                 progressBefore ||
+             g.objectCountForTesting(
+                 1, 199) > 0);
+        g.damageObjectForTesting(
+            shipyard, 100);
+        const float healthBefore =
+            g.objectHitPoints(shipyard);
+        const bool repairOrdered =
+            g.issueRepairForTesting(
+                trawler, shipyard);
+        step(g, 15.0f);
+        const bool repaired =
+            g.objectHitPoints(shipyard) >
+            healthBefore;
+        report(
+            "utility-trawler-build-repair",
+            hasOption(199) &&
+                hasOption(1576) &&
+                menuOpened &&
+                assigned &&
+                building &&
+                repairOrdered &&
+                repaired,
+            "options " +
+                std::to_string(options.size()) +
+                " aqua " +
+                std::to_string(hasOption(199)) +
+                " buoy " +
+                std::to_string(hasOption(1576)) +
+                " menu " +
+                std::to_string(menuOpened) +
+                " build " +
+                std::to_string(
+                    assigned && building) +
+                " repair " +
+                std::to_string(
+                    repairOrdered && repaired));
+    }
+    // Units with their own carrying capacity may still board larger air and
+    // sea transports when their original action-3 tasks allow it.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        const uint32_t airTransport =
+            g.spawnObjectForTesting(
+                1, 1036, 1, 36.0f, 30.0f);
+        const uint32_t seaTransport =
+            g.spawnObjectForTesting(
+                1, 838, 1, 44.0f, 30.0f);
+        bool allCanBoard = true;
+        std::string failedIds;
+        int index = 0;
+        for (int unitId :
+             {469, 485, 500, 631, 651, 681}) {
+            const uint32_t unit =
+                g.spawnObjectForTesting(
+                    1, unitId, 1,
+                    40.0f,
+                    36.0f + index * 2.0f);
+            const bool air =
+                g.canGarrisonForTesting(
+                    unit, airTransport);
+            const bool sea =
+                g.canGarrisonForTesting(
+                    unit, seaTransport);
+            if (!air || !sea) {
+                allCanBoard = false;
+                failedIds +=
+                    std::to_string(unitId) +
+                    "(" +
+                    std::to_string(air) +
+                    "/" +
+                    std::to_string(sea) +
+                    ") ";
+            }
+            ++index;
+        }
+        const bool transportsDoNotNest =
+            !g.canGarrisonForTesting(
+                airTransport, seaTransport) &&
+            !g.canGarrisonForTesting(
+                seaTransport, airTransport);
+        report(
+            "factory-units-board-transports",
+            allCanBoard &&
+                transportsDoNotNest,
+            "all " +
+                std::to_string(allCanBoard) +
+                " no nesting " +
+                std::to_string(
+                    transportsDoNotNest) +
+                " failures [" +
+                failedIds + "]");
+    }
+    // AI attack groups use the ordinary formation marcher and carry land
+    // armies across disconnected terrain with compatible transports.
+    {
+        static const char attackScript[] =
+            "(defrule\n"
+            "  (true)\n"
+            "=>\n"
+            "  (attack-now)\n"
+            "  (disable-self))\n";
+
+        Game formation(assets);
+        if (!formation.init(7, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        formation.setLocalPlayerForTesting(2);
+        formation.setVisibilityCheatsForTesting(
+            true, true);
+        formation.setDiplomacyForTesting(
+            1, 2, 3);
+        formation.setDiplomacyForTesting(
+            2, 1, 3);
+        for (int index = 0; index < 8;
+             ++index)
+            formation.spawnObjectForTesting(
+                3, 460, 2,
+                38.0f + (index % 4),
+                39.0f + (index / 4));
+        formation.spawnObjectForTesting(
+            1, 71, 1, 62.0f, 40.0f);
+        const bool formationLoaded =
+            formation.loadAiSourceForTesting(
+                2, "formation-attack.per",
+                attackScript, {}, &err);
+        for (int frame = 0;
+             formationLoaded &&
+             frame < 30 * 60 &&
+             formation
+                     .aiAttacksIssuedForTesting(
+                         2) == 0;
+             ++frame)
+            formation.update(
+                1.0f / 30.0f, {});
+        const bool formationAttack =
+            formationLoaded &&
+            formation.aiFormationOrdersForTesting(
+                2) > 0 &&
+            formation.aiAttacksIssuedForTesting(
+                2) >= 4;
+
+        Game invasion(assets);
+        if (!invasion.initCompactTestMap(
+                0x1A71u, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        invasion.setLocalPlayerForTesting(3);
+        invasion.setVisibilityCheatsForTesting(
+            true, true);
+        invasion.setDiplomacyForTesting(
+            1, 3, 3);
+        invasion.setDiplomacyForTesting(
+            3, 1, 3);
+        std::vector<uint32_t> landingForce;
+        for (int index = 0; index < 6;
+             ++index)
+            landingForce.push_back(
+                invasion.spawnObjectForTesting(
+                    1, 460, 3,
+                    68.0f + (index % 3),
+                    39.0f + (index / 3)));
+        const uint32_t transport =
+            invasion.spawnObjectForTesting(
+                1, 838, 3, 51.5f, 40.5f);
+        const uint32_t navalEscort =
+            invasion.spawnObjectForTesting(
+                1, 868, 3, 51.5f, 43.0f);
+        invasion.spawnObjectForTesting(
+            1, 773, 3, 68.0f, 36.0f);
+        invasion.spawnObjectForTesting(
+            1, 71, 1, 27.0f, 40.0f);
+        const bool compatible =
+            invasion.canGarrisonForTesting(
+                landingForce.front(),
+                transport);
+        const bool invasionLoaded =
+            compatible &&
+            invasion.loadAiSourceForTesting(
+                3, "transport-attack.per",
+                attackScript, {}, &err);
+        for (int frame = 0;
+             invasionLoaded &&
+             frame < 30 * 240 &&
+             (invasion
+                      .aiTransportLandingsForTesting(
+                          3) == 0 ||
+              invasion
+                      .aiAttacksIssuedForTesting(
+                          3) == 0);
+             ++frame)
+            invasion.update(
+                1.0f / 30.0f, {});
+        bool crossed = true;
+        for (uint32_t unit :
+             landingForce)
+            crossed =
+                crossed &&
+                invasion.objectPosition(unit)[0] <
+                    47.0f;
+        const bool transported =
+            invasionLoaded &&
+            invasion.aiTransportLandingsForTesting(
+                3) > 0 &&
+            invasion.aiAttacksIssuedForTesting(
+                3) > 0 &&
+            invasion
+                    .aiEscortAssignmentsForTesting(
+                        3) >= 2 &&
+            crossed;
+        report(
+            "ai-formation-transport-invasion",
+            formationAttack && transported,
+            "formation loaded/orders/attacks " +
+                std::to_string(
+                    formationLoaded) +
+                "/" +
+                std::to_string(
+                    formation
+                        .aiFormationOrdersForTesting(
+                            2)) +
+                "/" +
+                std::to_string(
+                    formation
+                        .aiAttacksIssuedForTesting(
+                            2)) +
+                " transport compatible/loaded/"
+                "landings/crossed " +
+                std::to_string(compatible) +
+                "/" +
+                std::to_string(
+                    invasionLoaded) +
+                "/" +
+                std::to_string(
+                    invasion
+                        .aiTransportLandingsForTesting(
+                            3)) +
+                "/" +
+                std::to_string(crossed) +
+                " attacks " +
+                std::to_string(
+                    invasion
+                        .aiAttacksIssuedForTesting(
+                            3)) +
+                " escorts " +
+                std::to_string(
+                    invasion
+                        .aiEscortAssignmentsForTesting(
+                            3)) +
+                " escort-id/phase/members " +
+                std::to_string(navalEscort) +
+                "/" +
+                std::to_string(
+                    invasion
+                        .aiGroupPhaseForTesting(
+                            3)) +
+                "/" +
+                std::to_string(
+                    invasion
+                        .aiGroupMemberCountForTesting(
+                            3)));
+    }
+    // The strategic manager replenishes all available military domains,
+    // prioritizes Command Centers, and retreats badly outmatched groups.
+    {
+        static const char noOpScript[] =
+            "(defrule\n"
+            "  (true)\n"
+            "=>\n"
+            "  (disable-self))\n";
+
+        Game balance(assets);
+        if (!balance.init(7, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        balance.setLocalPlayerForTesting(2);
+        for (int resource = 0;
+             resource < 4; ++resource)
+            balance.setResourceForTesting(
+                2, resource, 10000.0f);
+        balance.researchTechnologyForTesting(
+            2, 1);
+        balance.researchTechnologyForTesting(
+            2, 2);
+        balance.researchTechnologyForTesting(
+            2, 364);
+        balance.researchTechnologyForTesting(
+            2, 399);
+        balance.spawnObjectForTesting(
+            3, 109, 2, 70.0f, 70.0f);
+        const uint32_t balanceTroopCenter =
+            balance.spawnObjectForTesting(
+            3, 87, 2, 72.0f, 66.0f);
+        const uint32_t balanceShipyard =
+            balance.spawnObjectForTesting(
+            3, 45, 2, 52.0f, 40.0f);
+        const uint32_t balanceAirbase =
+            balance.spawnObjectForTesting(
+            3, 317, 2, 74.0f, 66.0f);
+        const bool balanceLoaded =
+            balance.loadAiSourceForTesting(
+                2, "strategy-balance.per",
+                noOpScript, {}, &err);
+        step(balance, 8.0f);
+        const bool balanced =
+            balanceLoaded &&
+            balance.aiForceTargetForTesting(
+                2, 0) > 0 &&
+            balance.aiForceTargetForTesting(
+                2, 1) > 0 &&
+            balance.aiForceTargetForTesting(
+                2, 2) > 0 &&
+            balance.aiForceCountForTesting(
+                2, 0) > 0 &&
+            balance.aiForceCountForTesting(
+                2, 1) > 0 &&
+            balance.aiForceCountForTesting(
+                2, 2) > 0 &&
+            balance
+                    .aiReplenishmentQueuedForTesting(
+                        2) >= 3;
+
+        Game priority(assets);
+        if (!priority.init(7, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        priority.setLocalPlayerForTesting(3);
+        priority.setVisibilityCheatsForTesting(
+            true, true);
+        priority.setDiplomacyForTesting(
+            1, 3, 3);
+        priority.setDiplomacyForTesting(
+            3, 1, 3);
+        for (int index = 0;
+             index < 6; ++index)
+            priority.spawnObjectForTesting(
+                3, 460, 3,
+                42.0f + index,
+                42.0f);
+        const uint32_t priorityCenter =
+            priority.spawnObjectForTesting(
+                1, 109, 1,
+                52.0f, 42.0f);
+        priority.spawnObjectForTesting(
+            1, 83, 1,
+            48.0f, 42.0f);
+        const bool priorityLoaded =
+            priority.loadAiSourceForTesting(
+                3, "strategy-priority.per",
+                noOpScript, {}, &err);
+        step(priority, 2.5f);
+        const bool prioritized =
+            priorityLoaded &&
+            priority.aiGroupTargetUnitForTesting(
+                3) ==
+                priority.objectUnitId(
+                    priorityCenter);
+
+        Game retreat(assets);
+        if (!retreat.init(7, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        retreat.setLocalPlayerForTesting(3);
+        retreat.setVisibilityCheatsForTesting(
+            true, true);
+        retreat.setDiplomacyForTesting(
+            1, 3, 3);
+        retreat.setDiplomacyForTesting(
+            3, 1, 3);
+        retreat.spawnObjectForTesting(
+            3, 109, 3, 40.0f, 40.0f);
+        for (int index = 0;
+             index < 4; ++index)
+            retreat.spawnObjectForTesting(
+                3, 460, 3,
+                44.0f + index,
+                44.0f);
+        for (int index = 0;
+             index < 20; ++index)
+            retreat.spawnObjectForTesting(
+                1, 460, 1,
+                48.0f +
+                    (index % 5),
+                44.0f +
+                    (index / 5));
+        const bool retreatLoaded =
+            retreat.loadAiSourceForTesting(
+                3, "strategy-retreat.per",
+                noOpScript, {}, &err);
+        step(retreat, 3.0f);
+        const bool withdrew =
+            retreatLoaded &&
+            retreat.aiRetreatsForTesting(
+                3) > 0;
+        report(
+            "ai-strategic-manager",
+            balanced && prioritized &&
+                withdrew,
+            "balanced/priority/retreat " +
+                std::to_string(balanced) +
+                "/" +
+                std::to_string(prioritized) +
+                "/" +
+                std::to_string(withdrew) +
+                " forces " +
+                std::to_string(
+                    balance
+                        .aiForceCountForTesting(
+                            2, 0)) +
+                "/" +
+                std::to_string(
+                    balance
+                        .aiForceCountForTesting(
+                            2, 1)) +
+                "/" +
+                std::to_string(
+                    balance
+                        .aiForceCountForTesting(
+                            2, 2)) +
+                " queued " +
+                std::to_string(
+                    balance
+                        .aiReplenishmentQueuedForTesting(
+                            2)) +
+                " options " +
+                std::to_string(
+                    balance
+                        .productionOptionIds(
+                            balanceTroopCenter)
+                        .size()) +
+                "/" +
+                std::to_string(
+                    balance
+                        .productionOptionIds(
+                            balanceShipyard)
+                        .size()) +
+                "/" +
+                std::to_string(
+                    balance
+                        .productionOptionIds(
+                            balanceAirbase)
+                        .size()));
+    }
+    // Conquest eliminates assetless players, presents local outcomes with the
+    // original stream cues, and lets a collapsed AI surrender.
+    {
+        Game victory(assets);
+        if (!victory.init(7, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        std::vector<std::string> victorySounds;
+        victory.setSoundPlayer(
+            [&](const std::string &name) {
+                victorySounds.push_back(name);
+                return 1.0f;
+            });
+        victory.eliminatePlayerForTesting(
+            2);
+        step(victory, 3.5f);
+        victory.render(
+            renderer, 960, 544);
+        const bool won =
+            victory.victoryStateForTesting() ==
+                1 &&
+            std::find(
+                victorySounds.begin(),
+                victorySounds.end(),
+                "won1") !=
+                victorySounds.end();
+
+        Game defeat(assets);
+        if (!defeat.init(7, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        std::vector<std::string> defeatSounds;
+        defeat.setSoundPlayer(
+            [&](const std::string &name) {
+                defeatSounds.push_back(name);
+                return 1.0f;
+            });
+        defeat.eliminatePlayerForTesting(
+            1);
+        defeat.render(
+            renderer, 960, 544);
+        const bool lost =
+            defeat.victoryStateForTesting() ==
+                0 &&
+            std::find(
+                defeatSounds.begin(),
+                defeatSounds.end(),
+                "lost") !=
+                defeatSounds.end();
+
+        static const char surrenderScript[] =
+            "(defrule\n"
+            "  (true)\n"
+            "=>\n"
+            "  (disable-self))\n";
+        Game surrender(assets);
+        if (!surrender.init(7, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        surrender.setDiplomacyForTesting(
+            1, 3, 3);
+        surrender.setDiplomacyForTesting(
+            3, 1, 3);
+        surrender.spawnObjectForTesting(
+            3, 12, 3, 55.0f, 55.0f);
+        const bool surrenderLoaded =
+            surrender.loadAiSourceForTesting(
+                3, "surrender.per",
+                surrenderScript, {}, &err);
+        step(surrender, 19.0f);
+        const bool surrendered =
+            surrenderLoaded &&
+            !surrender.playerActiveForTesting(
+                3) &&
+            surrender.aiSurrenderedForTesting(
+                3);
+        report(
+            "conquest-victory-defeat-surrender",
+            won && lost && surrendered,
+            "won/lost/surrendered " +
+                std::to_string(won) +
+                "/" +
+                std::to_string(lost) +
+                "/" +
+                std::to_string(
+                    surrendered));
+    }
+    // The Bongo Marauder's zero target-spread value must not divide its
+    // projectile spawning-area offsets into off-screen launch positions.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        g.setDiplomacyForTesting(1, 2, 3);
+        g.setDiplomacyForTesting(2, 1, 3);
+        const uint32_t marauder =
+            g.spawnObjectForTesting(
+                1, 1314, 1, 40.0f, 40.0f);
+        const uint32_t target =
+            g.spawnObjectForTesting(
+                3, 838, 2, 46.0f, 40.0f);
+        g.issueAttackForTesting(
+            marauder, target);
+        for (int frame = 0;
+             frame < 30 * 10 &&
+             g.projectileCountForTesting() < 2;
+             ++frame)
+            g.update(
+                1.0f / 30.0f, {});
+        const float farthest =
+            g.farthestProjectileDistanceForTesting(
+                marauder);
+        report(
+            "bongo-projectile-origin",
+            g.projectileCountForTesting() >= 2 &&
+                farthest >= 0.0f &&
+                farthest < 4.0f,
+            "projectiles " +
+                std::to_string(
+                    g.projectileCountForTesting()) +
+                " farthest " +
+                std::to_string(farthest));
+    }
+    // The secret OIIA cat uses original art and its dedicated synthesized
+    // attack cue while retaining the proven cheat-unit combat behavior.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        g.setLocalPlayerForTesting(1);
+        g.setDiplomacyForTesting(1, 2, 3);
+        g.setDiplomacyForTesting(2, 1, 3);
+        int oiiaSounds = 0;
+        g.setOiiaSoundPlayer(
+            [&]() {
+                ++oiiaSounds;
+            });
+        const uint32_t cat =
+            g.spawnOiiaCatForTesting(
+                1, 40.0f, 40.0f);
+        const uint32_t target =
+            g.spawnObjectForTesting(
+                3, 109, 2, 43.0f, 40.0f);
+        const float healthBefore =
+            g.objectHitPoints(target);
+        const bool ordered =
+            g.issueAttackForTesting(
+                cat, target);
+        for (int frame = 0;
+             frame < 30 * 10 &&
+             oiiaSounds == 0;
+             ++frame)
+            g.update(
+                1.0f / 30.0f, {});
+        g.lookAtObject(cat);
+        g.selectObjectForTesting(cat);
+        g.render(renderer, 960, 544);
+        shot(g, "_oiia_cat");
+        const bool attacked =
+            !g.objectActive(target) ||
+            g.objectHitPoints(target) <
+                healthBefore;
+        report(
+            "oiia-cat-cheat-unit",
+            cat != 0 &&
+                g.objectIsOiiaCatForTesting(cat) &&
+                ordered &&
+                attacked &&
+                oiiaSounds > 0,
+            "spawn " +
+                std::to_string(cat != 0) +
+                " ordered " +
+                std::to_string(ordered) +
+                " attacked " +
+                std::to_string(attacked) +
+                " sound " +
+                std::to_string(oiiaSounds));
+    }
     printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }
@@ -5856,12 +6961,10 @@ static int cmdTestAi(
          resource < 4; ++resource)
         game.setResourceForTesting(
             2, resource, 2000.0f);
-    const uint32_t worker =
-        game.spawnObjectForTesting(
-            3, 83, 2, 69.0f, 69.0f);
-    const uint32_t carbon =
-        game.spawnObjectForTesting(
-            0, 348, 0, 70.0f, 69.0f);
+    game.spawnObjectForTesting(
+        3, 83, 2, 69.0f, 69.0f);
+    game.spawnObjectForTesting(
+        0, 348, 0, 70.0f, 69.0f);
     static const char script[] =
         "(defconst test-goal 200)\n"
         "(defrule\n"
@@ -5925,8 +7028,8 @@ static int cmdTestAi(
             "sn-carbon-gatherer-percentage") ==
             100;
     const bool gathered =
-        game.objectGatheringTarget(
-            worker, carbon);
+        game.aiGathererCountForTesting(
+            2, 1) > 0;
     const int carbonBuildings =
         game.aiObjectCountForTesting(
             2, "BLDG-DROPCARBON");
@@ -5938,7 +7041,7 @@ static int cmdTestAi(
             2, 83);
     Game openingGame(assets);
     if (!openingGame.initCompactTestMap(
-            0x5A17u, 64, &err)) {
+            0x5A17u, 96, &err)) {
         fprintf(
             stderr, "error: %s\n",
             err.c_str());
@@ -5958,17 +7061,43 @@ static int cmdTestAi(
                         resourceType) -
                     3000.0f) <
                     0.001f;
+    int initialShipyardSites = 0;
+    for (float y = 2.0f; y < 94.0f;
+         y += 0.5f)
+        for (float x = 2.0f;
+             x < 94.0f; x += 0.5f)
+            if (openingGame
+                    .placementValidForTesting(
+                        openingGame
+                            .civilizationForPlayerForTesting(
+                                2),
+                        45, x, y))
+                initialShipyardSites++;
     if (!openingGame.loadAiScript(
             2, entry,
-            {"DIFFICULTY-MODERATE"},
+            {"DIFFICULTY-MODERATE",
+             "LAND-SATELLITES-MAP"},
             &err)) {
         fprintf(
             stderr, "error: %s\n",
             err.c_str());
         return 1;
     }
+    int enemyProductionSounds = 0;
+    const int workerTrainSound =
+        assets.dat().civs.size() > 3 &&
+                assets.dat().civs[3].units.size() >
+                    83
+            ? assets.dat().civs[3].units[83]
+                  .trainSound
+            : -1;
+    openingGame.setUnitSoundPlayer(
+        [&](int soundId, int) {
+            if (soundId == workerTrainSound)
+                enemyProductionSounds++;
+        });
     for (int frame = 0;
-         frame < 30 * 6; ++frame)
+         frame < 30 * 60; ++frame)
         openingGame.update(
             1.0f / 30.0f, {});
     const int openingCarbonPercentage =
@@ -5992,34 +7121,96 @@ static int cmdTestAi(
     const bool originalOpening =
         openingGatherPercentage == 100 &&
         openingCarbonGatherers > 0;
+    const size_t openingExplored =
+        openingGame
+            .exploredTileCountForTesting(2);
+    for (int step = 0;
+         step < 8000; ++step)
+        openingGame.update(0.2f, {});
+    const int openingAge =
+        openingGame.aiTechLevelForTesting(2);
+    const int troopCenters =
+        openingGame.aiObjectCountForTesting(
+            2, "BLDG-TRAINTROOPER");
+    const int shipyards =
+        openingGame.aiObjectCountForTesting(
+            2, "BLDG-TRAINBOAT");
+    const int powerCores =
+        openingGame.aiObjectCountForTesting(
+            2, "BLDG-POWERCORE");
+    const int workers =
+        openingGame.aiObjectCountForTesting(
+            2, "UNIT-WORKER");
+    const int militaryUnits =
+        openingGame.aiObjectCountForTesting(
+            2, "BOAT-LASER-LINE");
+    const int transports =
+        openingGame.aiObjectCountForTesting(
+            2, "BOAT-TRANSPORT");
+    const int landForces =
+        openingGame.aiForceCountForTesting(
+            2, 0);
+    const int navalForces =
+        openingGame.aiForceCountForTesting(
+            2, 1);
+    const int airForces =
+        openingGame.aiForceCountForTesting(
+            2, 2);
+    const bool originalProgression =
+        openingAge >= 3 &&
+        shipyards > 0 &&
+        militaryUnits > 0 &&
+        transports > 0 &&
+        landForces > 0 &&
+        navalForces > 0 &&
+        airForces > 0;
+    const size_t explored =
+        openingGame
+            .exploredTileCountForTesting(2);
+    const uint32_t attacksIssued =
+        openingGame
+            .aiAttacksIssuedForTesting(2);
     printf(
-        "AI parser files/constants/rules "
-        "%zu/%zu/%zu, init %d, gather %d, "
-        "carbon/food buildings %d/%d, "
-        "queued workers %zu, resources %d, "
-        "original opening %d "
-        "(%d%% assigned, %d%% carbon, "
-        "%zu workers)\n",
+        "AI parser %zu files, %zu constants, "
+        "%zu rules; opening %d%% gather/%zu "
+        "carbon workers; age %d, workers %d, "
+        "troop centers %d, shipyards %d, "
+        "power cores %d, frigates %d, "
+        "transports %d, forces %d/%d/%d, "
+        "explored +%zu, "
+        "attacks %u, enemy sounds %d\n",
         original.files.size(),
         original.constants.size(),
         original.rules.size(),
-        initialized ? 1 : 0,
-        gathered ? 1 : 0,
-        carbonBuildings,
-        foodBuildings,
-        queuedWorkers,
-        startingResources ? 1 : 0,
-        originalOpening ? 1 : 0,
         openingGatherPercentage,
-        openingCarbonPercentage,
-        openingCarbonGatherers);
+        openingCarbonGatherers,
+        openingAge,
+        workers,
+        troopCenters,
+        shipyards,
+        powerCores,
+        militaryUnits,
+        transports,
+        landForces,
+        navalForces,
+        airForces,
+        explored - openingExplored,
+        attacksIssued,
+        enemyProductionSounds);
+    fflush(stdout);
     if (!originalParsed ||
         !initialized || !gathered ||
         carbonBuildings != 1 ||
         foodBuildings != 1 ||
         queuedWorkers != 1 ||
         !startingResources ||
-        !originalOpening) {
+        initialShipyardSites == 0 ||
+        !originalOpening ||
+        !originalProgression ||
+        explored <= openingExplored ||
+        attacksIssued == 0 ||
+        powerCores > 1 ||
+        enemyProductionSounds != 0) {
         fprintf(
             stderr,
             "error: AI validation failed\n");

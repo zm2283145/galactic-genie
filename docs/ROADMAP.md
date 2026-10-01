@@ -16,8 +16,8 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   Galactic Empire mission 2, “Breaking Bread,” directly from the original `XCAM3.CPX`. Development
   builds can instead start on a 96-by-96 two-island test map. A full-height ocean channel blocks
   ground passage while aircraft cross normally; both shorelines accept Shipyards and each island
-  retains a base, livestock, power/shield coverage, test targets, and 12 deterministic nodes of
-  each resource type on accessible land.
+  retains a base, livestock, power/shield coverage, test targets, a 24-tree carbon forest,
+  12 food nodes, and separate 8-node ore and nova deposits on accessible land.
 - Initial scenario objects and the saved camera are loaded, including trees, resources, buildings, and
   units. Terrain aliases and civilization-specific farm terrain are resolved from the original data.
 - Player names, civilizations, colors, resources, population limits, diplomacy, and allied-victory state
@@ -31,7 +31,14 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   subtitle on Vita. DAT-driven selection and movement acknowledgements are loaded from the original
   sound archives and mixed over dialogue. Combat-driven object removal now feeds trigger conditions.
   AI goals, full technology effects, general world effects, music, and campaign progression remain.
-- Fog of war and explored/visible tile state.
+- Per-player fog of war is implemented from researched DAT line of sight.
+  Current visibility moves with units while exploration persists; allied
+  players share sight. Unexplored terrain is shrouded, explored terrain is
+  dimmed through smoothly interpolated isometric masks, and enemy units,
+  attacks, selection, and automatic targeting require current sight. Static
+  resource nodes and discovered buildings remain known after exploration.
+  `FORCEEXPLORE` reveals the full terrain and buildings for the human player
+  while keeping units hidden; `FORCESIGHT` grants that player live vision.
 - Shadow and player-outline passes (PX_OUTLINE pixels drawn only when occluded).
 
 ## Milestone 3: simulation core
@@ -140,12 +147,16 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   expose an action-menu hint. Selection status distinguishes the local player,
   named allies, neutral sides, and enemies using scenario diplomacy, scenario player names, and
   civilization names. Status icons expose powered, unpowered, shielded, and unshielded tooltips.
+  Enemy selections hide unit/research queue names and progress without hiding construction progress;
+  the custom `MANY BOTHANS` toggle restores that production intelligence without changing fog.
   Player-color occlusion outlines use a thicker, high-alpha masked pass so units remain legible
   behind buildings and resource sprites.
   A persistent resource, population, and Tech Level bar is shown at the top, including age-research
   progress. A scrollable L + R + Select test menu exposes
   the original base-game and Clone Campaigns cheats, including resource grants, unit spawns, instant
-  production/construction, victory/player defeat, and hidden DAT cheat technologies.
+  production/construction, victory/player defeat, and hidden DAT cheat technologies. It also includes
+  the custom `OIIA OIIA` secret-unit entry: the OIIA Cat uses the contributed 94-frame cat animation,
+  spins while attacking, and plays an original synthesized oiia-style vocal/chiptune cue.
   A Star Wars/Clone Campaigns visual redesign of the remaining temporary panel framing, tabs,
   typography, resource bar, queues, tooltips, and status areas remains. The replacement minimap
   and its matching frame, pause/options menus, control groups, and skirmish setup also remain.
@@ -153,20 +164,39 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   death effects are implemented. The original Ogg soundtrack streams from storage, ducks beneath
   scenario dialogue, and mixes with terrain-specific world ambience. Scenario speaker text uses
   the speaking player's color, while hostile damage uses the original cooldown-controlled
-  `atakwarn.wav`. Garrison/ejection, gate
+  `atakwarn.wav` with a red warning naming the attacking player. Other players' ordinary research
+  is silent, while their Tech Level advancement is announced by name using `archupg.wav`.
+  Garrison/ejection, gate
   transformation, unit-training, construction-start, and building-completion cues use their DAT
   sound groups. Livestock capture uses `capsheep.wav`, and queued Tech Level completion uses the
   executable's `archupg.wav` resource. User-facing volume controls remain.
 
 ## Milestone 5: AI and skirmish
-- The first original AI economy slice is implemented. The `.per` parser loads the complete 40-file
-  Computer Expanded personality (1,423 rules), including recursive/conditional loads, constants,
-  Boolean expressions, and three-valued unsupported facts. Goals and strategic numbers drive real
-  worker gathering; supported build, train, and research actions use normal placement, costs,
-  population, and queues. The compact Vita match loads player 2's original personality from the
-  separately deployed `AI` directory. Timers, escrow, scenario-selected personalities,
-  build-forward strategy, military managers, and the remaining facts/actions remain.
-- A skirmish setup screen, and victory/defeat conditions.
+- The original AI economy and first military progression slice are implemented. The `.per` parser
+  loads the complete 40-file Computer Expanded personality (1,423 rules), including
+  recursive/conditional loads, constants, Boolean expressions, and three-valued unsupported facts.
+  Goals, timers, strategic numbers, and escrow drive real gathering, Tech Level advancement,
+  construction, research, Shipyards, and civilization-correct naval production through normal
+  placement, costs, population, and queues. Worker allocation spreads tree jobs and recovers
+  depleted resources without exposing deposits through fog.
+- Original `attack-now` actions select currently visible enemies. Idle military units physically
+  scout unexplored passable tiles, while non-air attackers require a valid route to weapon range;
+  the AI receives no hidden target positions. Persistent land, naval, and air groups use the
+  ordinary formation marcher and do not replace equivalent active orders on later rule pulses.
+  Land groups separated from a discovered enemy building reserve DAT-compatible transports,
+  assemble at a reachable shore, board with capacity reservations, cross valid air/water routes,
+  unload onto route-valid enemy terrain, reform, and continue the attack. A strategic manager now
+  maintains Tech-Level-scaled land, naval, air, and transport targets; balances DAT production,
+  escorts invasions with ships and aircraft, prioritizes critical targets, regroups survivors, and
+  retreats badly outmatched armies for a timed rebuild. Scenario-selected personalities and
+  build-forward strategy remain.
+- AI workers near a threatened Command Center enter it through ordinary garrison orders, remain
+  excluded from economy retasking while moving or sheltered, and eject after five safe seconds.
+  All completed garrison-capable non-transport buildings evacuate and reject new occupants at or
+  below 20 percent health, then unlock after repair above that threshold.
+- Generated matches now enforce conquest elimination, AI recognition of defeated players, and
+  collapse/outmatched surrender. Local victory and defeat display full-screen outcome panels and
+  play the original `WON1.MP3` or `lost.mp3` stream. A skirmish setup screen remains.
 
 ## Vita performance notes
 - The main memory cost is texture atlases. Terrain and sprite working sets are capped at 64 MB,
