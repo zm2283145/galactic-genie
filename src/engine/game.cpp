@@ -68,7 +68,6 @@ constexpr size_t kStanceIcons[4] = {9, 10, 11, 50};
 constexpr size_t kStanceActiveIcons[4] = {53, 52, 51, 54};
 constexpr int kStanceNameStrings[4] = {4133, 4134, 4122, 4135};
 constexpr int kStanceHelpStrings[4] = {4933, 4934, 4922, 4935};
-constexpr int kSuperconductingShieldsTech = 570;
 constexpr int kShieldWallTech = 484;
 constexpr int kBuildingIconSlpBase = 53241;
 constexpr int kUnitIconSlpBase = 53251;
@@ -2184,12 +2183,15 @@ bool Game::isDetector(
         return false;
     if ((object.unit->trait & 8u) != 0)
         return true;
-    const dat::Task *task =
-        conversionTask(object);
-    return task &&
-           task->targetDiplomacy == 2 &&
+    const int cls = object.unit->cls;
+    if ((cls == 50 || cls == 51) &&
+        playerAttribute(
+            object.player, 58) > 0.0f)
+        return true;
+    return (cls == 11 || cls == 13 ||
+            cls == 15 || cls == 16) &&
            playerAttribute(
-               object.player, 58) > 0.0f;
+               object.player, 23) > 0.0f;
 }
 
 bool Game::detectedByPlayer(
@@ -2849,6 +2851,10 @@ bool Game::invariantsForTesting() const {
             !std::isfinite(object.hitPoints) ||
             !std::isfinite(object.maxHitPoints) ||
             !std::isfinite(object.shieldPoints) ||
+            !std::isfinite(
+                object.shieldRegenerationTime) ||
+            !std::isfinite(
+                object.shieldDrainTime) ||
             !std::isfinite(object.resourceAmount) ||
             !std::isfinite(object.carriedAmount) ||
             object.x < 0.0f ||
@@ -2860,6 +2866,9 @@ bool Game::invariantsForTesting() const {
             object.pathIndex >
                 object.path.size() ||
             object.shieldPoints < 0.0f ||
+            object.shieldRegenerationTime <
+                0.0f ||
+            object.shieldDrainTime < 0.0f ||
             object.resourceAmount < -0.001f ||
             object.carriedAmount < -0.001f)
             return false;
@@ -7099,8 +7108,11 @@ const Game::Object *Game::shieldGeneratorFor(
     // covered like any other building standing in a generator's field.
     if (object.unit->cls == 6)
         return nullptr;
-    const Object *closest = nullptr;
-    float closestDistance =
+    const Object *closestPowered = nullptr;
+    const Object *closestInactive = nullptr;
+    float closestPoweredDistance =
+        std::numeric_limits<float>::max();
+    float closestInactiveDistance =
         std::numeric_limits<float>::max();
     // Shield generators are few; scan the cached list instead of every
     // object (this used to be O(objects^2) per frame).
@@ -7123,13 +7135,28 @@ const Game::Object *Game::shieldGeneratorFor(
         const float range =
             9.0f + collisionRadius(object);
         const float distance = dx * dx + dy * dy;
-        if (distance <= range * range &&
-            distance < closestDistance) {
-            closest = &source;
-            closestDistance = distance;
+        if (distance > range * range)
+            continue;
+        if (isPowered(source)) {
+            if (distance <
+                closestPoweredDistance) {
+                closestPowered = &source;
+                closestPoweredDistance =
+                    distance;
+            }
+        } else if (distance <
+                   closestInactiveDistance) {
+            closestInactive = &source;
+            closestInactiveDistance =
+                distance;
         }
     }
-    return closest;
+    // Overlapping fields do not stack, but an unpowered nearer generator
+    // must not mask a powered field. Keep the inactive fallback so retained
+    // shields still drain while an object remains inside an unpowered field.
+    return closestPowered
+               ? closestPowered
+               : closestInactive;
 }
 
 // IsShielded (0x54bc40) before generator coverage: the DAT trait bit 0x40
@@ -7166,12 +7193,29 @@ bool Game::isShielded(const Object &object) const {
     return source && isPowered(*source);
 }
 
+float Game::shieldRegeneration(
+    float shieldPoints) {
+    if (shieldPoints >= 4000.0f)
+        return 20.0f;
+    if (shieldPoints >= 3000.0f)
+        return 16.0f;
+    if (shieldPoints >= 2000.0f)
+        return 12.0f;
+    if (shieldPoints >= 1000.0f)
+        return 8.0f;
+    if (shieldPoints >= 100.0f)
+        return 4.0f;
+    return 2.0f;
+}
+
 void Game::updateShields(float dt) {
     for (Object &object : objects_) {
         if (!object.active || object.hidden ||
             object.underConstruction || !object.unit) {
             object.shieldPoints = 0;
             object.maxShieldPoints = 0;
+            object.shieldRegenerationTime = 0;
+            object.shieldDrainTime = 0;
             continue;
         }
         const bool self = selfShielded(object);
@@ -7184,36 +7228,47 @@ void Game::updateShields(float dt) {
             object.shieldPoints,
             object.maxShieldPoints);
         if (!self && (!source || !isPowered(*source))) {
-            const bool superconducting =
-                object.player >= 0 &&
-                (size_t)object.player <
-                    researchedTechs_.size() &&
-                researchedTechs_[(size_t)object.player]
-                    .count(kSuperconductingShieldsTech);
-            object.shieldPoints = std::max(
-                0.0f,
-                object.shieldPoints -
-                    dt * (superconducting ? 20.0f
-                                         : 40.0f));
+            object.shieldRegenerationTime = 0;
+            const float drainRate =
+                std::max(
+                    0.0f,
+                    playerAttribute(
+                        object.player, 26));
+            object.shieldDrainTime += dt;
+            while (object.shieldDrainTime >=
+                       1.0f &&
+                   object.shieldPoints > 0.0f) {
+                object.shieldDrainTime -= 1.0f;
+                object.shieldPoints =
+                    std::max(
+                        0.0f,
+                        object.shieldPoints -
+                            drainRate);
+            }
             if (!source &&
                 object.shieldPoints <= 0.0f)
                 object.maxShieldPoints = 0.0f;
             continue;
         }
-        float regeneration = 2.0f;
-        if (object.shieldPoints >= 4000.0f)
-            regeneration = 20.0f;
-        else if (object.shieldPoints >= 3008.0f)
-            regeneration = 16.0f;
-        else if (object.shieldPoints >= 2000.0f)
-            regeneration = 12.0f;
-        else if (object.shieldPoints >= 1000.0f)
-            regeneration = 8.0f;
-        else if (object.shieldPoints >= 100.0f)
-            regeneration = 4.0f;
-        object.shieldPoints = std::min(
-            object.maxShieldPoints,
-            object.shieldPoints + regeneration * dt);
+        object.shieldDrainTime = 0;
+        const float interval =
+            playerAttribute(
+                object.player, 25);
+        if (interval <= 0.0f)
+            continue;
+        object.shieldRegenerationTime += dt;
+        while (object.shieldRegenerationTime >=
+                   interval &&
+               object.shieldPoints <
+                   object.maxShieldPoints) {
+            object.shieldRegenerationTime -=
+                interval;
+            object.shieldPoints = std::min(
+                object.maxShieldPoints,
+                object.shieldPoints +
+                    shieldRegeneration(
+                        object.shieldPoints));
+        }
     }
 }
 
@@ -11762,8 +11817,6 @@ void Game::damageObject(Object &object, int damage, uint32_t attackerId) {
                      hitPointDamage);
         object.shieldPoints -= absorbed;
         hitPointDamage -= absorbed;
-        if (object.unit->type != dat::UT_Building)
-            hitPointDamage += 1.0f;
     }
     object.hitPoints = std::max(
         0.0f, object.hitPoints - hitPointDamage);
@@ -12223,35 +12276,69 @@ void Game::updateProjectiles(float dt) {
     }
 }
 
-// Blast (area) damage: everything whose footprint is within the blast width
-// of the impact takes the attacker's damage against it. Blast level 3 hits
-// only the target; lower levels also hit the attacker's own and allied
-// units (friendly fire), as with the original's artillery.
+// Blast loop at 0x55dcf0: candidate blast defense must meet the attack level,
+// distance is measured from impact to the candidate footprint, and ranged
+// attacks bypass the allied-target exclusion used by range-1 attacks.
 void Game::applyBlast(uint32_t sourceId, int sourcePlayer, float x, float y, uint32_t primaryId,
                       float width, int level, int fallbackDamage) {
-    if (width <= 0 || level >= 3) return;
+    if (width <= 0) return;
     const Object *source = findObject(sourceId);
-    // The blast spreads from the struck object's footprint, not just its
-    // centre: troops standing next to a shelled building are caught too.
-    float halfX = 0.0f, halfY = 0.0f;
-    if (const Object *primary = findObject(primaryId); primary && primary->unit) {
-        halfX = std::max(0.0f, primary->unit->collisionSize[0]);
-        halfY = std::max(0.0f, primary->unit->collisionSize[1]);
-        x = primary->x;
-        y = primary->y;
-    }
+    const bool ranged =
+        !source || !source->unit ||
+        modifiedUnitAttribute(
+            *source, 12,
+            source->unit->maxRange) >
+            1.0f;
+    const float accuracy =
+        source && source->unit
+            ? std::clamp(
+                  modifiedUnitAttribute(
+                      *source, 11,
+                      (float)source->unit
+                          ->accuracyPercent),
+                  0.0f, 100.0f)
+            : 100.0f;
+    std::uniform_real_distribution<float>
+        percent(0.0f, 100.0f);
     std::vector<uint32_t> victims;
     for (const Object &other : objects_) {
         if (!other.active || other.hidden || !other.unit || other.spawnId == primaryId ||
-            other.spawnId == sourceId || other.player <= 0 ||
+            other.spawnId == sourceId ||
             other.unit->type < dat::UT_Combatant || other.carcassClass >= 0 || isAirUnit(other))
             continue;
-        const bool enemy = sourcePlayer > 0 && !isFriendlyPlayer(sourcePlayer, other.player);
-        if (!enemy && level > 2) continue;
-        const float dx = std::max(0.0f, std::abs(other.x - x) - halfX);
-        const float dy = std::max(0.0f, std::abs(other.y - y) - halfY);
-        const float reach = width + collisionRadius(other);
-        if (dx * dx + dy * dy > reach * reach) continue;
+        if ((int)other.unit->blastDefenseLevel <
+            level)
+            continue;
+        if (!ranged &&
+            isFriendlyPlayer(
+                sourcePlayer, other.player))
+            continue;
+        if (source && source->unit &&
+            source->unit->cls == 35 &&
+            other.unit->type !=
+                dat::UT_Building)
+            continue;
+        const float dx =
+            std::max(
+                0.0f,
+                std::abs(other.x - x) -
+                    std::max(
+                        0.0f,
+                        other.unit
+                            ->collisionSize[0]));
+        const float dy =
+            std::max(
+                0.0f,
+                std::abs(other.y - y) -
+                    std::max(
+                        0.0f,
+                        other.unit
+                            ->collisionSize[1]));
+        if (dx * dx + dy * dy >
+            width * width)
+            continue;
+        if (percent(rng_) > accuracy)
+            continue;
         victims.push_back(other.spawnId);
     }
     for (uint32_t id : victims) {

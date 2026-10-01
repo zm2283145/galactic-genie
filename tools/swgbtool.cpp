@@ -68,6 +68,7 @@ static int usage() {
             "  swgbtool test-interface <DataDir>\n"
             "  swgbtool test-core-gameplay <DataDir>\n"
             "  swgbtool test-major-mechanics <DataDir>\n"
+            "  swgbtool test-fidelity <DataDir>\n"
             "  swgbtool test-campaign <DataDir> <CampaignDir>\n"
             "  swgbtool mp3 <file.mp3>\n");
     return 2;
@@ -2359,12 +2360,12 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         systems.objectShieldPoints(
             shieldBuildingId) <=
             chargedBuildingShield - 9.9f;
-    const bool mobileShieldBleedThrough =
+    const bool mobileShieldAbsorbed =
         chargedWorkerShield >= 39.9f &&
         std::abs(
             systems.objectHitPoints(
                 shieldWorkerId) -
-            (workerHealthBeforeShieldHit - 1.0f)) <
+            workerHealthBeforeShieldHit) <
             0.01f;
     const float workerShieldBeforeOverflow =
         systems.objectShieldPoints(
@@ -2376,7 +2377,7 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         shieldWorkerId, 50);
     const float expectedOverflow =
         50.0f -
-        workerShieldBeforeOverflow + 1.0f;
+        workerShieldBeforeOverflow;
     const bool shieldOverflowDamagedHealth =
         systems.objectShieldPoints(
             shieldWorkerId) == 0 &&
@@ -2391,16 +2392,23 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
     const float shieldBeforeLeaving =
         systems.objectShieldPoints(
             shieldBuildingId);
-    systems.update(0.1f, {});
+    systems.update(0.5f, {});
     const bool shieldRetainedOutsideRadius =
-        systems.objectShieldPoints(
-            shieldBuildingId) <
-            shieldBeforeLeaving &&
-        systems.objectShieldPoints(
-            shieldBuildingId) >
-            shieldBeforeLeaving - 4.1f &&
+        std::abs(
+            systems.objectShieldPoints(
+                shieldBuildingId) -
+            shieldBeforeLeaving) < 0.01f &&
         systems.objectMaxShieldPoints(
             shieldBuildingId) > 0;
+    systems.update(0.5f, {});
+    const bool shieldDrainedOnTick =
+        std::abs(
+            systems.objectShieldPoints(
+                shieldBuildingId) -
+            std::max(
+                0.0f,
+                shieldBeforeLeaving -
+                    40.0f)) < 0.01f;
     systems.moveObjectForTesting(
         shieldBuildingId, 13.0f, 48.0f);
     systems.update(400.0f, {});
@@ -2414,10 +2422,16 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
     systems.moveObjectForTesting(
         powerCoreId, 40.0f, 40.0f);
     systems.update(0.5f, {});
+    const bool noPartialDrain =
+        std::abs(
+            systems.objectShieldPoints(
+                shieldBuildingId) -
+            poweredShield) < 0.01f;
+    systems.update(0.5f, {});
     const bool unpoweredShieldDrained =
         systems.objectShieldPoints(
             shieldBuildingId) <=
-            poweredShield - 19.9f;
+            poweredShield - 39.9f;
 
     const float testBaseX = mapSize * 0.30f;
     const float testBaseY = mapSize * 0.35f;
@@ -3168,11 +3182,15 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
            constructionCompleted ? 1 : 0,
            multiWorkerMenuOpened ? 1 : 0,
            buildingShieldAbsorbed ? 1 : 0,
-           mobileShieldBleedThrough ? 1 : 0,
+           mobileShieldAbsorbed ? 1 : 0,
            shieldOverflowDamagedHealth ? 1 : 0,
-           shieldRetainedOutsideRadius ? 1 : 0,
+           shieldRetainedOutsideRadius &&
+                   shieldDrainedOnTick
+               ? 1
+               : 0,
            shieldChargedFully ? 1 : 0,
            shieldFixturesCreated &&
+                   noPartialDrain &&
                    unpoweredShieldDrained
                ? 1
                : 0,
@@ -3273,11 +3291,13 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         !constructionCompleted ||
         !multiWorkerMenuOpened ||
         !buildingShieldAbsorbed ||
-        !mobileShieldBleedThrough ||
+        !mobileShieldAbsorbed ||
         !shieldOverflowDamagedHealth ||
         !shieldRetainedOutsideRadius ||
+        !shieldDrainedOnTick ||
         !shieldChargedFully ||
         !shieldFixturesCreated ||
+        !noPartialDrain ||
         !unpoweredShieldDrained ||
         !workerGatheredAndDeposited ||
         !multipleGatherersAssigned ||
@@ -4916,7 +4936,8 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         for (int f = 0; f < 30 * 25 && g.objectActive(close) && g.objectHitPoints(close) >= hpC; f++)
             g.update(1.0f / 30.0f, {});
         const bool firedClose = !g.objectActive(close) || g.objectHitPoints(close) < hpC;
-        // Shelling a building also hits troops standing beside it.
+        // The direct target's footprint does not inflate the blast radius;
+        // only the secondary candidate's own footprint reduces distance.
         const uint32_t hut = g.spawnObjectForTesting(3, 70, 2, 40.0f, 40.0f);
         const uint32_t guard = g.spawnObjectForTesting(3, 460, 2, 41.9f, 40.0f);
         g.setAttackModeForTesting(guard, 3);
@@ -4926,9 +4947,9 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         for (int f = 0; f < 30 * 20 && g.objectActive(guard) && g.objectHitPoints(guard) >= hpG; f++)
             g.update(1.0f / 30.0f, {});
         const bool besideHit = !g.objectActive(guard) || g.objectHitPoints(guard) < hpG;
-        report("blast-minrange", splashed && firedClose && besideHit,
+        report("blast-minrange", splashed && firedClose && !besideHit,
                "splash " + std::to_string(splashed) + " closeHit " + std::to_string(firedClose) +
-                   " besideBuilding " + std::to_string(besideHit));
+                   " primaryFootprintInflated " + std::to_string(besideHit));
     }
     // 28) A worker-built fortress at Tech Level 3 opens its menu (Empire),
     // on the Vita's compact test map.
@@ -9282,7 +9303,7 @@ static int cmdTestMajorMechanics(
                 savePath, &err);
         std::remove(savePath.c_str());
         report(
-            "save-v4-roundtrip",
+            "save-v5-roundtrip",
             saved && restored &&
                 loaded
                         .victoryConditionForTesting() ==
@@ -9994,6 +10015,683 @@ static int cmdTestCampaign(
     return failures ? 1 : 0;
 }
 
+static int cmdTestFidelity(
+    const char *dataDir) {
+    std::string err;
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n",
+                err.c_str());
+        return 1;
+    }
+    int failures = 0;
+    auto report =
+        [&](const char *name, bool ok,
+            const std::string &detail) {
+            printf(
+                "%s %s %s\n",
+                ok ? "PASS" : "FAIL",
+                name, detail.c_str());
+            if (!ok)
+                failures++;
+        };
+    auto step = [](Game &game,
+                   float seconds) {
+        for (float elapsed = 0.0f;
+             elapsed < seconds;
+             elapsed += 1.0f / 30.0f)
+            game.update(
+                1.0f / 30.0f, {});
+    };
+
+    {
+        const std::array<float, 11>
+            shieldPoints{{
+                0.0f, 99.99f, 100.0f,
+                999.99f, 1000.0f,
+                1999.99f, 2000.0f,
+                2999.99f, 3000.0f,
+                3999.99f, 4000.0f}};
+        const std::array<float, 11>
+            expected{{
+                2.0f, 2.0f, 4.0f,
+                4.0f, 8.0f, 8.0f,
+                12.0f, 12.0f, 16.0f,
+                16.0f, 20.0f}};
+        bool tiers = true;
+        for (size_t index = 0;
+             index < shieldPoints.size();
+             ++index)
+            tiers =
+                tiers &&
+                Game::shieldRegenerationForTesting(
+                    shieldPoints[index]) ==
+                    expected[index];
+        report(
+            "shield-regeneration-tiers",
+            tiers,
+            "2/4/8/12/16/20 at "
+            "100/1000/2000/3000/4000");
+
+        Game game(assets);
+        const bool initialized =
+            game.initCompactTestMap(
+                0x53484945u, 96, &err);
+        const uint32_t inactiveGenerator =
+            game.spawnObjectForTesting(
+                3, 335, 1,
+                42.0f, 6.0f);
+        const uint32_t poweredGenerator =
+            game.spawnObjectForTesting(
+                3, 335, 1,
+                54.0f, 6.0f);
+        const uint32_t powerCore =
+            game.spawnObjectForTesting(
+                3, 12, 1,
+                60.0f, 6.0f);
+        const uint32_t worker =
+            game.spawnObjectForTesting(
+                3, 83, 1,
+                45.5f, 6.0f);
+        step(game, 12.0f);
+        const float charged =
+            game.objectShieldPoints(worker);
+        const bool nearUnpowered =
+            !game.objectPoweredForTesting(
+                inactiveGenerator);
+        const bool farPowered =
+            game.objectPoweredForTesting(
+                poweredGenerator);
+        const bool poweredOverlap =
+            initialized &&
+            inactiveGenerator &&
+            poweredGenerator &&
+            powerCore && worker &&
+            nearUnpowered &&
+            farPowered &&
+            charged > 20.0f &&
+            game.objectMaxShieldPoints(
+                worker) ==
+                game.objectMaxHitPoints(
+                    worker);
+        game.damageObjectForTesting(
+            powerCore, 100000);
+        step(game, 1.0f);
+        const float drained =
+            game.objectShieldPoints(worker);
+        report(
+            "overlapping-shield-sources",
+            poweredOverlap &&
+                drained <= charged - 19.9f &&
+                game.invariantsForTesting(),
+            "sources=" +
+                std::to_string(
+                    nearUnpowered) +
+                "/" +
+                std::to_string(
+                    farPowered) +
+                " shield=" +
+                std::to_string(charged) +
+                "->" +
+                std::to_string(drained));
+
+        auto shieldRates =
+            [&](bool superconducting) {
+                Game probe(assets);
+                if (!probe.initCompactTestMap(
+                        0x53555045u, 96,
+                        &err))
+                    return std::array<float, 2>{
+                        -1.0f, -1.0f};
+                const uint32_t generator =
+                    probe.spawnObjectForTesting(
+                        3, 335, 1,
+                        54.0f, 6.0f);
+                const uint32_t core =
+                    probe.spawnObjectForTesting(
+                        3, 12, 1,
+                        60.0f, 6.0f);
+                const uint32_t building =
+                    probe.spawnObjectForTesting(
+                        3, 70, 1,
+                        50.0f, 6.0f);
+                if (!generator || !core ||
+                    !building)
+                    return std::array<float, 2>{
+                        -1.0f, -1.0f};
+                if (superconducting)
+                    probe
+                        .researchTechnologyForTesting(
+                            1, 570);
+                step(probe, 15.0f);
+                const float beforeDrain =
+                    probe.objectShieldPoints(
+                        building);
+                probe.damageObjectForTesting(
+                    core, 100000);
+                step(probe, 1.0f);
+                return std::array<float, 2>{
+                    beforeDrain,
+                    probe.objectShieldPoints(
+                        building)};
+            };
+        const auto baseRates =
+            shieldRates(false);
+        const auto upgradedRates =
+            shieldRates(true);
+        report(
+            "superconducting-shield-drain",
+            baseRates[0] > 29.5f &&
+                baseRates[0] < 30.5f &&
+                baseRates[1] < 0.1f &&
+                upgradedRates[0] > 29.5f &&
+                upgradedRates[0] < 30.5f &&
+                upgradedRates[1] > 9.5f &&
+                upgradedRates[1] < 10.5f,
+            "base=" +
+                std::to_string(
+                    baseRates[0]) +
+                "->" +
+                std::to_string(
+                    baseRates[1]) +
+                " upgraded=" +
+                std::to_string(
+                    upgradedRates[0]) +
+                "->" +
+                std::to_string(
+                    upgradedRates[1]));
+
+        Game timer(assets);
+        const bool timerInit =
+            timer.initCompactTestMap(
+                0x54494D45u, 96, &err);
+        const uint32_t timerGenerator =
+            timer.spawnObjectForTesting(
+                3, 335, 1,
+                54.0f, 6.0f);
+        const uint32_t timerCore =
+            timer.spawnObjectForTesting(
+                3, 12, 1,
+                60.0f, 6.0f);
+        const uint32_t timerBuilding =
+            timer.spawnObjectForTesting(
+                3, 70, 1,
+                50.0f, 6.0f);
+        timer.update(0.5f, {});
+        const char *timerSave =
+            "test-fidelity-shield.sav";
+        std::remove(timerSave);
+        const bool timerSaved =
+            timer.saveMatch(
+                timerSave, &err);
+        Game timerLoaded(assets);
+        const bool timerLoadedInit =
+            timerLoaded.initCompactTestMap(
+                0x54494D45u, 96, &err);
+        const bool timerRestored =
+            timerLoadedInit &&
+            timerLoaded.loadMatch(
+                timerSave, &err);
+        std::remove(timerSave);
+        timerLoaded.update(0.49f, {});
+        const float beforeTick =
+            timerLoaded.objectShieldPoints(
+                timerBuilding);
+        timerLoaded.update(0.02f, {});
+        const float afterTick =
+            timerLoaded.objectShieldPoints(
+                timerBuilding);
+        report(
+            "shield-timer-save-continuity",
+            timerInit && timerGenerator &&
+                timerCore && timerBuilding &&
+                timerSaved && timerRestored &&
+                beforeTick < 0.01f &&
+                afterTick > 1.99f &&
+                afterTick < 2.01f,
+            "saved/loaded=" +
+                std::to_string(
+                    timerSaved) +
+                "/" +
+                std::to_string(
+                    timerRestored) +
+                " shield=" +
+                std::to_string(
+                    beforeTick) +
+                "->" +
+                std::to_string(
+                    afterTick));
+    }
+
+    {
+        constexpr int trials = 96;
+        int hits = 0;
+        int misses = 0;
+        bool missGeometry = true;
+        for (uint32_t seed = 1;
+             seed <= trials; ++seed) {
+            Game game(assets);
+            if (!game.init(seed, 48,
+                           &err)) {
+                fprintf(
+                    stderr, "error: %s\n",
+                    err.c_str());
+                return 1;
+            }
+            game.setDiplomacyForTesting(
+                1, 2, 3);
+            game.setDiplomacyForTesting(
+                2, 1, 3);
+            const uint32_t source =
+                game.spawnObjectForTesting(
+                    7, 6, 1,
+                    20.0f, 20.0f);
+            const uint32_t target =
+                game.spawnObjectForTesting(
+                    7, 460, 2,
+                    23.5f, 20.0f);
+            game.setAttackModeForTesting(
+                source, 3);
+            game.setAttackModeForTesting(
+                target, 3);
+            if (!game.issueAttackForTesting(
+                    source, target))
+                continue;
+            for (int frame = 0;
+                 frame < 300 &&
+                 game.projectileCountForTesting() ==
+                     0;
+                 ++frame)
+                game.update(
+                    1.0f / 30.0f, {});
+            if (!game
+                     .projectileCountForTesting())
+                continue;
+            const auto aim =
+                game.projectileAimForTesting(0);
+            const float dx =
+                aim[0] - 23.5f;
+            const float dy =
+                aim[1] - 20.0f;
+            const float missDistance =
+                std::sqrt(dx * dx +
+                          dy * dy);
+            if (missDistance > 0.35f) {
+                misses++;
+                missGeometry =
+                    missGeometry &&
+                    missDistance >= 0.49f &&
+                    missDistance <= 0.96f;
+            } else {
+                hits++;
+            }
+        }
+        const float hitRate =
+            (float)hits /
+            (float)std::max(
+                1, hits + misses);
+        report(
+            "accuracy-statistical-boundary",
+            hits + misses == trials &&
+                hitRate >= 0.25f &&
+                hitRate <= 0.65f &&
+                missGeometry,
+            "DAT=45% observed=" +
+                std::to_string(hitRate) +
+                " hits/misses=" +
+                std::to_string(hits) +
+                "/" +
+                std::to_string(misses));
+    }
+
+    {
+        const int civilization = 7;
+        int rangedUnit = -1;
+        int meleeUnit = -1;
+        int lowDefenseUnit = -1;
+        int highDefenseUnit = -1;
+        for (const dat::Unit &unit :
+             assets.dat()
+                 .civs[(size_t)civilization]
+                 .units) {
+            if (!unit.exists ||
+                unit.type <
+                    dat::UT_Combatant ||
+                unit.flyMode != 0 ||
+                unit.hitPoints <= 0)
+                continue;
+            if (lowDefenseUnit < 0 &&
+                unit.blastDefenseLevel < 3)
+                lowDefenseUnit = unit.id;
+            if (highDefenseUnit < 0 &&
+                unit.blastDefenseLevel >= 3)
+                highDefenseUnit = unit.id;
+            if (unit.accuracyPercent < 100 ||
+                unit.attacks.empty())
+                continue;
+            if (rangedUnit < 0 &&
+                unit.maxRange > 1.0f &&
+                unit.cls != 35)
+                rangedUnit = unit.id;
+            if (meleeUnit < 0 &&
+                unit.maxRange <= 1.0f)
+                meleeUnit = unit.id;
+        }
+
+        Game ranged(assets);
+        const bool rangedInit =
+            ranged.init(
+                0x424C4153u, 48, &err);
+        ranged.setDiplomacyForTesting(
+            1, 2, 3);
+        ranged.setDiplomacyForTesting(
+            2, 1, 3);
+        const uint32_t source =
+            ranged.spawnObjectForTesting(
+                civilization, rangedUnit, 1,
+                20.0f, 20.0f);
+        const uint32_t low =
+            ranged.spawnObjectForTesting(
+                civilization,
+                lowDefenseUnit, 2,
+                24.0f, 20.0f);
+        const uint32_t high =
+            ranged.spawnObjectForTesting(
+                civilization,
+                highDefenseUnit, 2,
+                24.0f, 21.0f);
+        const uint32_t ally =
+            ranged.spawnObjectForTesting(
+                civilization,
+                highDefenseUnit, 1,
+                24.0f, 22.0f);
+        const uint32_t neutral =
+            ranged.spawnObjectForTesting(
+                civilization,
+                highDefenseUnit, 0,
+                24.0f, 23.0f);
+        const float lowBefore =
+            ranged.objectHitPoints(low);
+        const float highBefore =
+            ranged.objectHitPoints(high);
+        const float allyBefore =
+            ranged.objectHitPoints(ally);
+        const float neutralBefore =
+            ranged.objectHitPoints(neutral);
+        ranged.applyBlastForTesting(
+            source, 24.0f, 20.0f,
+            0, 4.0f, 3, 10);
+        const bool defenseGate =
+            ranged.objectHitPoints(low) ==
+                lowBefore &&
+            ranged.objectHitPoints(high) <
+                highBefore;
+        const bool rangedDiplomacy =
+            ranged.objectHitPoints(ally) <
+                allyBefore &&
+            ranged.objectHitPoints(neutral) <
+                neutralBefore;
+
+        Game melee(assets);
+        const bool meleeInit =
+            melee.init(
+                0x4D454C45u, 48, &err);
+        melee.setDiplomacyForTesting(
+            1, 2, 3);
+        melee.setDiplomacyForTesting(
+            2, 1, 3);
+        const uint32_t meleeSource =
+            melee.spawnObjectForTesting(
+                civilization, meleeUnit, 1,
+                20.0f, 20.0f);
+        const uint32_t meleeAlly =
+            melee.spawnObjectForTesting(
+                civilization,
+                highDefenseUnit, 1,
+                21.0f, 20.0f);
+        const uint32_t meleeEnemy =
+            melee.spawnObjectForTesting(
+                civilization,
+                highDefenseUnit, 2,
+                21.0f, 21.0f);
+        const float meleeAllyBefore =
+            melee.objectHitPoints(
+                meleeAlly);
+        const float meleeEnemyBefore =
+            melee.objectHitPoints(
+                meleeEnemy);
+        melee.applyBlastForTesting(
+            meleeSource, 21.0f, 20.0f,
+            0, 3.0f, 3, 10);
+        const bool meleeDiplomacy =
+            melee.objectHitPoints(
+                meleeAlly) ==
+                meleeAllyBefore &&
+            melee.objectHitPoints(
+                meleeEnemy) <
+                meleeEnemyBefore;
+        report(
+            "blast-defense-diplomacy",
+            rangedInit && meleeInit &&
+                source && low && high &&
+                ally && neutral &&
+                meleeSource && meleeAlly &&
+                meleeEnemy &&
+                defenseGate &&
+                rangedDiplomacy &&
+                meleeDiplomacy,
+            "units=" +
+                std::to_string(
+                    rangedUnit) +
+                "/" +
+                std::to_string(
+                    meleeUnit) +
+                " defense=" +
+                std::to_string(
+                    lowDefenseUnit) +
+                "/" +
+                std::to_string(
+                    highDefenseUnit) +
+                " gate/ranged/melee=" +
+                std::to_string(
+                    defenseGate) +
+                "/" +
+                std::to_string(
+                    rangedDiplomacy) +
+                "/" +
+                std::to_string(
+                    meleeDiplomacy));
+    }
+
+    {
+        Game game(assets);
+        const bool initialized =
+            game.initCompactTestMap(
+                0x44455445u, 96, &err);
+        const int civilization =
+            game.civilizationForPlayerForTesting(
+                1);
+        int forceDetectorUnit = -1;
+        int vehicleDetectorUnit = -1;
+        for (const dat::Unit &unit :
+             assets.dat()
+                 .civs[(size_t)civilization]
+                 .units) {
+            if (!unit.exists ||
+                (unit.trait & 8u) != 0 ||
+                unit.type <
+                    dat::UT_Combatant ||
+                unit.lineOfSight <= 0.0f)
+                continue;
+            if (forceDetectorUnit < 0 &&
+                (unit.cls == 50 ||
+                 unit.cls == 51))
+                forceDetectorUnit = unit.id;
+            if (vehicleDetectorUnit < 0 &&
+                (unit.cls == 11 ||
+                 unit.cls == 13 ||
+                 unit.cls == 15 ||
+                 unit.cls == 16))
+                vehicleDetectorUnit = unit.id;
+        }
+        const uint32_t stealth =
+            game.spawnConverterForTesting(
+                2, 30.0f, 30.0f);
+        const uint32_t forceDetector =
+            forceDetectorUnit >= 0
+                ? game.spawnObjectForTesting(
+                      civilization,
+                      forceDetectorUnit, 1,
+                      30.3f, 30.0f)
+                : 0;
+        const uint32_t vehicleDetector =
+            vehicleDetectorUnit >= 0
+                ? game.spawnObjectForTesting(
+                      civilization,
+                      vehicleDetectorUnit, 1,
+                      30.0f, 30.3f)
+                : 0;
+        const bool stealthEnabled =
+            game.setStealthedForTesting(
+                2, true);
+        const bool hiddenWithoutResources =
+            !game.objectDetectedForTesting(
+                1, stealth);
+        const bool forceResearch =
+            game.researchTechnologyForTesting(
+                1, 158);
+        const bool forcePerception =
+            game.objectDetectedForTesting(
+                1, stealth);
+        game.moveObjectForTesting(
+            forceDetector, 80.0f, 80.0f);
+        const bool vehicleResearch =
+            game.researchTechnologyForTesting(
+                1, 186);
+        const bool vehiclePerception =
+            game.objectDetectedForTesting(
+                1, stealth);
+        report(
+            "detector-resource-classes",
+            initialized && stealth &&
+                forceDetector &&
+                vehicleDetector &&
+                stealthEnabled &&
+                hiddenWithoutResources &&
+                forceResearch &&
+                forcePerception &&
+                vehicleResearch &&
+                vehiclePerception,
+            "units=" +
+                std::to_string(
+                    forceDetectorUnit) +
+                "/" +
+                std::to_string(
+                    vehicleDetectorUnit) +
+                " hidden/force/vehicle=" +
+                std::to_string(
+                    hiddenWithoutResources) +
+                "/" +
+                std::to_string(
+                    forcePerception) +
+                "/" +
+                std::to_string(
+                    vehiclePerception));
+    }
+
+    {
+        Game game(assets);
+        const bool initialized =
+            game.initCompactTestMap(
+                0x464F524Du, 96, &err);
+        const size_t baselineTerrainViolations =
+            game.movementStats()
+                .terrainViolations;
+        const int civilization =
+            game.civilizationForPlayerForTesting(
+                1);
+        std::vector<uint32_t> units;
+        for (int index = 0;
+             index < 12; ++index)
+            units.push_back(
+                game.spawnObjectForTesting(
+                    civilization, 460, 1,
+                    32.0f +
+                        (index % 4) * 0.8f,
+                    30.0f +
+                        (index / 4) * 0.8f));
+        bool formations = initialized;
+        for (int formation = 0;
+             formation < 4; ++formation) {
+            game.groupMoveForTesting(
+                units,
+                38.0f + formation * 2.0f,
+                35.0f + formation * 1.5f,
+                formation);
+            formations =
+                formations &&
+                game.formationMemberCountForTesting() ==
+                    units.size() &&
+                game.invariantsForTesting();
+            step(game, 0.5f);
+        }
+        const char *savePath =
+            "test-fidelity.sav";
+        std::remove(savePath);
+        const bool saved =
+            game.saveMatch(savePath, &err);
+        Game restored(assets);
+        const bool restoredInit =
+            restored.initCompactTestMap(
+                0x464F524Du, 96, &err);
+        const bool loaded =
+            restoredInit &&
+            restored.loadMatch(
+                savePath, &err);
+        std::remove(savePath);
+        step(restored, 2.0f);
+        const MovementStats movement =
+            restored.movementStats();
+        const bool valid =
+            restored.invariantsForTesting();
+        report(
+            "formation-save-continuity",
+            formations && saved && loaded &&
+                valid &&
+                movement.terrainViolations <=
+                    baselineTerrainViolations &&
+                movement.staticObstructionViolations ==
+                    0,
+            "members=" +
+                std::to_string(
+                    restored
+                        .formationMemberCountForTesting()) +
+                " saved/loaded=" +
+                std::to_string(saved) +
+                "/" +
+                std::to_string(loaded) +
+                " forms/valid=" +
+                std::to_string(formations) +
+                "/" +
+                std::to_string(valid) +
+                " violations=" +
+                std::to_string(
+                    movement.terrainViolations) +
+                "(baseline " +
+                std::to_string(
+                    baselineTerrainViolations) +
+                ")" +
+                "/" +
+                std::to_string(
+                    movement
+                        .staticObstructionViolations));
+    }
+
+    printf("%d failure(s)\n", failures);
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) return usage();
     const char *cmd = argv[1];
@@ -10078,6 +10776,8 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "test-major-mechanics"))
         return cmdTestMajorMechanics(
             argv[2]);
+    if (!strcmp(cmd, "test-fidelity"))
+        return cmdTestFidelity(argv[2]);
     if (!strcmp(cmd, "test-campaign") &&
         argc >= 4)
         return cmdTestCampaign(argv[2], argv[3]);

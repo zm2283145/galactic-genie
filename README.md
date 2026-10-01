@@ -18,7 +18,7 @@ It is written clean-room style: file formats come from public documentation (ope
 | CPX/SCX discovery, metadata, structural validation, and initialization for all 43 stock XCAM missions | done |
 | Stock campaign runtime: all 43 missions, authored state, every stock-used trigger type, embedded personalities, objectives/dialogue, and bounded conformance | done |
 | Units: idle/walk animation, 8-way facing with mirroring, graphic deltas for buildings | done |
-| Combat: contextual orders, deterministic accuracy/misses, projectiles/blast, DAT-driven attributes, shields, damage, and death | in progress |
+| Combat: contextual orders, deterministic accuracy/misses, executable-backed blast eligibility, DAT-driven projectiles, shields, damage, and death | in progress |
 | Major SWGB mechanics: conversion, Holocrons, stealth/detection, Standard/Conquest/Time/Score/Command Center victory, and aircraft rules | done |
 | Fishing/naval economy: Utility Trawler gathering, Aqua Harvesters, naval construction/repair, island resources, and AI use | done |
 | Vita: renderer, camera controls, original cursors, unit selection/status markers, formation movement, and fog-aware navigable minimap | done |
@@ -130,20 +130,21 @@ Settings are stored in `ux0:data/swgb/settings.bin`, campaign completion/unlock 
 `ux0:data/swgb/skirmish.save`. All are bounded, versioned, checksummed, and atomically replaced.
 Corrupt settings recover to defaults with an explicit message; corrupt, oversized, mismatched, or
 unsupported campaign profiles and saves are rejected without replacing the current match. Save
-version 4 adds campaign trigger state, active/queued instructions, scripted object names, freeze
-state, and trigger attack overrides without replaying an already-active one-shot sound. Versions
-1-3 retain their bounded migration paths.
+version 5 preserves shield regeneration/drain timer phases in addition to the campaign trigger,
+active/queued instruction, scripted-name, freeze, and trigger-attack state added by version 4.
+Versions 1-4 retain their bounded migration paths.
 
 Combat includes pursuit with collision-aware A* pathfinding, attack animations and
 acknowledgements, original projectile graphics and weapon sounds, researched accuracy with
 deterministic misses, DAT attack/armor classes, frame delays, secondary projectiles, minimum
-range, blast impact, shields, reload timing, health-bar depletion, death animations, remains,
+range, executable-backed blast-defense/diplomacy/footprint eligibility, shields, reload timing,
+health-bar depletion, death animations, remains,
 rubble, and progressive building damage graphics. X can select a visible hostile unit or
 building for inspection without allowing it to receive orders. Idle combat units acquire nearby
 hostile targets according to stance, retaliate when attacked, return after defensive pursuits,
 and armed buildings fire automatically. Move and attack orders briefly display the original
-red target marker. Exact original range/elevation accuracy modifiers and blast-level comparison
-remain under executable research.
+red target marker. Exact original projectile miss geometry, range/elevation/motion accuracy
+modifiers, and ballistic arc formula remain evidence-limited and are not guessed.
 
 On island maps, select a Utility Trawler and command visible fish or an Aqua Harvester with the
 normal contextual input. Trawlers carry fish as food, deposit at compatible naval drop sites,

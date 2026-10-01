@@ -904,6 +904,11 @@ public:
     float objectShieldPoints(uint32_t spawnId) const;
     float objectMaxShieldPoints(uint32_t spawnId) const;
     bool objectShielded(uint32_t spawnId) const;
+    static float shieldRegenerationForTesting(
+        float shieldPoints) {
+        return shieldRegeneration(
+            shieldPoints);
+    }
     float objectUnitAttributeForTesting(
         uint32_t spawnId, int attribute,
         float baseValue) const {
@@ -1045,6 +1050,18 @@ public:
         size_t index) const {
         return index < projectiles_.size() &&
                projectiles_[index].groundAimed;
+    }
+    void applyBlastForTesting(
+        uint32_t sourceId, float x, float y,
+        uint32_t primaryId, float width,
+        int level, int damage) {
+        const Object *source =
+            findObject(sourceId);
+        applyBlast(
+            sourceId,
+            source ? source->player : 0,
+            x, y, primaryId,
+            width, level, damage);
     }
     bool attackShotPendingForTesting(
         uint32_t spawnId) const {
@@ -1337,6 +1354,8 @@ private:
         int triggerAttack = -1;
         std::string triggerName;
         float shieldPoints = 0, maxShieldPoints = 0;
+        float shieldRegenerationTime = 0;
+        float shieldDrainTime = 0;
         float resourceAmount = 0;
         float carriedAmount = 0;
         // Resources of other types kept when a worker switches jobs; a drop
@@ -1893,6 +1912,8 @@ private:
     const Object *shieldGeneratorFor(
         const Object &object) const;
     bool isShielded(const Object &object) const;
+    static float shieldRegeneration(
+        float shieldPoints);
     void updateShields(float dt);
     const dat::Unit *builderUnit(
         const Object &worker) const;

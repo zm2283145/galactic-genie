@@ -14,7 +14,7 @@ namespace {
 
 constexpr char kSaveMagic[8] = {
     'S', 'W', 'G', 'B', 'S', 'A', 'V', 'E'};
-constexpr uint32_t kSaveVersion = 4;
+constexpr uint32_t kSaveVersion = 5;
 constexpr uint32_t kOldestSaveVersion = 1;
 constexpr size_t kMaxSaveBytes = 32u * 1024u * 1024u;
 constexpr uint32_t kMaxObjects = 20000;
@@ -615,6 +615,8 @@ bool Game::saveMatch(
         SAVE_FIELD(maxHitPoints);
         SAVE_FIELD(shieldPoints);
         SAVE_FIELD(maxShieldPoints);
+        SAVE_FIELD(shieldRegenerationTime);
+        SAVE_FIELD(shieldDrainTime);
         SAVE_FIELD(resourceAmount);
         SAVE_FIELD(carriedAmount);
         SAVE_FIELD(stash);
@@ -1334,8 +1336,18 @@ bool Game::loadMatch(
             !LOAD_FIELD(hitPoints) ||
             !LOAD_FIELD(maxHitPoints) ||
             !LOAD_FIELD(shieldPoints) ||
-            !LOAD_FIELD(maxShieldPoints) ||
-            !LOAD_FIELD(resourceAmount) ||
+            !LOAD_FIELD(maxShieldPoints)) {
+            if (err) *err = reader.error();
+            return false;
+        }
+        if (version >= 5 &&
+            (!LOAD_FIELD(
+                 shieldRegenerationTime) ||
+             !LOAD_FIELD(shieldDrainTime))) {
+            if (err) *err = reader.error();
+            return false;
+        }
+        if (!LOAD_FIELD(resourceAmount) ||
             !LOAD_FIELD(carriedAmount) ||
             !LOAD_FIELD(stash) ||
             !LOAD_FIELD(resourceType) ||
@@ -1555,6 +1567,19 @@ bool Game::loadMatch(
             if (err)
                 *err =
                     "save contains invalid object state";
+            return false;
+        }
+        if (!std::isfinite(
+                object
+                    .shieldRegenerationTime) ||
+            !std::isfinite(
+                object.shieldDrainTime) ||
+            object.shieldRegenerationTime <
+                0.0f ||
+            object.shieldDrainTime < 0.0f) {
+            if (err)
+                *err =
+                    "save contains invalid shield timer";
             return false;
         }
         if (object.conversionTargetId &&

@@ -74,8 +74,11 @@ The goal is a playable SWGB: Clone Campaigns reimplementation on the PS Vita, ru
   treating every nearby unit as a hard obstacle.
   Projectile accuracy now uses researched DAT accuracy, deterministic
   hit/miss rolls, fixed plausible miss impacts, and the existing projectile,
-  shield, diplomacy, Attack Ground, and splash paths. Exact original
-  range/elevation accuracy modifiers and blast-level comparison remain open.
+  shield, diplomacy, Attack Ground, and splash paths. Blast candidates now
+  follow the executable's defense-level comparison, candidate-footprint
+  distance, per-victim accuracy roll, and melee/ranged diplomacy behavior.
+  Exact original miss geometry, range/elevation/motion modifiers, and
+  ballistic arc formula remain evidence-limited.
   Explicit guard/patrol commands are implemented with saved-state restoration.
 - Economy: the four SWGB resources drive shared building queues for units and research. Original
   `tech-level-1`, `MADE-*`, and `AVAIL-*` technologies determine civilization-correct production
@@ -128,9 +131,10 @@ The goal is a playable SWGB: Clone Campaigns reimplementation on the PS Vita, ru
   blanket-applied.
 - SWGB-specific mechanics: power and shield coverage are implemented. A powered Shield Generator
   gives eligible units and buildings a gold shield bar equal to maximum HP, with original
-  tiered regeneration, non-stacking coverage, overflow damage, and one-HP per-hit leakage for
-  mobile units but not buildings. Shields retained after leaving coverage drain visibly at 40
-  points per second, reduced to 20 by Superconducting Shields; Shield Wall enables adjacent wall
+  one-second tiered regeneration, non-stacking coverage, and shield-first overflow damage with
+  no previously assumed mobile bleed-through. A powered overlapping generator takes precedence
+  over an unpowered field. Shields retained after leaving coverage drain on one-second ticks at 40
+  points, reduced to 20 by Superconducting Shields; Shield Wall enables adjacent wall
   coverage. World and selection bars display the remaining shield amount numerically.
   Civilization-correct Air Transports and Transport Ships are available from completed Airbases and
   Shipyards through their original `AVAIL-*` technologies. Aircraft movement ignores ground

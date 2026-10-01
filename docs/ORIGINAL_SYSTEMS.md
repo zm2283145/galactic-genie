@@ -15,7 +15,7 @@ build and test on Vita.
 | Command cursors | `mcursors.shp` (`51000`), 19 frames | Verified and covered |
 | Gather points | Commands at `0x502580`/`0x5bcb30`; spawned-unit dispatch at `0x56e390` | Verified and covered |
 | Gates | State update at `0x558390`; placement at `0x60c100` | Verified and covered |
-| Shields and power | Coverage/status logic at `0x54bc40`/`0x55ec20` | Partially verified; mobile damage bleed-through remains open |
+| Shields and power | Eligibility `0x54bc40`; regeneration `0x54ed30`; drain `0x54ee70`; damage `0x5517f0`/`0x444820` | Verified and covered; no mobile bleed-through |
 | Garrison fire | Volley logic at `0x55be20`/`0x55c0c0` | Verified and covered |
 | Walls | Command executor at `0x5ba900`; preview at `0x5fc180` | Verified and covered |
 | Formations | Layout/update routines at `0x478e30`, `0x479760`, `0x47c280`, `0x47e780`, `0x480060` | Layout verified; automatic line/column switching remains open |
@@ -27,6 +27,7 @@ build and test on Vita.
 | Attack Ground | Command-panel construction at `0x503aca`; opcode `0x6b`; DAT blast/projectile fields | Verified and covered |
 | Firing presentation | DAT attack graphic, frame delay, projectile totals, spawning area, secondary projectile, and impact data | Partially verified and covered |
 | Accuracy and misses | DAT `accuracyPercent`, `accuracyDispersion`, projectile speed, and saved simulation RNG | Data contract covered; exact executable RNG/range/elevation formula remains open |
+| Blast damage | Candidate loop `0x55dcf0`; defense gate `0x55de37`; footprint distance `0x55dead`; RNG `0x55df1b` | Verified and covered |
 | Researched unit attributes | DAT effect commands 0/4/5 and attributes 0/1/2/5/8/9/10/11/12/13/14/15/16/20 | Implemented consumers covered; unsupported attributes inventoried below |
 | AI scripts | Original Computer Expanded/Classic `.per` files, scenario-embedded personalities, executable `data\load\*.per` catalog, and DAT `name2` aliases | Generated and campaign-selected personalities, campaign goals/signals, strategic numbers, economy, build-forward, formations, transport invasions, retreat, and worker shelter covered |
 | Civilization technology trees | Each DAT civilization's `techTreeId` effect; type-102 disabled-technology commands | Verified and covered |
@@ -41,12 +42,12 @@ build and test on Vita.
 | Jedi/Sith conversion | DAT action 104; strings 4125/4925 and 42027/43027; command constructor `0x50301d`; resources 27/35/77/87/178/179/193 | Implemented and covered; exact original probability formula unresolved |
 | Holocrons | unit 285, graphic 5200/SLP 2252; action 132 pickup/action 136 Temple delivery; resource 191; `puprelic.wav` xref `0x5e66db` | Implemented and covered |
 | Victory selection | setup field `+0x218`, switch `0x57f069`, strings 4327/4321/4329/4330/4331 | Standard/Conquest/Time/Score implemented; Custom remains scenario-defined |
-| Stealth/detection | resources 56/58; detector trait bit 8; strings 43209/43210 | Implemented; original reveal persistence unresolved |
+| Stealth/detection | predicates `0x54bab0`/`0x54bbc0`; resources 23/56/58; detector trait bit 8 | Detector classes verified and covered; reveal persistence unresolved |
 | Aircraft-specific targeting | action-7 validator `0x5b9930`, class filter `0x41c530`, aircraft classes 43/48/59/62/63/64 | Verified and covered; no fuel mechanic evidenced |
 | Startup and frontend routing | executable strings at `0x68e41c`, `0x68b26f`, `0x68e658`, `0x68e558`, `0x68e440`; language IDs 9201-9284/11241-11252 | Verified and covered |
 | Stock campaign catalog | six `XCAM*.CPX` archives, 43 SCX entries; localized IDs 35228-35445/36128-36438 | Verified and covered |
 | Campaign trigger/runtime conformance | all six XCAM archives; 43 SCX entries; 1,770 triggers, 1,752 conditions, and 5,854 effects | Every stock-used numeric condition/effect type supported; 79 bounded difficulty-relevant initialization/simulation runs covered |
-| Campaign progression and saves | campaign-menu strings, ordered CPX entries, original save-screen path `0x5286f0` | Native bounded profile and save-v4 trigger/dialogue continuation covered |
+| Campaign progression and saves | campaign-menu strings, ordered CPX entries, original save-screen path `0x5286f0` | Native bounded profile and save-v5 trigger/dialogue/shield-timer continuation covered |
 
 ## Startup, frontend, and campaign contracts
 
@@ -116,14 +117,15 @@ Development access is an explicit profile option rather than fabricated
 completion. Difficulty is profile-persisted for scenario conditions.
 
 Campaign progress uses a 64 KiB maximum, versioned checksummed atomic profile.
-Match save version 4 retains the bounded archive-name and entry metadata and
+Match save version 5 retains the bounded archive-name and entry metadata and
 adds per-trigger enabled/fired/delay state, current and queued instruction
 state, scripted names, freeze state, trigger attack overrides, and deterministic
-AI random values. Loading first validates the checksum/version,
+AI random values. Version 5 additionally preserves the independent shield
+regeneration and drain timer phases. Loading first validates the checksum/version,
 reopens the exact discovered mission, and then restores state only when the
 initialized campaign context matches. The active instruction resumes without
 replaying its already-started one-shot sound; queued dialogue resumes normally.
-Version-1 through version-3 saves retain their documented migration paths.
+Version-1 through version-4 saves retain their documented migration paths.
 
 ### Stock campaign runtime and AI contract
 
@@ -1030,12 +1032,93 @@ Direct-fire attacks retain their immediate damage path. Projectile attacks
 retain frame delay, spawn offsets, arc/velocity, secondary projectiles,
 minimum range, garrison volleys, Attack Ground, impact graphics/sounds,
 shield absorption, diplomacy checks, and the existing DAT blast-width/level
-path. Splash is evaluated only at the projectile's actual impact. Exact
-executable details for the random distribution, range/elevation/target
-modifiers, secondary-bolt accuracy, and `blastAttackLevel` versus
-`blastDefenseLevel` comparison have not yet been established by disassembly
-or a controlled original-runtime trace; these are explicitly not claimed as
-bit-exact.
+path. Splash is evaluated only at the projectile's actual impact. Exact executable
+details for the projectile miss distribution, range/elevation/target-motion
+modifiers, secondary-bolt accuracy, and ballistic use of `projectileArc`
+remain unresolved and are explicitly not claimed as bit-exact.
+
+The blast candidate loop at `0x55dcf0` is conclusive. `0x55de37-0x55de49`
+rejects a candidate when its `blastDefenseLevel` is less than the source
+`blastAttackLevel`; there is no special “level 3 means target only” branch.
+The direct victim passed by the ordinary projectile path is excluded at
+`0x55de27` and receives its separately calculated direct hit. Candidate
+distance at `0x55dead-0x55df15` is measured from the impact point to the
+candidate footprint: each absolute axis delta is reduced by that candidate's
+collision half-size, clamped to zero, squared, and compared with
+`blastWidth * blastWidth`. No center-distance falloff is applied.
+
+For attacks with effective maximum range at most one, the allied predicate at
+`0x55de63-0x55de8a` excludes the owner's own and allied objects; enemy and
+neutral objects remain eligible. Ranged splash bypasses that diplomacy gate
+and can damage friendly objects. Each eligible secondary victim receives its
+own deterministic `accuracyPercent` roll at `0x55df1b-0x55df46`, then normal
+attack-class damage through vtable slot `+0xe8`; shields therefore process
+before hit points. Class 35 has an additional designated-primary restriction
+at `0x55de90-0x55dea7`. Native coverage verifies the defense-level boundary,
+melee/ranged diplomacy difference, neutral damage, candidate-footprint
+geometry, direct-target exclusion, and deterministic statistical boundaries.
+
+## Shield and detector fidelity audit
+
+Shield eligibility at `0x54bc40` produces a boolean per-player map-cell mask.
+Overlapping generators therefore do not add shield capacity. The native
+source lookup now prefers any powered overlapping field, so a closer
+unpowered generator cannot mask a farther powered field; if no powered source
+remains, retained shields enter the drain path. Generator destruction and
+power loss use the same transition.
+
+Regeneration at `0x54ed30-0x54ee68` accumulates a per-object timer and, once
+per player resource-25 interval, adds by current shield points: 2 below 100,
+4 from 100, 8 from 1000, 12 from 2000, 16 from 3000, and 20 from 4000,
+capped at maximum HP. Every playable civilization has resource 25 equal to
+one second. Drain at `0x54ee70-0x54eef8` is a separate one-second timer and
+subtracts player resource 26, whose base is 40. Superconducting Shields
+(technology 570, effect 588) multiplies resource 26 by 0.5, proving the
+20-point drain. The same effect multiplies resource 10 by 1.2, but the
+executable audit did not establish that resource's shield-regeneration
+consumer, so no additional multiplier is guessed. Save version 5 preserves
+both timer phases.
+
+Damage handlers `0x5517f0` and the mobile override at `0x444820` subtract
+positive damage from shields first and apply only overflow to HP. The mobile
+damage calculator at `0x4449c0` clamps a computed hit to at least one before
+shield processing; it is not one-HP shield leakage. The earlier compatibility
+leak and erroneous 3008 regeneration threshold were removed. Deterministic
+coverage includes unit/building absorption, exact overflow, all tier
+boundaries, delayed drain, Superconducting drain, overlapping fields,
+generator loss, and save/load timer continuity.
+
+The detector predicate at `0x54bbc0` returns true for DAT trait bit 8; classes
+50/51 also detect when player resource 58 (Force Perception) is positive, and
+classes 11/13/15/16 detect when player resource 23 is positive. Native tests
+cover both resource-gated class families and allied detector sharing. The
+stealth predicate at `0x54bab0` corroborates trait bit 4 and resources 56/58,
+but no separate reveal-radius formula or post-detection persistence state was
+found. Detection therefore continues to use current detector LOS with no
+invented persistence.
+
+## Mechanical-fidelity audit limits
+
+The GOG Clone Campaigns 1.1 image was rechecked with focused callers and data
+tables for every normal-play ledger area requested by this milestone. The
+audit established the blast, shield, and detector contracts above and
+reconfirmed formation dispatch at `0x480060`, formation layouts at
+`0x478e30`/`0x47a1b0`/`0x479760`/`0x479f10`, cardinal-neighbor A* with a
+Euclidean heuristic at `0x498820`, resolution/proximity handling at
+`0x499010`, conversion action 104's 4-second work/10-second recharge DAT
+contract, and the victory switch at `0x57f069`.
+
+Evidence did not establish the exact projectile miss-point construction,
+range/elevation/motion accuracy modifiers, ballistic `projectileArc` formula,
+conversion success RNG or full immunity table, automatic formation
+line/column switching, complete path terrain-cost formula, original stealth
+reveal persistence, or stock victory countdown/score weights and tie rule.
+The audit also found no stronger evidence that would justify replacing the
+current tested conversion, formation/pathing, victory, attack-slot,
+utility-trawler, task-list, fog, or AI compatibility behavior. Those paths are
+retained and covered rather than relabeled as exact. Accuracy is tested over a
+fixed 96-seed corpus against the DAT percentage boundary; it is deterministic,
+not a flaky random assertion.
 
 ## Garrison rally targets and interface feedback
 
