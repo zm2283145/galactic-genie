@@ -15,6 +15,7 @@
 #include "../src/engine/ai_script.h"
 #include "../src/engine/frontend.h"
 #include "../src/engine/game.h"
+#include "../src/engine/startup.h"
 #include "../src/render/soft_renderer.h"
 
 #include <algorithm>
@@ -64,6 +65,7 @@ static int usage() {
             "  swgbtool test-interface <DataDir>\n"
             "  swgbtool test-core-gameplay <DataDir>\n"
             "  swgbtool test-major-mechanics <DataDir>\n"
+            "  swgbtool test-campaign <DataDir> <CampaignDir>\n"
             "  swgbtool mp3 <file.mp3>\n");
     return 2;
 }
@@ -7400,6 +7402,9 @@ static int cmdTestSkirmish(const char *dataDir) {
     input.menuActivate = true;
     frontend.update(input, -1);
     input = {};
+    input.menuActivate = true;
+    frontend.update(input, -1);
+    input = {};
     input.menuDown = true;
     frontend.update(input, -1);
     input = {};
@@ -7419,7 +7424,7 @@ static int cmdTestSkirmish(const char *dataDir) {
     frontend.update(input, -1);
     input = {};
     input.menuDown = true;
-    for (int row = 0; row < 3; ++row)
+    for (int row = 0; row < 4; ++row)
         frontend.update(input, -1);
     input = {};
     input.menuActivate = true;
@@ -9257,6 +9262,291 @@ static int cmdTestMajorMechanics(
     return failures ? 1 : 0;
 }
 
+static int cmdTestCampaign(
+    const char *dataDir, const char *campaignDir) {
+    int failures = 0;
+    const auto report =
+        [&](const char *name, bool ok,
+            const std::string &detail = {}) {
+            printf(
+                "  %-36s %s%s%s\n", name,
+                ok ? "PASS" : "FAIL",
+                detail.empty() ? "" : " - ",
+                detail.c_str());
+            if (!ok) ++failures;
+        };
+
+    StartupFlow startup;
+    startup.validationFinished(false, "missing genie_x1.dat");
+    const bool missing =
+        startup.stage() == StartupStage::Error &&
+        startup.message().find("genie_x1.dat") !=
+            std::string::npos;
+    startup.retry();
+    startup.validationFinished(true);
+    startup.dataFinished(true);
+    startup.update(0, true);
+    startup.update(0, true);
+    startup.update(0, true);
+    const bool startupTransitions =
+        startup.stage() == StartupStage::LoadProfile;
+    startup.profileFinished(true);
+    report(
+        "startup-missing-data-error", missing,
+        startup.message());
+    report(
+        "startup-state-transitions",
+        startupTransitions &&
+            startup.stage() == StartupStage::Ready);
+
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    std::string err;
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    CampaignCatalog catalog;
+    const bool discovered = catalog.discover(
+        campaignDir,
+        [&](int id, const std::string &fallback) {
+            const std::string &localized =
+                assets.localizedString(id);
+            return localized.empty() ? fallback
+                                     : localized;
+        },
+        &err);
+    report(
+        "campaign-archive-discovery",
+        discovered &&
+            catalog.campaigns().size() == 6,
+        discovered
+            ? std::to_string(catalog.campaigns().size()) +
+                  " archives"
+            : err);
+    report(
+        "all-43-scenarios-load-validated",
+        discovered && catalog.missionCount() == 43,
+        std::to_string(catalog.missionCount()) +
+            " missions");
+    bool metadata = discovered;
+    if (discovered) {
+        static constexpr int expectedOrder[] = {
+            1, 2, 3, 4, 5, 8};
+        metadata =
+            catalog.campaigns().size() ==
+            sizeof expectedOrder / sizeof expectedOrder[0];
+        for (size_t c = 0;
+             c < catalog.campaigns().size();
+             ++c) {
+            const CampaignInfo &campaign =
+                catalog.campaigns()[c];
+            metadata =
+                metadata &&
+                c < sizeof expectedOrder /
+                        sizeof expectedOrder[0] &&
+                campaign.originalNumber ==
+                    expectedOrder[c];
+            for (const CampaignMission &mission :
+                 campaign.missions)
+                metadata =
+                    metadata && !mission.title.empty() &&
+                    !mission.description.empty() &&
+                    !mission.faction.empty() &&
+                    mission.mapSize >= 48 &&
+                    mission.unitCount > 0;
+        }
+    }
+    report("campaign-metadata-order", metadata);
+
+    CampaignProfile profile;
+    profile.developmentAccess = false;
+    bool progression = discovered;
+    if (discovered) {
+        const CampaignInfo &campaign =
+            catalog.campaigns().front();
+        progression =
+            profile.isUnlocked(campaign, 0) &&
+            !profile.isUnlocked(campaign, 1);
+        profile.complete(campaign.missions[0].key);
+        progression =
+            progression &&
+            profile.isUnlocked(campaign, 1);
+        profile.developmentAccess = true;
+        progression =
+            progression &&
+            profile.isUnlocked(
+                campaign, campaign.missions.size() - 1);
+    }
+    report("campaign-profile-progression", progression);
+
+    const char *profilePath = "test-campaign.profile";
+    profile.difficulty = 4;
+    bool profileRoundTrip =
+        saveCampaignProfile(profilePath, profile, &err);
+    CampaignProfile loadedProfile;
+    profileRoundTrip =
+        profileRoundTrip &&
+        loadCampaignProfile(
+            profilePath, loadedProfile, &err) &&
+        loadedProfile.difficulty == 4 &&
+        loadedProfile.developmentAccess &&
+        loadedProfile.progress.size() ==
+            profile.progress.size();
+    report(
+        "campaign-profile-atomic-roundtrip",
+        profileRoundTrip, err);
+    FILE *profileFile =
+        std::fopen(profilePath, "r+b");
+    if (profileFile) {
+        std::fseek(profileFile, 12, SEEK_SET);
+        const int value = std::fgetc(profileFile);
+        std::fseek(profileFile, 12, SEEK_SET);
+        std::fputc(value ^ 0x40, profileFile);
+        std::fclose(profileFile);
+    }
+    CampaignProfile corruptProfile;
+    err.clear();
+    const bool corruptRejected =
+        !loadCampaignProfile(
+            profilePath, corruptProfile, &err) &&
+        err.find("checksum") != std::string::npos;
+    std::remove(profilePath);
+    report(
+        "campaign-profile-corrupt-rejection",
+        corruptRejected, err);
+
+    bool campaignSave = discovered;
+    if (discovered) {
+        Scenario scenario;
+        err.clear();
+        campaignSave = catalog.loadScenario(
+            0, 0, scenario, &err);
+        const CampaignMission &mission =
+            catalog.campaigns()[0].missions[0];
+        Game game(assets);
+        campaignSave =
+            campaignSave &&
+            game.initScenario(
+                scenario, &err, mission.archiveName,
+                mission.entry);
+        const char *savePath = "test-campaign.save";
+        campaignSave =
+            campaignSave && game.saveMatch(savePath, &err);
+        MatchSaveMetadata saveMetadata;
+        campaignSave =
+            campaignSave &&
+            Game::readSaveMetadata(
+                savePath, saveMetadata, &err) &&
+            saveMetadata.kind == MatchSaveKind::Campaign &&
+            saveMetadata.campaignArchive ==
+                mission.archiveName &&
+            saveMetadata.campaignEntry == mission.entry;
+        Game restored(assets);
+        campaignSave =
+            campaignSave &&
+            restored.initScenario(
+                scenario, &err, mission.archiveName,
+                mission.entry) &&
+            restored.loadMatch(savePath, &err);
+        FILE *saveFile = std::fopen(savePath, "r+b");
+        if (saveFile) {
+            std::fseek(saveFile, 24, SEEK_SET);
+            const int value = std::fgetc(saveFile);
+            std::fseek(saveFile, 24, SEEK_SET);
+            std::fputc(value ^ 0x20, saveFile);
+            std::fclose(saveFile);
+        }
+        Game corrupt(assets);
+        std::string corruptError;
+        const bool corruptSaveRejected =
+            corrupt.initScenario(
+                scenario, &corruptError,
+                mission.archiveName, mission.entry) &&
+            !corrupt.loadMatch(
+                savePath, &corruptError) &&
+            corruptError.find("checksum") !=
+                std::string::npos;
+        campaignSave =
+            campaignSave && corruptSaveRejected;
+        std::remove(savePath);
+    }
+    report("campaign-save-load-and-corruption", campaignSave, err);
+
+    Frontend frontend;
+    frontend.setCampaignData(&catalog, &loadedProfile);
+    InputState input;
+    input.menuActivate = true;
+    frontend.update(input, -1); // title -> main
+    input = {};
+    input.menuActivate = true;
+    frontend.update(input, -1); // main -> single player
+    input = {};
+    input.menuActivate = true;
+    frontend.update(input, -1); // campaign browser
+    input = {};
+    input.menuActivate = true;
+    frontend.update(input, -1); // mission list
+    input = {};
+    input.pointerTap = true;
+    input.pointerY = 121;
+    frontend.update(input, -1); // briefing
+    input = {};
+    input.menuActivate = true;
+    const FrontendAction start =
+        frontend.update(input, -1);
+    const bool navigation =
+        start == FrontendAction::StartCampaign &&
+        frontend.selectedCampaign() == 0 &&
+        frontend.selectedMission() == 0;
+    report("campaign-menu-controller-touch", navigation);
+    frontend.loadingFinished(true);
+    frontend.update({}, 1);
+    input = {};
+    input.menuActivate = true;
+    const FrontendAction continuation =
+        frontend.update(input, 1);
+    report(
+        "campaign-victory-continuation",
+        continuation ==
+                FrontendAction::ReturnToCampaignBrowser &&
+            frontend.screen() ==
+                FrontendScreen::CampaignBriefing &&
+            frontend.selectedMission() == 1);
+    frontend.render(renderer, 960, 544);
+    report(
+        "vita-layout-bounds",
+        renderer.pixels().size() ==
+            960u * 544u * 4u,
+        std::to_string(renderer.drawCalls()) +
+            " bounded draws");
+
+    bool transitions = discovered;
+    if (discovered) {
+        Scenario scenario;
+        transitions =
+            catalog.loadScenario(0, 0, scenario, &err);
+        Game game(assets);
+        for (int i = 0; i < 3 && transitions; ++i) {
+            transitions =
+                game.initScenario(
+                    scenario, &err, "XCAM1", 0);
+            game.clearMatch();
+            SkirmishSettings settings;
+            settings.seed = (uint32_t)i + 1;
+            settings.mapSize = 48;
+            transitions =
+                transitions &&
+                game.initSkirmish(settings, &err);
+            game.clearMatch();
+        }
+    }
+    report(
+        "repeated-campaign-skirmish-transitions",
+        transitions, err);
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) return usage();
     const char *cmd = argv[1];
@@ -9341,6 +9631,9 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "test-major-mechanics"))
         return cmdTestMajorMechanics(
             argv[2]);
+    if (!strcmp(cmd, "test-campaign") &&
+        argc >= 4)
+        return cmdTestCampaign(argv[2], argv[3]);
     if (!strcmp(cmd, "mp3")) return cmdMp3(argv[2]);
     return usage();
 }

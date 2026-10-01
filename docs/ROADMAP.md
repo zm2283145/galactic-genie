@@ -1,6 +1,6 @@
 # Roadmap
 
-The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on the original data files.
+The goal is a playable SWGB: Clone Campaigns reimplementation on the PS Vita, running on the original data files.
 
 ## Milestone 1: engine foundation (done)
 - Format loaders: DRS, palette, SLP, and the full `genie_x1.dat`.
@@ -12,9 +12,11 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   placement, neighbor-sensitive `PatternMasks`/`lightMaps` shading, and a memory-bounded
   per-frame slope cache are done. Terrain blend masks are resampled through the same slope filters.
 - Cliffs, trees and gaia resources (carbon, ore, nova, fruit, animals).
-- CPX campaign archive and SCX terrain/elevation loading are done. The Vita vertical slice now opens
-  Galactic Empire mission 2, “Breaking Bread,” directly from the original `XCAM3.CPX`. Development
-  builds can instead start on a 96-by-96 two-island test map. A full-height ocean channel blocks
+- CPX campaign archive and SCX terrain/elevation loading are done. The frontend discovers the six
+  stock `XCAM*.CPX` archives, structurally loads all 43 missions, and presents localized campaign
+  and mission metadata. Sequential profile progression and an explicit development-access option
+  replace the former hardcoded “Breaking Bread” entry. Development builds can also start on a
+  96-by-96 two-island test map. A full-height ocean channel blocks
   ground passage while aircraft cross normally; both shorelines accept Shipyards and each island
   retains a base, livestock, power/shield coverage, test targets, a 24-tree carbon forest,
   12 food nodes, and separate 8-node ore and nova deposits on accessible land.
@@ -196,9 +198,12 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   The main menu can continue a validated save. Master, music, dialogue, and effects volume
   apply live and persist with a constrained Standard/Left-Handed Vita control preset;
   corrupt settings and incompatible saves are explicitly rejected.
-  A Star Wars/Clone Campaigns visual redesign of the remaining temporary panel framing, tabs,
-  typography, resource bar, queues, tooltips, and status areas remains. Keyboard mappings for
-  control groups 5-10 and campaign save continuity remain.
+  The startup/title/main/campaign/pause/objectives/options/data-status/confirmation/outcome surfaces
+  now share a Vita-bounded modern Star Wars visual and navigation framework with localized original
+  labels where available. Multiplayer remains visibly unavailable and the Scenario Editor route is
+  reserved without entering a false flow. Campaign saves carry their source archive/entry and the
+  campaign profile persists completion/unlocks independently. Further in-game HUD art fidelity and
+  keyboard mappings for control groups 5-10 remain.
 - Audio: selection, move, and attack acknowledgements plus camera-relative weapon-fire, impact, and
   death effects are implemented. The original Ogg soundtrack streams from storage, ducks beneath
   scenario dialogue, and mixes with terrain-specific world ambience. Scenario speaker text uses

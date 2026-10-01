@@ -100,6 +100,18 @@ struct MovingObjectInfo {
     bool selected = false;
 };
 
+enum class MatchSaveKind : uint8_t {
+    Skirmish = 0,
+    Campaign = 1,
+};
+
+struct MatchSaveMetadata {
+    MatchSaveKind kind = MatchSaveKind::Skirmish;
+    SkirmishSettings skirmish;
+    std::string campaignArchive;
+    uint32_t campaignEntry = 0;
+};
+
 class Game {
 public:
     explicit Game(Assets &assets) : assets_(assets) {}
@@ -113,7 +125,11 @@ public:
     bool initCompactTestMap(
         uint32_t seed, int mapSize,
         std::string *err);
-    bool initScenario(const Scenario &scenario, std::string *err);
+    bool initScenario(
+        const Scenario &scenario, std::string *err,
+        const std::string &campaignArchive = {},
+        uint32_t campaignEntry = 0,
+        int difficulty = 2);
     bool loadAiScript(
         int player, const std::string &path,
         const std::unordered_set<std::string> &defines,
@@ -641,6 +657,10 @@ public:
     static bool readSaveSettings(
         const std::string &path,
         SkirmishSettings &settings,
+        std::string *err = nullptr);
+    static bool readSaveMetadata(
+        const std::string &path,
+        MatchSaveMetadata &metadata,
         std::string *err = nullptr);
     bool generatedMatchForSaving() const {
         return generatedMatch_;
@@ -2226,6 +2246,10 @@ private:
     bool minimapDragging_ = false;
     SkirmishSettings currentSkirmishSettings_{};
     bool generatedMatch_ = false;
+    MatchSaveKind saveKind_ =
+        MatchSaveKind::Skirmish;
+    std::string campaignArchive_;
+    uint32_t campaignEntry_ = 0;
     FrameStats stats_;
     size_t attackOrdersIssued_ = 0;
     size_t attacksLanded_ = 0;

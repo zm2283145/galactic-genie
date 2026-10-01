@@ -2,7 +2,8 @@
 #
 #   tools\deploy_vita.ps1 -Vpk          # copies build-vita\swgb.vpk to ux0:data/swgb/swgb.vpk (install with VitaShell)
 #   tools\deploy_vita.ps1 -GameData     # one-time: copies the SWGB:CC files to ux0:data/swgb/Data
-#   tools\deploy_vita.ps1 -CampaignData # copies XCAM3.CPX for the Breaking Bread scenario
+#   tools\deploy_vita.ps1 -CampaignData # copies all six original XCAM archives (43 missions)
+#   tools\deploy_vita.ps1 -IntroMedia   # optional original xlogo1/xintro AVI files
 #   tools\deploy_vita.ps1 -SoundData    # copies voices referenced by the selected campaign mission
 #   tools\deploy_vita.ps1 -OutcomeSoundData # copies original conquest victory/defeat streams
 #   tools\deploy_vita.ps1 -UnitSoundData # copies the DAT-referenced unit sound archives
@@ -16,6 +17,7 @@ param(
     [int]$Port = 1337,
     [string]$GameDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Data",
     [string]$CampaignDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Campaign",
+    [string]$CampaignArchive = "XCAM3.CPX",
     [string]$SoundDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Sound\Scenario",
     [string]$MusicDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\MUSIC",
     [string]$TerrainSoundDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Sound\Terrain",
@@ -24,6 +26,7 @@ param(
     [switch]$Vpk,
     [switch]$GameData,
     [switch]$CampaignData,
+    [switch]$IntroMedia,
     [switch]$SoundData,
     [switch]$OutcomeSoundData,
     [switch]$UnitSoundData,
@@ -79,7 +82,15 @@ if ($GameData) {
 }
 if ($CampaignData) {
     Ftp-MkDir "ux0:/data/swgb/Campaign"
-    Ftp-Put (Join-Path $CampaignDir "XCAM3.CPX") "ux0:/data/swgb/Campaign/xcam3.cpx"
+    foreach ($f in "XCAM1.CPX", "XCAM2.CPX", "XCAM3.CPX", "XCAM4.CPX", "Xcam5.cpx", "XCAM8.CPX") {
+        Ftp-Put (Join-Path $CampaignDir $f) "ux0:/data/swgb/Campaign/$($f.ToLower())"
+    }
+}
+if ($IntroMedia) {
+    $gameRoot = Split-Path -Parent $GameDir
+    foreach ($f in "xlogo1.avi", "xintro.avi") {
+        Ftp-Put (Join-Path $gameRoot $f) "ux0:/data/swgb/$f"
+    }
 }
 if ($SoundData) {
     $tool = Join-Path $repo "build-pc\swgbtool.exe"
@@ -87,7 +98,7 @@ if ($SoundData) {
         throw "build-pc\swgbtool.exe is required; run tools\build_vita.ps1 -Pc first"
     }
     $env:Path = "C:\msys64\mingw64\bin;C:\msys64\usr\bin;" + $env:Path
-    $campaign = Join-Path $CampaignDir "XCAM3.CPX"
+    $campaign = Join-Path $CampaignDir $CampaignArchive
     $scenario = (& $tool scenario $campaign $CampaignEntry 2>&1) -join "`n"
     if ($LASTEXITCODE -ne 0) { throw "could not inspect campaign sounds: $scenario" }
     $names = [regex]::Matches($scenario, "sound '([^']+)'") |

@@ -43,6 +43,83 @@ build and test on Vita.
 | Victory selection | setup field `+0x218`, switch `0x57f069`, strings 4327/4321/4329/4330/4331 | Standard/Conquest/Time/Score implemented; Custom remains scenario-defined |
 | Stealth/detection | resources 56/58; detector trait bit 8; strings 43209/43210 | Implemented; original reveal persistence unresolved |
 | Aircraft-specific targeting | action-7 validator `0x5b9930`, class filter `0x41c530`, aircraft classes 43/48/59/62/63/64 | Verified and covered; no fuel mechanic evidenced |
+| Startup and frontend routing | executable strings at `0x68e41c`, `0x68b26f`, `0x68e658`, `0x68e558`, `0x68e440`; language IDs 9201-9284/11241-11252 | Verified and covered |
+| Stock campaign catalog | six `XCAM*.CPX` archives, 43 SCX entries; localized IDs 35228-35445/36128-36438 | Verified and covered |
+| Campaign progression and saves | campaign-menu strings, ordered CPX entries, original save-screen path `0x5286f0` | Native bounded profile and save context covered |
+
+## Startup, frontend, and campaign contracts
+
+Research for the native campaign frontend used the same GOG Clone Campaigns
+1.1 executable identified below. Preferred-base virtual addresses are:
+
+| Evidence | Address |
+|---|---:|
+| `Main Menu` | `0x68e41c` |
+| `Single Player` | `0x68b26f`, `0x691b1c`, `0x699e54` |
+| `Scenario Editor` | `0x68e658`, `0x68e670`, `0x699e68` |
+| `Multiplayer` | `0x68c4dc`, `0x68c514`, `0x68e558` |
+| `Options` | `0x68aa74` (plus the existing options control paths) |
+| `Credits` | `0x68e440`, `0x690ce7`, `0x690d09` |
+| `interfac.drs` / `language_x1.dll` | `0x699d9c` / `0x699d7c` |
+
+The localized frontend contract uses IDs 9201 (`Star Wars Galactic
+Battlegrounds`), 9202 (`Single Player`), 9203 (`Multiplayer`), 9206
+(`Scenario Builder`), 9207 (`Exit`), 9209 (`About`), 9248 (`Credits`),
+9272-9284 (save/load/options/restart/resign/main-menu actions), 11241
+(`Main Menu`), and 11242 (`Campaigns`). The native frontend falls back to
+short built-in labels only when a language DLL is absent or does not contain
+the requested ID. Unit, technology, objective, and campaign text continue to
+come from the user's installed language/scenario resources.
+
+`INTERFAC.DRS` is 33,609,445 bytes (SHA-256
+`c8430f912d1ece721fe5dbc2046c6ffc10adb6a903d3818f10d6137c7620af96`);
+its palette resource is 50500 and `mcursors.shp` is SLP 51000. The expansion
+overlay `interfac_x1.drs` is 11,663,774 bytes (SHA-256
+`0021af7aae53e8324e5d3db624eb688631c29a6a074012b8aa1c5796672cc4e6`).
+The original palette, fonts, cursor sheets, interface sounds, localized
+strings, and existing selection/command art remain runtime-loaded rather than
+copied into this repository.
+
+The executable installation provides `xlogo1.avi` (3,344,600 bytes, 15 fps,
+Indeo Video 5 `IV50`, SHA-256
+`bca7731fe3f8e267cae3d0b8ce978b621b34f53050f73d3931a64c05d9093a10`)
+and `xintro.avi` (22,634,416 bytes, 29.971 fps, `IV50`, SHA-256
+`277119975483f919db0346f3275e0a8620ba74c96bb91c7881fc138c6544873e`).
+The Vita startup sequence is timed and skippable, never blocks on those
+optional files, and reports whether they are installed. It does not embed or
+silently substitute proprietary frames; the native presentation remains
+available when the legacy codec cannot be decoded.
+
+### Stock XCAM catalog
+
+The catalog scans the installed campaign directory case-insensitively, opens
+each `XCAM*.CPX`, validates the CPX table and every SCX payload, and orders
+archives numerically and missions by their archive entry. The audited GOG
+files are:
+
+| Archive | Missions | SHA-256 |
+|---|---:|---|
+| `XCAM1.CPX` | 7 | `5a602013fc201d3a833a12939d3edb26fa18eee97a33da959381b816f2e27d48` |
+| `XCAM2.CPX` | 7 | `a461717c14bbd68f7ddfc85f07d76d0d12bfe6e206a28d2b6c4820f6a3e7cd1d` |
+| `XCAM3.CPX` | 7 | `a12a436528d5e5514e4834567e21f9383d0a43b4ca34a130fee1917080d95f77` |
+| `XCAM4.CPX` | 8 | `188e80efda79bb263715e712fe325694078df8c45a1a1a6152fa0329958131fc` |
+| `Xcam5.cpx` | 7 | `ade2fb95839b8edf737957c19ea489a7f6665d3fb71a5e58427c1338544b196c` |
+| `XCAM8.CPX` | 7 | `fd5e2b2c5c4731abaa854a7a4ccefec7c1a93c82025c7574b6a5c99b49c061aa` |
+
+This is the evidenced 43-mission host-coverage contract. Campaign and mission
+names come from IDs 35228-35445; long campaign descriptions come from
+36228-36438. Mission briefings, human faction/civilization, map size,
+objectives, and previewable structural metadata come from the selected SCX.
+Normal profiles unlock entry 1 and then each following entry after completion.
+Development access is an explicit profile option rather than fabricated
+completion. Difficulty is profile-persisted for scenario conditions.
+
+Campaign progress uses a 64 KiB maximum, versioned checksummed atomic profile.
+Match save version 3 adds bounded archive-name and entry metadata before the
+existing authoritative state. Loading first validates the checksum/version,
+reopens the exact discovered mission, and then restores state only when the
+initialized campaign context matches. Version-1 and version-2 generated
+skirmish saves retain their documented migration path.
 
 ## Conversion, Holocrons, victory, stealth, and aircraft
 

@@ -4,7 +4,7 @@ A from-scratch, portable reimplementation of the Genie engine, as used by *Star 
 
 It is written clean-room style: file formats come from public documentation (openage, genieutils). Game behaviour is to be matched by observation, and by using Ghidra only to answer "how does X work" questions. Decompiled code is never copied into the tree.
 
-## Status: native skirmish vertical slice
+## Status: native skirmish and campaign frontend
 
 | Area | State |
 |---|---|
@@ -15,14 +15,14 @@ It is written clean-room style: file formats come from public documentation (ope
 | Sprite atlas builder (per SLP and player colour) | done |
 | Isometric terrain renderer with `blendomatic.dat` priority/mode edge blending | done |
 | Terrain elevation with original slope geometry and neighbor-sensitive lighting | done |
-| CPX/SCX terrain, elevation, player state, triggers, saved camera, and initial object loading (“Breaking Bread”) | done |
+| CPX/SCX discovery, metadata, structural validation, and initialization for all 43 stock XCAM missions | done |
 | Initial trigger runtime: timers, object/area/resource conditions, ordered effects, voiced dialogue, and collision-aware scripted movement | in progress |
 | Units: idle/walk animation, 8-way facing with mirroring, graphic deltas for buildings | done |
 | Combat: contextual orders, deterministic accuracy/misses, projectiles/blast, DAT-driven attributes, shields, damage, and death | in progress |
 | Major SWGB mechanics: conversion, Holocrons, stealth/detection, Standard/Conquest/Time/Score/Command Center victory, and aircraft rules | done |
 | Fishing/naval economy: Utility Trawler gathering, Aqua Harvesters, naval construction/repair, island resources, and AI use | done |
 | Vita: renderer, camera controls, original cursors, unit selection/status markers, formation movement, and fog-aware navigable minimap | done |
-| Vita frontend: title/main menu, campaign entry, skirmish lobby, real pause/options, save/continue, and outcome flow | done |
+| Vita frontend: startup validation, title/main/campaign menus, shared pause/options/objectives, saves, and outcomes | done |
 | Deterministic random maps: grasslands, archipelago, and compact two-island regression layout | done |
 | PC `swgbtool`: data inspection, CPX/SCX listing, and procedural/scenario PNG rendering | done |
 
@@ -58,10 +58,10 @@ cmake -B build-pc && cmake --build build-pc
 ## Installing on the Vita
 
 1. Copy these files from the game's `Game/Data` folder to `ux0:data/swgb/Data/`: `genie_x1.dat`, `graphics.drs`, `graphics_x1.drs`, `terrain.drs`, `terrain_x1.drs`, `interfac.drs`, `interfac_x1.drs`, `sounds.drs`, `sounds_x1.drs`, `blendomatic.dat`, `STemplet.dat`, `FilterMaps.dat`, `VIEW_ICM.DAT`, `lightMaps.dat`, and `PatternMasks.dat`. Also copy `Game/language.dll`, `language_x1.dll`, and `language_x2.dll` for localized interface names. `tools\deploy_vita.ps1 -GameData` copies the core data; `tools\deploy_vita.ps1 -UnitSoundData` copies the unit audio archives; `tools\deploy_vita.ps1 -LanguageData` copies the language strings.
-2. Copy `Game/Campaign/XCAM3.CPX` to `ux0:data/swgb/Campaign/xcam3.cpx`. `tools\deploy_vita.ps1 -CampaignData` does this over FTP. The Clone Campaigns menu entry loads its second mission, “Breaking Bread,” including its initial trees, resources, buildings, and units.
+2. Copy `Game/Campaign/XCAM1.CPX`, `XCAM2.CPX`, `XCAM3.CPX`, `XCAM4.CPX`, `Xcam5.cpx`, and `XCAM8.CPX` to `ux0:data/swgb/Campaign/`. `tools\deploy_vita.ps1 -CampaignData` copies the six archives over FTP. Startup validates all 43 missions before presenting the campaign browser, with localized campaign/mission names, factions, briefings, objectives, completion state, difficulty, and sequential or development access.
 3. Copy the MP3 dialogue referenced by the mission from `Game/Sound/Scenario` to
    `ux0:data/swgb/Sound/Scenario/`. `tools\deploy_vita.ps1 -SoundData` extracts the names from
-   campaign entry 2 and copies only those files.
+   the archive/entry selected by `-CampaignArchive` and `-CampaignEntry` and copies only those files.
 4. Copy `Game/MUSIC/Track02.ogg` and `Track03.ogg` to `ux0:data/swgb/Music/`, and the WAV files
    from `Game/Sound/Terrain` to `ux0:data/swgb/Sound/Terrain/`. The deployment script options
    `-MusicData` and `-TerrainSoundData` copy these soundtrack and ambience files.
@@ -71,12 +71,17 @@ cmake -B build-pc && cmake --build build-pc
 6. Install `swgb.vpk` with VitaShell. `tools\deploy_vita.ps1 -Vpk` uploads it to `ux0:data/swgb/`.
 7. The app writes a log to `ux0:data/swgb/swgb.log`. `tools\deploy_vita.ps1 -PullLog` fetches it.
 
-Frontend controls: d-pad or left-stick up/down selects an entry, left/right changes a lobby
-value, X activates, and O returns. Touching an entry selects and activates it. START pauses an
-active match. The pause menu can resume, save/load a generated skirmish, restart with the exact
-same settings and seed, open options, or return to the main menu. Loading, restarting, and
-abandoning a match require confirmation. The main menu Continue entry only enables for a validated
-save. Campaign saving is explicitly unavailable.
+Frontend controls: d-pad or left-stick up/down selects an entry, left/right changes difficulty or
+a lobby value, X activates, and O returns. Touching an entry selects and activates it. The main
+menu exposes Single Player, visibly unavailable Multiplayer, a reserved Scenario Editor route,
+Options, Credits/Data Status, and Exit. Campaign browsing uses the original localized language
+tables and discovered XCAM contents rather than a hardcoded mission. L toggles sequential versus
+development mission access in the mission browser.
+
+START pauses an active match. The shared pause framework can resume, show campaign objectives or
+skirmish status, save/load, restart, adjust options, surrender, and return to the campaign browser
+or main menu as appropriate. Campaign outcomes unlock the next mission and offer continue, replay,
+campaign-browser, and main-menu routes. Generated-skirmish behavior remains compatible.
 
 Gameplay controls: left stick, d-pad, or a touch drag scrolls; L/R zoom. The right stick moves the
 command cursor, and holding it against a screen edge scrolls the camera. X selects a visible
@@ -114,12 +119,13 @@ enforced in rendering, selection, commands, minimap, automatic acquisition, conv
 queries. Perception-enabled Masters and DAT trait-bit-8 detectors share detection with allies;
 `FORCESIGHT` remains the explicit human-player detection bypass.
 
-Settings are stored in `ux0:data/swgb/settings.bin`; generated-skirmish continuation is stored in
-`ux0:data/swgb/skirmish.save`. Both formats are versioned and validated. Corrupt settings are
-reported and reset to defaults; corrupt, oversized, mismatched, or unsupported saves are rejected
-without replacing the current match. Save version 2 persists conversion work/recharge, Holocron
-carrier/Temple relationships, and victory countdowns. Version-1 generated-skirmish saves remain
-accepted through an explicit victory-enum migration; later unsupported versions fail clearly.
+Settings are stored in `ux0:data/swgb/settings.bin`, campaign completion/unlock state in
+`ux0:data/swgb/campaign.profile`, and the current continuation in
+`ux0:data/swgb/skirmish.save`. All are bounded, versioned, checksummed, and atomically replaced.
+Corrupt settings recover to defaults with an explicit message; corrupt, oversized, mismatched, or
+unsupported campaign profiles and saves are rejected without replacing the current match. Save
+version 3 adds a campaign archive/entry context while retaining version-1 and version-2 generated
+skirmish compatibility.
 
 Combat includes pursuit with collision-aware A* pathfinding, attack animations and
 acknowledgements, original projectile graphics and weapon sounds, researched accuracy with

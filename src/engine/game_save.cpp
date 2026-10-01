@@ -14,7 +14,7 @@ namespace {
 
 constexpr char kSaveMagic[8] = {
     'S', 'W', 'G', 'B', 'S', 'A', 'V', 'E'};
-constexpr uint32_t kSaveVersion = 2;
+constexpr uint32_t kSaveVersion = 3;
 constexpr uint32_t kOldestSaveVersion = 1;
 constexpr size_t kMaxSaveBytes = 32u * 1024u * 1024u;
 constexpr uint32_t kMaxObjects = 20000;
@@ -406,6 +406,21 @@ bool Game::readSaveSettings(
     const std::string &path,
     SkirmishSettings &settings,
     std::string *err) {
+    MatchSaveMetadata metadata;
+    if (!readSaveMetadata(path, metadata, err))
+        return false;
+    if (metadata.kind != MatchSaveKind::Skirmish) {
+        if (err) *err = "save contains a campaign match";
+        return false;
+    }
+    settings = metadata.skirmish;
+    return true;
+}
+
+bool Game::readSaveMetadata(
+    const std::string &path,
+    MatchSaveMetadata &metadata,
+    std::string *err) {
     std::vector<uint8_t> bytes;
     const uint8_t *payload = nullptr;
     size_t payloadSize = 0;
@@ -415,38 +430,75 @@ bool Game::readSaveSettings(
             version, err))
         return false;
     Reader reader(payload, payloadSize);
-    if (!readSettings(reader, settings, version)) {
+    MatchSaveMetadata loaded;
+    if (version >= 3) {
+        uint8_t kind = 0;
+        if (!reader.scalar(kind) ||
+            kind > (uint8_t)MatchSaveKind::Campaign ||
+            !reader.string(
+                loaded.campaignArchive, 128) ||
+            !reader.scalar(loaded.campaignEntry)) {
+            if (err)
+                *err = reader.ok()
+                           ? "save contains invalid match metadata"
+                           : reader.error();
+            return false;
+        }
+        loaded.kind = (MatchSaveKind)kind;
+        if (loaded.kind == MatchSaveKind::Skirmish &&
+            (!loaded.campaignArchive.empty() ||
+             loaded.campaignEntry != 0)) {
+            if (err)
+                *err = "skirmish save contains campaign metadata";
+            return false;
+        }
+    }
+    if (!readSettings(
+            reader, loaded.skirmish, version)) {
         if (err) *err = reader.error();
         return false;
     }
-    if (settings.mapSize < 48 ||
-        settings.mapSize > 192 ||
-        settings.playerCivilization < 1 ||
-        settings.playerCivilization > 8 ||
-        settings.computerCivilization < 1 ||
-        settings.computerCivilization > 8 ||
-        settings.populationCap < 25 ||
-        settings.populationCap > 250 ||
-        settings.startingResources < 0 ||
-        settings.victory <
-            SkirmishVictory::Standard ||
-        settings.victory >
-            SkirmishVictory::CommandCenter) {
+    const SkirmishSettings &settings =
+        loaded.skirmish;
+    if (loaded.kind == MatchSaveKind::Skirmish &&
+        (settings.mapSize < 48 ||
+         settings.mapSize > 192 ||
+         settings.playerCivilization < 1 ||
+         settings.playerCivilization > 8 ||
+         settings.computerCivilization < 1 ||
+         settings.computerCivilization > 8 ||
+         settings.populationCap < 25 ||
+         settings.populationCap > 250 ||
+         settings.startingResources < 0 ||
+         settings.victory <
+             SkirmishVictory::Standard ||
+         settings.victory >
+             SkirmishVictory::CommandCenter)) {
         if (err) *err = "save contains invalid match settings";
         return false;
     }
+    if (loaded.kind == MatchSaveKind::Campaign &&
+        (loaded.campaignArchive.empty() ||
+         loaded.campaignEntry >= 64)) {
+        if (err) *err = "save contains invalid campaign metadata";
+        return false;
+    }
+    metadata = std::move(loaded);
     return true;
 }
 
 bool Game::saveMatch(
     const std::string &path,
     std::string *err) const {
-    if (!generatedMatch_ || mapSize_ <= 0) {
+    if (mapSize_ <= 0) {
         if (err)
-            *err = "only generated skirmish matches can be saved";
+            *err = "no active match can be saved";
         return false;
     }
     Writer writer;
+    writer.scalar((uint8_t)saveKind_);
+    writer.string(campaignArchive_);
+    writer.scalar(campaignEntry_);
     writeSettings(writer, currentSkirmishSettings_);
     writer.scalar(simulationTime_);
     writer.scalar(mapSize_);
@@ -879,15 +931,38 @@ bool Game::loadMatch(
             version, err))
         return false;
     Reader reader(payload, payloadSize);
+    MatchSaveKind saveKind = MatchSaveKind::Skirmish;
+    std::string campaignArchive;
+    uint32_t campaignEntry = 0;
+    if (version >= 3) {
+        uint8_t kind = 0;
+        if (!reader.scalar(kind) ||
+            kind > (uint8_t)MatchSaveKind::Campaign ||
+            !reader.string(campaignArchive, 128) ||
+            !reader.scalar(campaignEntry)) {
+            if (err)
+                *err = reader.ok()
+                           ? "save contains invalid match metadata"
+                           : reader.error();
+            return false;
+        }
+        saveKind = (MatchSaveKind)kind;
+    }
     SkirmishSettings settings;
     if (!readSettings(reader, settings, version) ||
-        !generatedMatch_ ||
-        !sameSettings(
-            settings,
-            currentSkirmishSettings_)) {
+        saveKind != saveKind_ ||
+        (saveKind == MatchSaveKind::Skirmish &&
+         (!generatedMatch_ ||
+          !sameSettings(
+              settings,
+              currentSkirmishSettings_))) ||
+        (saveKind == MatchSaveKind::Campaign &&
+         (generatedMatch_ ||
+          campaignArchive != campaignArchive_ ||
+          campaignEntry != campaignEntry_))) {
         if (err)
             *err = reader.ok()
-                       ? "save settings do not match initialized match"
+                       ? "save context does not match initialized match"
                        : reader.error();
         return false;
     }
@@ -960,7 +1035,8 @@ bool Game::loadMatch(
         !reader.scalar(enemyIntelligence) ||
         !reader.scalar(techGeneration) ||
         !reader.scalar(reseedQueue) ||
-        mapSize != settings.mapSize ||
+        (saveKind == MatchSaveKind::Skirmish &&
+         mapSize != settings.mapSize) ||
         localPlayer <= 0 || localPlayer >= 17 ||
         zoom < 0.4f || zoom > 1.0f ||
         victoryCondition <
@@ -1079,7 +1155,10 @@ bool Game::loadMatch(
         }
 
     std::array<ScenarioPlayer, 16> players;
-    for (ScenarioPlayer &player : players) {
+    for (size_t playerIndex = 0;
+         playerIndex < players.size();
+         ++playerIndex) {
+        ScenarioPlayer &player = players[playerIndex];
         if (!reader.string(player.name, 4096) ||
             !reader.scalar(player.civilization) ||
             !reader.scalar(player.color) ||
@@ -1090,13 +1169,25 @@ bool Game::loadMatch(
             !reader.scalar(player.cameraY) ||
             !reader.scalar(player.resources) ||
             !reader.scalar(player.diplomacy) ||
-            !reader.scalar(player.populationLimit) ||
-            player.civilization >
-                assets_.dat().civs.size()) {
+            !reader.scalar(player.populationLimit)) {
             if (err)
-                *err = reader.ok()
-                           ? "save contains invalid player state"
-                           : reader.error();
+               *err = reader.ok()
+                          ? "save contains invalid player state"
+                          : reader.error();
+            return false;
+        }
+        const size_t maximumCivilization =
+            saveKind == MatchSaveKind::Campaign
+                ? 64
+                : assets_.dat().civs.size();
+        if (player.civilization >
+            maximumCivilization) {
+            if (err)
+               *err =
+                   "save player " +
+                   std::to_string(playerIndex + 1) +
+                   " has invalid civilization " +
+                   std::to_string(player.civilization);
             return false;
         }
     }

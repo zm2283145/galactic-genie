@@ -464,6 +464,9 @@ void Game::resetMatchState() {
     minimapRefreshTime_ = 0.0f;
     minimapDragging_ = false;
     generatedMatch_ = false;
+    saveKind_ = MatchSaveKind::Skirmish;
+    campaignArchive_.clear();
+    campaignEntry_ = 0;
     attackOrdersIssued_ = attacksLanded_ =
         unitsKilled_ = 0;
     projectilesLaunched_ = attackPathsComputed_ =
@@ -522,6 +525,7 @@ bool Game::initGenerated(
     resetMatchState();
     currentSkirmishSettings_ = settings;
     generatedMatch_ = true;
+    saveKind_ = MatchSaveKind::Skirmish;
     rng_.seed(settings.seed);
     const int mapSize = settings.mapSize;
     players_ = {};
@@ -903,7 +907,11 @@ bool Game::initCompactTestMap(
     return true;
 }
 
-bool Game::initScenario(const Scenario &scenario, std::string *err) {
+bool Game::initScenario(
+    const Scenario &scenario, std::string *err,
+    const std::string &campaignArchive,
+    uint32_t campaignEntry,
+    int difficulty) {
     generatedMatch_ = false;
     if (!scenario.map.width || scenario.map.width != scenario.map.height) {
         if (err) *err = "only square scenario maps are currently supported";
@@ -923,6 +931,12 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
     }
 
     resetMatchState();
+    difficulty_ = std::max(0, std::min(4, difficulty));
+    if (!campaignArchive.empty()) {
+        saveKind_ = MatchSaveKind::Campaign;
+        campaignArchive_ = campaignArchive;
+        campaignEntry_ = campaignEntry;
+    }
     rng_.seed(1);
     players_ = scenario.players;
     resources_ = {};
