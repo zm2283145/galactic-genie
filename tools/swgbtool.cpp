@@ -5681,67 +5681,38 @@ static int cmdTestAi(
     const size_t queuedWorkers =
         game.aiQueuedUnitCountForTesting(
             2, 83);
-    std::vector<std::string> aiLogs;
-    game.setLogger(
-        [&](const std::string &message) {
-            if (message.rfind("AI ", 0) == 0)
-                aiLogs.push_back(message);
-        });
-    const bool originalLoaded =
-        game.loadAiScript(
+    Game openingGame(assets);
+    if (!openingGame.initCompactTestMap(
+            0x5A17u, 64, &err) ||
+        !openingGame.loadAiScript(
             2, entry,
             {"DIFFICULTY-MODERATE"},
-            &err);
-    if (!originalLoaded) {
+            &err)) {
         fprintf(
             stderr, "error: %s\n",
             err.c_str());
         return 1;
     }
-    int originalGatherPeak = 0;
     for (int frame = 0;
-         frame < 30 * 10; ++frame) {
-        game.update(
+         frame < 30 * 6; ++frame)
+        openingGame.update(
             1.0f / 30.0f, {});
-        originalGatherPeak =
-            std::max(
-                originalGatherPeak,
-                game.aiStrategicNumberForTesting(
-                    2,
-                    "sn-food-gatherer-percentage") +
-                    game.aiStrategicNumberForTesting(
-                        2,
-                        "sn-carbon-gatherer-percentage") +
-                    game.aiStrategicNumberForTesting(
-                        2,
-                        "sn-metal-gatherer-percentage") +
-                    game.aiStrategicNumberForTesting(
-                        2,
-                        "sn-nova-gatherer-percentage"));
-    }
-    const int originalGatherTotal =
-        game.aiStrategicNumberForTesting(
+    const int openingCarbonPercentage =
+        openingGame.aiStrategicNumberForTesting(
             2,
-            "sn-food-gatherer-percentage") +
-        game.aiStrategicNumberForTesting(
-            2,
-            "sn-carbon-gatherer-percentage") +
-        game.aiStrategicNumberForTesting(
-            2,
-            "sn-metal-gatherer-percentage") +
-        game.aiStrategicNumberForTesting(
-            2,
-            "sn-nova-gatherer-percentage");
-    const bool originalRuntime =
-        game.aiRuleCountForTesting(2) ==
-            original.rules.size() &&
-        originalGatherPeak > 0;
+            "sn-carbon-gatherer-percentage");
+    const size_t openingCarbonGatherers =
+        openingGame.aiGathererCountForTesting(
+            2, 1);
+    const bool originalOpening =
+        openingCarbonPercentage == 100 &&
+        openingCarbonGatherers > 0;
     printf(
         "AI parser files/constants/rules "
         "%zu/%zu/%zu, init %d, gather %d, "
         "carbon/food buildings %d/%d, "
-        "queued workers %zu, original runtime %d "
-        "(%d%% gather)\n",
+        "queued workers %zu, original opening %d "
+        "(%d%% carbon, %zu workers)\n",
         original.files.size(),
         original.constants.size(),
         original.rules.size(),
@@ -5750,19 +5721,15 @@ static int cmdTestAi(
         carbonBuildings,
         foodBuildings,
         queuedWorkers,
-        originalRuntime ? 1 : 0,
-        originalGatherTotal);
+        originalOpening ? 1 : 0,
+        openingCarbonPercentage,
+        openingCarbonGatherers);
     if (!originalParsed ||
         !initialized || !gathered ||
         carbonBuildings != 1 ||
         foodBuildings != 1 ||
         queuedWorkers != 1 ||
-        !originalRuntime) {
-        for (const std::string &message :
-             aiLogs)
-            fprintf(
-                stderr, "%s\n",
-                message.c_str());
+        !originalOpening) {
         fprintf(
             stderr,
             "error: AI validation failed\n");

@@ -429,6 +429,20 @@ bool Game::initCompactTestMap(
     std::string *err) {
     if (!init(seed, mapSize, err))
         return false;
+    // Computer Expanded's opening gather table expects no Troop Center until
+    // its two processing centers have been established.
+    const dat::Unit *aiTroopCenter =
+        findUnit(
+            civilizationForPlayer(2),
+            "BLDG-TRAINTROOPER");
+    if (aiTroopCenter)
+        for (Object &object : objects_)
+            if (object.active &&
+                object.player == 2 &&
+                object.unit &&
+                object.unit->id ==
+                    aiTroopCenter->id)
+                object.active = false;
     const int civ = civilizationForPlayer(1);
     const float testX = mapSize * 0.30f;
     const float testY = mapSize * 0.35f;
@@ -494,6 +508,16 @@ bool Game::initCompactTestMap(
                 0, resources[type], 0,
                 testX - 9.0f + type * 2.25f,
                 testY + 8.0f + index * 1.1f,
+                0);
+    const float aiX = mapSize * 0.62f;
+    const float aiY = mapSize * 0.60f;
+    for (size_t type = 0;
+         type < std::size(resources); type++)
+        for (int index = 0; index < 5; index++)
+            spawn(
+                0, resources[type], 0,
+                aiX - 6.0f + type * 3.0f,
+                aiY + 11.0f + index * 1.1f,
                 0);
     rebuildAdjacency();
     refreshAllAutomaticTechnologies();
@@ -838,6 +862,25 @@ size_t Game::aiQueuedUnitCountForTesting(
                 if (item.unit &&
                     item.unit->id == unitId)
                     count++;
+    return count;
+}
+
+size_t Game::aiGathererCountForTesting(
+    int player, int resourceType) const {
+    size_t count = 0;
+    for (const Object &worker : objects_) {
+        if (!worker.active ||
+            worker.hidden ||
+            worker.player != player ||
+            !isWorker(worker))
+            continue;
+        const Object *target =
+            findObject(worker.gatherTargetId);
+        if (target &&
+            target->resourceType ==
+                resourceType)
+            count++;
+    }
     return count;
 }
 
@@ -1217,7 +1260,8 @@ void Game::spawnBase(int player, int civ, char L, float cx, float cy) {
     spawn(civ, "BLDG-MAIN1", player, cx + 2.0f, cy + 2.0f, 0);
     spawn(civ, "BLDG-DWELLING1", player, cx - 3.0f, cy + 1.0f, 0);
     spawn(civ, "BLDG-DWELLING1", player, cx - 3.0f, cy + 4.0f, 0);
-    spawn(civ, "BLDG-TRAINRANGE1", player, cx + 5.5f, cy - 2.5f, 0);
+    spawn(civ, "BLDG-TRAINRANGE1", player,
+          cx + 5.5f, cy - 2.5f, 0);
     spawn(civ, "BLDG-DEFENSEA1", player, cx + 6.0f, cy + 5.0f, 0);
 
     std::uniform_real_distribution<float> ang(0, 2 * kPi);

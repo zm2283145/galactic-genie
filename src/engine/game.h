@@ -126,6 +126,8 @@ public:
         bool includeFoundations = true) const;
     size_t aiQueuedUnitCountForTesting(
         int player, int unitId) const;
+    size_t aiGathererCountForTesting(
+        int player, int resourceType) const;
     void update(float dt, const InputState &in);
     void render(Renderer &r, int screenW, int screenH);
 

@@ -59,6 +59,10 @@ Engine contract:
   checks.
 - Gather allocations preserve builders, repairers, and garrisoned workers and
   are rebalanced at a bounded cadence.
+- The compact opponent starts in the personality's original opening state
+  without a prebuilt Troop Center. Five nodes of each resource are guaranteed
+  beside its base, so its opening 100%-carbon rule can assign every worker
+  without depending on random map generation.
 - Unsupported facts block a rule and unsupported actions are reported once;
   neither is silently treated as success.
 - Vita loads player 2's `Computer Expanded.per` from
