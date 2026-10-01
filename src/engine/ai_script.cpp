@@ -31,6 +31,49 @@ std::string trim(const std::string &text) {
     return text.substr(begin, end - begin);
 }
 
+bool isBuiltinAiModule(
+    const std::string &name) {
+    static const char *modules[] = {
+        "age-advancement.per", "aggressive.per",
+        "airbase.per", "animal.per",
+        "attack.per", "building-count.per",
+        "carbon.per", "cheats.per",
+        "civ-loads.per", "combat-arm.per",
+        "constants.per", "deathmatch.per",
+        "defensive.per", "difficulty-loads.per",
+        "dip-boomer.per", "dip-bully.per",
+        "dip-feeder.per", "diplomacy.per",
+        "escrow.per", "fishboat.per",
+        "food.per", "fortress.per",
+        "ground.per", "groups.per",
+        "heavy-weapons.per", "homebase.per",
+        "init-goals.per", "jedi-temple.per",
+        "map-loads.per", "map-specs.per",
+        "mech-factory.per",
+        "military-population-hard.per",
+        "military-population.per", "monument.per",
+        "no-diplomacy.per", "nova.per",
+        "ore.per", "population.per",
+        "randomgame.per", "research-center.per",
+        "research.per", "resign.per",
+        "rush.per", "shipyard.per",
+        "sn-gather.per", "sn-homebase.per",
+        "sn-soldiers.per", "spaceport.per",
+        "supplement.per", "tower.per",
+        "troop-center.per", "war-center.per",
+        "warboat-island.per", "warboat.per",
+        "wonder-kill.per", "wonder-rush.per",
+    };
+    const std::string normalized =
+        normalizeAiSymbol(name);
+    return std::find_if(
+               std::begin(modules),
+               std::end(modules),
+               [&](const char *module) {
+                   return normalized == module;
+               }) != std::end(modules);
+}
+
 std::string directoryOf(const std::string &path) {
     const size_t separator =
         path.find_last_of("/\\");
@@ -375,7 +418,10 @@ bool AiProgram::load(
     rules.clear();
     constants.clear();
     files.clear();
+    missingFiles.clear();
     loaded_.clear();
+    virtualFiles_.clear();
+    allowMissingIncludes_ = false;
     defines_.clear();
     for (const std::string &define : defines)
         defines_.insert(
@@ -394,6 +440,14 @@ bool AiProgram::load(
         {"metal", 2},
         {"ore", 2},
         {"nova", 3},
+        {"ally", 0},
+        {"neutral", 1},
+        {"enemy", 3},
+        {"easiest", 0},
+        {"easy", 1},
+        {"moderate", 2},
+        {"hard", 3},
+        {"hardest", 4},
     };
     return loadFile(entryPath, err);
 }
@@ -402,11 +456,24 @@ bool AiProgram::loadSource(
     const std::string &name,
     const std::string &source,
     const std::unordered_set<std::string> &defines,
-    std::string *err) {
+    std::string *err,
+    const std::unordered_map<
+        std::string, std::string>
+        *virtualFiles) {
     rules.clear();
     constants.clear();
     files.clear();
+    missingFiles.clear();
     loaded_.clear();
+    virtualFiles_.clear();
+    if (virtualFiles)
+        for (const auto &file :
+             *virtualFiles)
+            virtualFiles_[
+                normalizeAiSymbol(
+                    file.first)] =
+                file.second;
+    allowMissingIncludes_ = true;
     defines_.clear();
     for (const std::string &define : defines)
         defines_.insert(
@@ -425,6 +492,14 @@ bool AiProgram::loadSource(
         {"metal", 2},
         {"ore", 2},
         {"nova", 3},
+        {"ally", 0},
+        {"neutral", 1},
+        {"enemy", 3},
+        {"easiest", 0},
+        {"easy", 1},
+        {"moderate", 2},
+        {"hard", 3},
+        {"hardest", 4},
     };
     loaded_.insert(name);
     files.push_back(name);
@@ -443,8 +518,32 @@ bool AiProgram::loadFile(
     if (!loaded_.insert(key).second)
         return true;
     std::string source;
-    if (!readTextFile(path, source, err))
-        return false;
+    std::string normalizedPath = key;
+    const size_t separator =
+        normalizedPath.find_last_of('/');
+    const std::string baseName =
+        separator == std::string::npos
+            ? normalizedPath
+            : normalizedPath.substr(
+                  separator + 1);
+    auto embedded =
+        virtualFiles_.find(normalizedPath);
+    if (embedded == virtualFiles_.end())
+        embedded =
+            virtualFiles_.find(baseName);
+    if (embedded != virtualFiles_.end()) {
+        files.push_back(path);
+        return processSource(
+            path, directoryOf(path),
+            embedded->second, err);
+    }
+    if (!readTextFile(path, source, err)) {
+        if (!allowMissingIncludes_)
+            return false;
+        missingFiles.push_back(path);
+        if (err) err->clear();
+        return true;
+    }
     files.push_back(path);
     return processSource(
         path, directoryOf(path),
@@ -500,6 +599,8 @@ bool AiProgram::processSource(
                     normalized.size() - 4) !=
                     ".per")
                 fileName += ".per";
+            if (isBuiltinAiModule(fileName))
+                continue;
             if (!loadFile(
                     joinPath(
                         directory, fileName),

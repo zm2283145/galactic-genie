@@ -28,7 +28,7 @@ build and test on Vita.
 | Firing presentation | DAT attack graphic, frame delay, projectile totals, spawning area, secondary projectile, and impact data | Partially verified and covered |
 | Accuracy and misses | DAT `accuracyPercent`, `accuracyDispersion`, projectile speed, and saved simulation RNG | Data contract covered; exact executable RNG/range/elevation formula remains open |
 | Researched unit attributes | DAT effect commands 0/4/5 and attributes 0/1/2/5/8/9/10/11/12/13/14/15/16/20 | Implemented consumers covered; unsupported attributes inventoried below |
-| AI scripts | Original Computer Expanded `.per` files and DAT `name2` aliases | Economy, advancement, balanced force replenishment, scouting, formations, escorted transport invasions, retreat, and worker shelter covered |
+| AI scripts | Original Computer Expanded/Classic `.per` files, scenario-embedded personalities, executable `data\load\*.per` catalog, and DAT `name2` aliases | Generated and campaign-selected personalities, campaign goals/signals, strategic numbers, economy, build-forward, formations, transport invasions, retreat, and worker shelter covered |
 | Civilization technology trees | Each DAT civilization's `techTreeId` effect; type-102 disabled-technology commands | Verified and covered |
 | Air/naval transports | DAT `AVAIL-*` technologies and Airbase/Shipyard train locations | Verified and covered |
 | Compact island map | Shipyard terrain `1/4`, side terrain `2/35`, and DAT movement restrictions | Covered |
@@ -45,7 +45,8 @@ build and test on Vita.
 | Aircraft-specific targeting | action-7 validator `0x5b9930`, class filter `0x41c530`, aircraft classes 43/48/59/62/63/64 | Verified and covered; no fuel mechanic evidenced |
 | Startup and frontend routing | executable strings at `0x68e41c`, `0x68b26f`, `0x68e658`, `0x68e558`, `0x68e440`; language IDs 9201-9284/11241-11252 | Verified and covered |
 | Stock campaign catalog | six `XCAM*.CPX` archives, 43 SCX entries; localized IDs 35228-35445/36128-36438 | Verified and covered |
-| Campaign progression and saves | campaign-menu strings, ordered CPX entries, original save-screen path `0x5286f0` | Native bounded profile and save context covered |
+| Campaign trigger/runtime conformance | all six XCAM archives; 43 SCX entries; 1,770 triggers, 1,752 conditions, and 5,854 effects | Every stock-used numeric condition/effect type supported; 79 bounded difficulty-relevant initialization/simulation runs covered |
+| Campaign progression and saves | campaign-menu strings, ordered CPX entries, original save-screen path `0x5286f0` | Native bounded profile and save-v4 trigger/dialogue continuation covered |
 
 ## Startup, frontend, and campaign contracts
 
@@ -115,11 +116,92 @@ Development access is an explicit profile option rather than fabricated
 completion. Difficulty is profile-persisted for scenario conditions.
 
 Campaign progress uses a 64 KiB maximum, versioned checksummed atomic profile.
-Match save version 3 adds bounded archive-name and entry metadata before the
-existing authoritative state. Loading first validates the checksum/version,
+Match save version 4 retains the bounded archive-name and entry metadata and
+adds per-trigger enabled/fired/delay state, current and queued instruction
+state, scripted names, freeze state, trigger attack overrides, and deterministic
+AI random values. Loading first validates the checksum/version,
 reopens the exact discovered mission, and then restores state only when the
-initialized campaign context matches. Version-1 and version-2 generated
-skirmish saves retain their documented migration path.
+initialized campaign context matches. The active instruction resumes without
+replaying its already-started one-shot sound; queued dialogue resumes normally.
+Version-1 through version-3 saves retain their documented migration paths.
+
+### Stock campaign runtime and AI contract
+
+The six stock archives contain exactly 43 missions, 1,770 triggers, 1,752
+conditions, and 5,854 effects. The exact condition IDs used are
+`1,3,4,5,6,8,9,10,11,12,13,14,15,17,18,19,20,21,22,23`; the exact effect IDs
+used are
+`1,2,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,32,33,34,35,36`.
+IDs absent from these lists are not claimed merely because a neighboring
+opcode exists. The PC conformance gate independently reparses all archives,
+asserts support for every encountered ID, validates bounded player/object
+references, initializes every mission at difficulty 2 plus all five
+difficulties for missions that query difficulty, and runs 79 fixed-step
+simulations. The audited corpus contains 18 authored references to objects
+absent at initial load; the runtime resolves them deterministically as
+deferred/removed references rather than dereferencing stale storage.
+
+The condition contract covers possession/fewer-than counts, typed/grouped
+area queries, destruction, accumulated resources/population, completed and
+in-progress research, timers, selection, AI signals, defeat, current target,
+visibility/nonvisibility, garrisoning, difficulty, foundations, powered
+objects, and population-blocked queues. The effect contract covers diplomacy,
+research, sound/tribute/gates, trigger control, AI goals, object creation,
+tasking, victory/defeat, kill versus silent removal, camera, unload, ownership,
+patrol, queued/cleared instructions, freeze, damage, foundations, rename,
+signed 16-bit HP/attack deltas, stop/snap view, and technology/unit
+enable/disable/flash.
+Effect execution follows authored effect order; non-looping triggers fire once,
+looping triggers re-arm, delay uses accumulated fixed-step time, and explicit
+activation/deactivation updates the target trigger without invalidating the
+current ordered pass.
+
+SCX player payloads preserve embedded personality source/name/type, starting
+age, disabled technologies/units/buildings, resources, population, diplomacy,
+and allied-victory state. Global conquest/score/time settings and all-tech
+state are applied before simulation. All active nonhuman stock players select
+their scenario personality instead of being forced through Computer Expanded.
+The native strategic manager supplies the original executable's built-in
+`data\load` behavior while embedded rules provide mission-specific goals and
+signals. Optional embedded `(load ...)` references that are not installed are
+reported once with player/path context and never reported as successful rules.
+The audited set is 66 references to 16 distinct names:
+`GE4-tower`, `GE7-population`, `RA1-research`, `RA8-build`, `RA8-init`,
+`RA8-train`, `TF7-Player4`, the six `*-no-upgrade`/`*-no-transport`
+production variants, `homebase-no-farms`, `troop-center-no-air`, and
+`troop-center-no-mounted`. They are absent from both the XCAM payloads and the
+installed `Game\AI`; scenario unit/technology disables and the native
+strategic manager remain authoritative, and each absence is surfaced rather
+than fabricated as a parsed rule. Unknown facts remain three-valued `Unknown`;
+unsupported actions return false and are logged once with source, line, and
+arguments.
+
+The bounded stock run reaches no unsupported AI form. Campaign-used
+`event-detected trigger N` is driven by SCX AI-goal effects and can be
+acknowledged; AI-to-scenario `set-signal` state is separate from goals;
+player-resigned, taunt absence, market availability/trades,
+campaign resource grants, forage distance, and unpowered-building pressure
+have native facts/actions. AI event sets and deterministic generated random
+values are part of save v4.
+
+Executable evidence corroborates that the standard modules are native load
+catalog entries rather than files shipped in `Game\AI`. In the audited PE,
+`.data` maps raw `0x289000` to preferred VA `0x689000`; representative strings
+are `data\load\randomgame.per` at file offset `0x29ab9c`/VA `0x69ab9c`,
+`constants.per` at `0x29ae3c`/`0x69ae3c`, `building-count.per` at
+`0x29aeb8`/`0x69aeb8`, and `attack.per` at `0x29aed8`/`0x69aed8`. The complete
+executable string inventory also names age advancement, resources, diplomacy,
+escrow, map/civilization loads, production buildings, population, research,
+resign, strategic-number modules, and land/naval attack modules. These are
+modeled by the native economy/strategy/military passes; disk-based Expanded
+and Classic personalities remain selectable for generated skirmishes.
+
+`build-forward` is distinct from ordinary base construction. It chooses only a
+currently fog-visible hostile objective, advances a bounded 65 percent from
+the AI base toward it, then uses ordinary terrain, reachability, shoreline,
+power, builder, reservation, population, and resource-cost validation. If no
+hostile objective is known, it safely falls back to ordinary placement rather
+than leaking hidden positions.
 
 ## Conversion, Holocrons, victory, stealth, and aircraft
 

@@ -129,7 +129,10 @@ public:
         const Scenario &scenario, std::string *err,
         const std::string &campaignArchive = {},
         uint32_t campaignEntry = 0,
-        int difficulty = 2);
+        int difficulty = 2,
+        const std::string &aiDirectory = {});
+    static bool supportsTriggerCondition(int type);
+    static bool supportsTriggerEffect(int type);
     bool loadAiScript(
         int player, const std::string &path,
         const std::unordered_set<std::string> &defines,
@@ -138,9 +141,42 @@ public:
         int player, const std::string &name,
         const std::string &source,
         const std::unordered_set<std::string> &defines,
-        std::string *err = nullptr);
+        std::string *err = nullptr,
+        const std::unordered_map<
+            std::string, std::string>
+            *virtualFiles = nullptr);
     size_t aiRuleCountForTesting(
         int player) const;
+    bool aiLoadedForTesting(
+        int player) const {
+        return player > 0 &&
+               (size_t)player <
+                   aiPlayers_.size() &&
+               aiPlayers_[(size_t)player]
+                   .loaded;
+    }
+    size_t aiMissingIncludeCountForTesting(
+        int player) const {
+        return player > 0 &&
+                       (size_t)player <
+                           aiPlayers_.size()
+                   ? aiPlayers_[(size_t)player]
+                         .program.missingFiles
+                         .size()
+                   : 0;
+    }
+    const std::vector<std::string> &
+    aiMissingIncludesForTesting(
+        int player) const {
+        static const std::vector<std::string>
+            empty;
+        return player > 0 &&
+                       (size_t)player <
+                           aiPlayers_.size()
+                   ? aiPlayers_[(size_t)player]
+                         .program.missingFiles
+                   : empty;
+    }
     int aiGoalForTesting(
         int player, int goal) const;
     int aiConstantForTesting(
@@ -330,11 +366,26 @@ public:
     }
     bool aiBuildForTesting(
         int player,
-        const std::string &symbol) {
+        const std::string &symbol,
+        bool forward = false) {
         const dat::Unit *unit =
             aiUnit(player, symbol);
         return unit &&
-               aiBuild(player, *unit);
+               aiBuild(
+                   player, *unit,
+                   forward);
+    }
+    std::array<float, 2>
+    newestFoundationPositionForTesting(
+        int player) const {
+        for (auto found = objects_.rbegin();
+             found != objects_.rend();
+             ++found)
+            if (found->active &&
+                found->player == player &&
+                found->underConstruction)
+                return {found->x, found->y};
+        return {-1.0f, -1.0f};
     }
     int aiUnitIdForTesting(
         int player,
@@ -1283,6 +1334,8 @@ private:
         float stateTime = 0;
         float targetX = 0, targetY = 0;
         float hitPoints = 1, maxHitPoints = 1;
+        int triggerAttack = -1;
+        std::string triggerName;
         float shieldPoints = 0, maxShieldPoints = 0;
         float resourceAmount = 0;
         float carriedAmount = 0;
@@ -1337,6 +1390,7 @@ private:
         bool active = true;
         bool hidden = false;
         bool draw = true;
+        bool frozen = false;
         bool locked = false;
         bool gate = false;
         bool underConstruction = false;
@@ -1455,6 +1509,11 @@ private:
             warnedFacts;
         std::unordered_set<std::string>
             warnedActions;
+        std::string currentRuleSource;
+        int currentRuleLine = 0;
+        int randomNumber = 0;
+        std::unordered_set<int> events;
+        std::unordered_set<int> signals;
         size_t ruleCursor = 0;
         float ruleTime = 0.0f;
         float economyTime = 0.0f;
@@ -2012,7 +2071,8 @@ private:
         int player,
         const dat::Tech &technology) const;
     bool aiBuild(
-        int player, const dat::Unit &unit);
+        int player, const dat::Unit &unit,
+        bool forward = false);
     bool aiTrain(
         int player, const dat::Unit &unit);
     bool aiResearch(

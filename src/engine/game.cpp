@@ -101,6 +101,12 @@ constexpr int kPowerRadiusGraphic = 5025;
 constexpr int kShieldRadiusGraphic = 5034;
 constexpr int kPowerIndicatorSlpFirst = 2695;
 constexpr int kPowerIndicatorSlpLast = 2706;
+
+int aiResourceIndex(int resource) {
+    return resource >= 0 && resource < 4
+               ? resource
+               : -1;
+}
 constexpr float kCheatMenuX = 170.0f;
 constexpr float kCheatMenuY = 58.0f;
 constexpr float kCheatMenuWidth = 620.0f;
@@ -335,6 +341,16 @@ const dat::Terrain &drawTerrain(const std::vector<dat::Terrain> &terrains, int i
 inline void toScreen(float x, float y, float &sx, float &sy) {
     sx = (x - y) * Game::kTileHalfW;
     sy = (x + y) * Game::kTileHalfH;
+}
+
+std::string joinGamePath(
+    const std::string &directory,
+    const std::string &name) {
+    if (directory.empty()) return name;
+    const char last = directory.back();
+    return directory +
+           (last == '/' || last == '\\' ? "" : "/") +
+           name;
 }
 
 } // namespace
@@ -915,7 +931,8 @@ bool Game::initScenario(
     const Scenario &scenario, std::string *err,
     const std::string &campaignArchive,
     uint32_t campaignEntry,
-    int difficulty) {
+    int difficulty,
+    const std::string &aiDirectory) {
     generatedMatch_ = false;
     if (!scenario.map.width || scenario.map.width != scenario.map.height) {
         if (err) *err = "only square scenario maps are currently supported";
@@ -956,7 +973,42 @@ bool Game::initScenario(
         resources_[(size_t)player][2] = players_[i].resources[3]; // stone
         resources_[(size_t)player][3] = players_[i].resources[2]; // gold
         resources_[(size_t)player][4] = players_[i].resources[4];
+        for (uint32_t technology :
+             players_[i].disabledTechnologies)
+            if (technology <
+                assets_.dat().techs.size())
+                disabledTechs_[(size_t)player]
+                    .insert((int)technology);
+        for (uint32_t unit :
+             players_[i].disabledUnits)
+            disabledUnits_[(size_t)player]
+                .insert((int)unit);
+        for (uint32_t building :
+             players_[i].disabledBuildings)
+            disabledUnits_[(size_t)player]
+                .insert((int)building);
+        const int startingAge =
+            std::clamp(
+                players_[i].startingAge,
+                -1, 4);
+        for (int age = 1;
+             age <= std::min(3, startingAge);
+             ++age)
+            researchedTechs_[(size_t)player]
+                .insert(age);
     }
+    if (scenario.allTechnologies)
+        for (size_t player = 1;
+             player < researchedTechs_.size();
+             ++player)
+            for (size_t technology = 0;
+                 technology <
+                     assets_.dat().techs.size();
+                 ++technology)
+                if (!disabledTechs_[player].count(
+                        (int)technology))
+                    researchedTechs_[player].insert(
+                        (int)technology);
     triggers_ = scenario.triggers;
     triggerOrder_ = scenario.triggerOrder;
     triggerRuntime_.resize(triggers_.size());
@@ -985,7 +1037,14 @@ bool Game::initScenario(
     lastSelectionUnitId_ = -1;
     nextSpawnId_ = scenario.nextUnitId;
     victoryState_ = -1;
-    conquestEnabled_ = false;
+    conquestEnabled_ =
+        scenario.victory.conquestRequired;
+    if (scenario.victory.requiredScore > 0)
+        scoreLimit_ =
+            (int)scenario.victory.requiredScore;
+    if (scenario.victory.timeLimit > 0)
+        timeLimitSeconds_ =
+            scenario.victory.timeLimit * 0.1f;
     conquestCheckTime_ = 0.0f;
     warnedEffects_.clear();
     warnedConditions_.clear();
@@ -1128,6 +1187,120 @@ bool Game::initScenario(
     initializeCivilizationRestrictions();
     refreshAllAutomaticTechnologies();
     updateVisibility();
+    static constexpr const char
+        *difficultyDefines[] = {
+            "DIFFICULTY-HARDEST",
+            "DIFFICULTY-HARD",
+            "DIFFICULTY-MODERATE",
+            "DIFFICULTY-EASY",
+            "DIFFICULTY-EASIEST",
+        };
+    std::unordered_map<
+        std::string, std::string>
+        embeddedPersonalities;
+    for (const ScenarioPlayer &source :
+         scenario.players) {
+        if (source.personality.empty())
+            continue;
+        const auto add =
+            [&](std::string name) {
+                if (name.empty()) return;
+                if (name.size() < 4 ||
+                    normalizeAiSymbol(
+                        name.substr(
+                            name.size() - 4)) !=
+                        ".per")
+                    name += ".per";
+                embeddedPersonalities[
+                    normalizeAiSymbol(name)] =
+                    source.personality;
+            };
+        add(source.personalityName);
+        add(source.aiName);
+        add(source.aiFilename);
+    }
+    for (size_t index = 0;
+         index < players_.size(); ++index) {
+        const int player = (int)index + 1;
+        const ScenarioPlayer &source =
+            scenario.players[index];
+        if (!source.active || source.human ||
+            source.aiType == 2)
+            continue;
+        std::unordered_set<std::string> defines{
+            difficultyDefines[difficulty_],
+            "POPULATION-CAP-" +
+                std::to_string(
+                    std::clamp(
+                        (int)std::lround(
+                            source.populationLimit /
+                            25.0f) *
+                            25,
+                        25, 1000)),
+        };
+        if (scenario.victory.conquestRequired)
+            defines.insert("VICTORY-CONQUEST");
+        else
+            defines.insert("VICTORY-STANDARD");
+        bool loaded = false;
+        std::string aiError;
+        if (!source.personality.empty()) {
+            std::string name =
+                source.personalityName.empty()
+                    ? scenario.originalFilename +
+                          "-player-" +
+                          std::to_string(player) +
+                          ".per"
+                    : source.personalityName +
+                          ".per";
+            name = joinGamePath(
+                aiDirectory, name);
+            loaded = loadAiSourceForTesting(
+                player, name,
+                source.personality, defines,
+                &aiError,
+                &embeddedPersonalities);
+        } else if (!aiDirectory.empty()) {
+            std::string name =
+                !source.personalityName.empty()
+                    ? source.personalityName
+                    : source.aiName;
+            if (!name.empty()) {
+                if (name.size() < 4 ||
+                    normalizeAiSymbol(
+                        name.substr(
+                            name.size() - 4)) !=
+                        ".per")
+                    name += ".per";
+                loaded = loadAiScript(
+                    player,
+                    joinGamePath(
+                        aiDirectory, name),
+                    defines, &aiError);
+            }
+        }
+        if (!loaded) {
+            if (err)
+                *err =
+                    "scenario AI player " +
+                    std::to_string(player) +
+                    " ('" +
+                    source.personalityName +
+                    "') could not initialize: " +
+                    (aiError.empty()
+                         ? "missing personality data"
+                         : aiError);
+            resetMatchState();
+            return false;
+        }
+        for (const std::string &missing :
+             aiPlayers_[(size_t)player]
+                 .program.missingFiles)
+            log(
+                "scenario AI include unavailable for player " +
+                std::to_string(player) +
+                ": " + missing);
+    }
     const Object *hero = nullptr;
     size_t heroCount = 0;
     for (const Object &object : objects_) {
@@ -1211,7 +1384,10 @@ bool Game::loadAiSourceForTesting(
     int player, const std::string &name,
     const std::string &source,
     const std::unordered_set<std::string> &defines,
-    std::string *err) {
+    std::string *err,
+    const std::unordered_map<
+        std::string, std::string>
+        *virtualFiles) {
     if (player <= 0 ||
         (size_t)player >=
             aiPlayers_.size()) {
@@ -1220,7 +1396,8 @@ bool Game::loadAiSourceForTesting(
     }
     AiPlayerState state;
     if (!state.program.loadSource(
-            name, source, defines, err))
+            name, source, defines, err,
+            virtualFiles))
         return false;
     state.loaded = true;
     state.age =
@@ -3585,7 +3762,9 @@ bool Game::isEnemy(const Object &source, const Object &target) const {
 }
 
 bool Game::canAttack(const Object &object) const {
-    if (!object.active || object.unit->type < dat::UT_Combatant || object.unit->attacks.empty())
+    if (!object.active || object.frozen ||
+        object.unit->type < dat::UT_Combatant ||
+        object.unit->attacks.empty())
         return false;
     // Garrison-fire buildings (Command Center: no primary projectile) only
     // shoot while their garrison adds bolts.
@@ -4379,8 +4558,14 @@ int Game::modifiedAttackAmount(
     const dat::AttackOrArmor &attack) const {
     float amount = attack.amount;
     if (source.player < 0 ||
-        (size_t)source.player >= researchedTechs_.size())
-        return attack.amount;
+        (size_t)source.player >=
+            researchedTechs_.size()) {
+        if (source.triggerAttack >= 0 &&
+            attack.amount > 0)
+            amount += source.triggerAttack;
+        return std::max(
+            0, (int)std::lround(amount));
+    }
     for (int technologyId :
          researchedTechs_[(size_t)source.player]) {
         if (technologyId < 0 ||
@@ -4415,7 +4600,11 @@ int Game::modifiedAttackAmount(
                          : amount + value;
         }
     }
-    return (int)std::lround(amount);
+    if (source.triggerAttack >= 0 &&
+        attack.amount > 0)
+        amount += source.triggerAttack;
+    return std::max(
+        0, (int)std::lround(amount));
 }
 
 int Game::modifiedArmourAmount(const Object &target,
@@ -13134,6 +13323,7 @@ bool Game::approach(Object &object, const Object &target, float clearance) {
 
 bool Game::issueMove(Object &object, float targetX, float targetY,
                      const Object *goalObject, float clearance) {
+    if (object.frozen) return false;
     object.targetX = targetX;
     object.targetY = targetY;
     object.pathIndex = 0;
@@ -14179,10 +14369,18 @@ bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed
         return countMatching(true) >= amount;
     case 6: {
         const Object *object = findObject((uint32_t)unitObject);
-        return object && !object->active;
+        return !object || !object->active;
     }
     case 8:
         return resource(player, attribute) >= amount;
+    case 9:
+        return player >= 0 &&
+               (size_t)player <
+                   researchedTechs_.size() &&
+               researchedTechs_[(size_t)player]
+                   .count(
+                       triggerField(
+                           condition.fields, 6)) != 0;
     case 10:
         return triggerElapsed >= std::max(0, triggerField(condition.fields, 7));
     case 11: {
@@ -14196,23 +14394,94 @@ bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed
                 selected++;
         return selected >= std::max(1, amount);
     }
+    case 12: {
+        if (player <= 0 ||
+            (size_t)player >=
+                aiPlayers_.size())
+            return false;
+        const int signal =
+            triggerField(condition.fields, 15);
+        return aiPlayers_[(size_t)player]
+                   .signals.count(signal) != 0;
+    }
     case 13:
         return player > 0 &&
                (size_t)player <=
                    players_.size() &&
                !players_[(size_t)player - 1]
                     .active;
+    case 14: {
+        const Object *object =
+            findObject((uint32_t)unitObject);
+        if (!object || !object->active)
+            return false;
+        const int targetId =
+            triggerField(condition.fields, 3);
+        return targetId < 0
+                   ? object->attackTargetId != 0 ||
+                         object->pathGoalId != 0 ||
+                         object->moveGoalActive
+                   : object->attackTargetId ==
+                             (uint32_t)targetId ||
+                         object->pathGoalId ==
+                             (uint32_t)targetId;
+    }
     case 15: {
         const Object *object = findObject((uint32_t)unitObject);
-        if (!object || !object->active || object->hidden || !object->draw) return false;
-        float sx, sy;
-        toScreen(object->x, object->y, sx, sy);
-        sy -= elevationAt(object->x, object->y) * assets_.dat().terrainBlock.elevHeight;
-        const float halfW = 480.0f / zoom_, halfH = 272.0f / zoom_;
-        return std::fabs(sx - camX_) <= halfW && std::fabs(sy - camY_) <= halfH;
+        const int viewer =
+            player > 0 ? player
+                       : localPlayer_;
+        return object && object->active &&
+               !object->hidden && object->draw &&
+               objectVisibleToPlayer(
+                   *object, viewer);
+    }
+    case 17: {
+        const int technology =
+            triggerField(condition.fields, 6);
+        if (player <= 0 ||
+            technology < 0)
+            return false;
+        for (const Object &building :
+             objects_)
+            if (building.active &&
+                building.player == player)
+                for (const ProductionItem &item :
+                     building.productionQueue)
+                    if (item.technologyId ==
+                        technology)
+                        return true;
+        return false;
+    }
+    case 18: {
+        int count = 0;
+        for (const Object &object : objects_) {
+            if (!object.active ||
+                object.garrisonedInId < 0 ||
+                !objectMatches(
+                    object, unitId, player,
+                    group, type))
+                continue;
+            if (unitObject >= 0 &&
+                object.garrisonedInId !=
+                    unitObject)
+                continue;
+            count++;
+        }
+        return count >= std::max(1, amount);
     }
     case 19:
         return difficulty_ == amount;
+    case 20: {
+        int count = 0;
+        for (const Object &object : objects_)
+            if (object.underConstruction &&
+                objectMatches(
+                    object, unitId, player,
+                    group, type))
+                count++;
+        return count <= amount;
+    }
     case 21: {
         int selected = 0;
         for (const Object &object : objects_)
@@ -14221,10 +14490,62 @@ bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed
                 selected++;
         return selected >= std::max(1, amount);
     }
+    case 22: {
+        int count = 0;
+        for (const Object &object : objects_)
+            if (objectMatches(
+                    object, unitId, player,
+                    group, type) &&
+                inSourceArea(
+                    object, x1, y1, x2, y2) &&
+                isPowered(object))
+                count++;
+        return count >= std::max(1, amount);
+    }
+    case 23: {
+        int count = 0;
+        for (const Object &object : objects_)
+            if (object.active &&
+                object.player == player &&
+                object.productionPopulationBlocked)
+                count++;
+        return count >= std::max(1, amount);
+    }
     default:
         if (warnedConditions_.insert(condition.type).second)
             log(std::string("unsupported trigger condition ") + conditionLabel(condition.type) +
                 " (" + std::to_string(condition.type) + ")");
+        return false;
+    }
+}
+
+bool Game::supportsTriggerCondition(int type) {
+    switch (type) {
+    case 1: case 3: case 4: case 5:
+    case 6: case 8: case 9: case 10:
+    case 11: case 12: case 13: case 14:
+    case 15: case 17: case 18: case 19:
+    case 20: case 21: case 22: case 23:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool Game::supportsTriggerEffect(int type) {
+    switch (type) {
+    case 1: case 2: case 3: case 4:
+    case 5: case 6: case 7: case 8:
+    case 9: case 10: case 11:
+    case 12: case 13: case 14: case 15:
+    case 16: case 17: case 18: case 19:
+    case 20: case 21: case 22: case 23:
+    case 24: case 25: case 26: case 27:
+    case 28:
+    case 29: case 30: case 32: case 33:
+    case 34: case 35: case 36:
+        return true;
+    default:
         return false;
     }
 }
@@ -14286,11 +14607,21 @@ void Game::executeEffect(const ScenarioEffect &effect) {
         setTriggerEnabled(triggerField(effect.fields, 13), false);
         break;
     case 10:
-        if (warnedEffects_.insert(effect.type).second)
-            log("AI script goals are not connected to an AI runtime yet");
+        if (sourcePlayer > 0 &&
+            (size_t)sourcePlayer <
+                aiPlayers_.size()) {
+            aiPlayers_[(size_t)sourcePlayer]
+                .goals[
+                    triggerField(
+                        effect.fields, 0)] =
+                amount;
+            aiPlayers_[(size_t)sourcePlayer]
+                .events.insert(
+                    triggerField(
+                        effect.fields, 0));
+        }
         break;
-    case 11:
-    case 25: {
+    case 11: {
         const int unitId = triggerField(effect.fields, 6);
         const int x = triggerField(effect.fields, 14), y = triggerField(effect.fields, 15);
         const dat::Unit *unit = findUnit(civilizationForPlayer(sourcePlayer), unitId);
@@ -14340,7 +14671,15 @@ void Game::executeEffect(const ScenarioEffect &effect) {
             targetY = (float)mapSize_ - x;
             hasTarget = true;
         }
-        if (hasTarget) issueGroupMove(effectTargets(effect), targetX, targetY);
+        if (hasTarget) {
+            std::vector<Object *> targets =
+                effectTargets(effect);
+            for (Object *object : targets)
+                object->frozen = false;
+            issueGroupMove(
+                std::move(targets),
+                targetX, targetY);
+        }
         break;
     }
     case 13:
@@ -14353,12 +14692,18 @@ void Game::executeEffect(const ScenarioEffect &effect) {
         }
         break;
     case 14:
+        for (Object *object :
+             effectTargets(effect))
+            killObject(*object);
+        rebuildAdjacency();
+        break;
     case 15:
         for (Object *object :
              effectTargets(effect)) {
-            releaseHolocronsForRemoval(
-                *object);
+            releaseHolocronsForRemoval(*object);
             object->active = false;
+            object->selected = false;
+            stopUnit(*object);
         }
         rebuildAdjacency();
         break;
@@ -14368,12 +14713,64 @@ void Game::executeEffect(const ScenarioEffect &effect) {
         if (x >= 0 && y >= 0) lookAt((float)y, (float)mapSize_ - x);
         break;
     }
+    case 17: {
+        const int x =
+            triggerField(effect.fields, 14);
+        const int y =
+            triggerField(effect.fields, 15);
+        for (Object *container :
+             effectTargets(effect)) {
+            std::vector<uint32_t> passengers;
+            for (const Object &object :
+                 objects_)
+                if (object.active &&
+                    object.garrisonedInId ==
+                        (int32_t)container->spawnId)
+                    passengers.push_back(
+                        object.spawnId);
+            ejectGarrisoned(*container);
+            if (x >= 0 && y >= 0)
+                for (uint32_t id : passengers)
+                    if (Object *passenger =
+                            findObject(id))
+                        issueMove(
+                            *passenger,
+                            (float)y,
+                            (float)mapSize_ - x);
+        }
+        break;
+    }
     case 18:
         for (Object *object :
              effectTargets(effect))
             transferOwnership(
                 *object, targetPlayer);
         break;
+    case 19: {
+        const int x =
+            triggerField(effect.fields, 14);
+        const int y =
+            triggerField(effect.fields, 15);
+        if (x < 0 || y < 0) break;
+        for (Object *object :
+             effectTargets(effect)) {
+            stopUnit(*object);
+            object->frozen = false;
+            object->patrolActive = true;
+            object->patrolTowardEnd = true;
+            object->patrolStartX = object->x;
+            object->patrolStartY = object->y;
+            object->patrolEndX = (float)y;
+            object->patrolEndY =
+                (float)mapSize_ - x;
+            object->moveGoalActive =
+                issueMove(
+                    *object,
+                    object->patrolEndX,
+                    object->patrolEndY);
+        }
+        break;
+    }
     case 20:
         queueInstruction(
             effect.message,
@@ -14385,6 +14782,97 @@ void Game::executeEffect(const ScenarioEffect &effect) {
         currentInstruction_.clear();
         currentInstructionPlayer_ = -1;
         instructionTime_ = 0;
+        break;
+    case 22:
+        for (Object *object :
+             effectTargets(effect)) {
+            stopUnit(*object);
+            object->frozen = true;
+        }
+        break;
+    case 23:
+        // Advanced command buttons are editor/UI metadata. The native
+        // command grid is always present, so there is no simulation change.
+        break;
+    case 24:
+        for (Object *object :
+             effectTargets(effect))
+            damageObject(
+                *object, std::max(0, amount),
+                0);
+        break;
+    case 25: {
+        const int unitId =
+            triggerField(effect.fields, 6);
+        const int x =
+            triggerField(effect.fields, 14);
+        const int y =
+            triggerField(effect.fields, 15);
+        if (unitId < 0) {
+            for (Object *object :
+                 effectTargets(effect))
+                damageObject(
+                    *object,
+                    std::max(0, amount), 0);
+            break;
+        }
+        const dat::Unit *unit =
+            findUnit(
+                civilizationForPlayer(
+                    sourcePlayer),
+                unitId);
+        if (unit && x >= 0 && y >= 0) {
+            Object *foundation =
+                createFoundation(
+                    *unit, sourcePlayer,
+                    (float)y,
+                    (float)mapSize_ - x);
+            if (foundation)
+                foundation->wander = false;
+            rebuildAdjacency();
+        }
+        break;
+    }
+    case 26:
+        for (Object *object :
+             effectTargets(effect))
+            object->triggerName =
+                effect.message;
+        break;
+    case 27:
+        for (Object *object :
+             effectTargets(effect)) {
+            const int delta =
+                (int)(int16_t)(
+                    amount & 0xFFFF);
+            object->maxHitPoints =
+                std::max(
+                    1.0f,
+                    object->maxHitPoints +
+                        delta);
+            object->hitPoints =
+                std::clamp(
+                    object->hitPoints +
+                        delta,
+                    0.0f,
+                    object->maxHitPoints);
+        }
+        break;
+    case 28:
+        for (Object *object :
+             effectTargets(effect)) {
+            const int delta =
+                (int)(int16_t)(
+                    amount & 0xFFFF);
+            if (object->triggerAttack < 0)
+                object->triggerAttack = 0;
+            object->triggerAttack += delta;
+        }
+        break;
+    case 29:
+        for (Object *object :
+             effectTargets(effect))
+            stopUnit(*object);
         break;
     case 32:
         if (sourcePlayer >= 0 &&
@@ -14411,7 +14899,8 @@ void Game::executeEffect(const ScenarioEffect &effect) {
                 disabledUnits_.size()) {
             techGeneration_++;
             disabledUnits_[(size_t)sourcePlayer].erase(
-                technology);
+                triggerField(
+                    effect.fields, 6));
         }
         break;
     case 35:
@@ -14422,7 +14911,8 @@ void Game::executeEffect(const ScenarioEffect &effect) {
               sourcePlayer == localPlayer_)) {
             techGeneration_++;
             disabledUnits_[(size_t)sourcePlayer].insert(
-                technology);
+                triggerField(
+                    effect.fields, 6));
         }
         break;
     case 36:
@@ -15228,7 +15718,8 @@ bool Game::aiCanAfford(
 }
 
 bool Game::aiBuild(
-    int player, const dat::Unit &unit) {
+    int player, const dat::Unit &unit,
+    bool forward) {
     if (unit.type != dat::UT_Building ||
         !unitAvailable(player, unit.id) ||
         !aiCanAfford(player, unit))
@@ -15392,7 +15883,65 @@ bool Game::aiBuild(
                 resourceDistance = distance;
             }
         }
-    if (resource) {
+    if (forward) {
+        float baseX = worker->x;
+        float baseY = worker->y;
+        aiBasePoint(player, baseX, baseY);
+        const Object *target = nullptr;
+        int bestPriority =
+            std::numeric_limits<int>::min();
+        float bestDistance =
+            std::numeric_limits<float>::max();
+        for (const Object &candidate :
+             objects_) {
+            if (!candidate.active ||
+                candidate.hidden ||
+                candidate.player <= 0 ||
+                isFriendlyPlayer(
+                    player, candidate.player) ||
+                !objectVisibleToPlayer(
+                    candidate, player))
+                continue;
+            const int priority =
+                aiTargetPriority(candidate);
+            const float dx =
+                candidate.x - baseX;
+            const float dy =
+                candidate.y - baseY;
+            const float distance =
+                dx * dx + dy * dy;
+            if (priority > bestPriority ||
+                (priority == bestPriority &&
+                 distance < bestDistance)) {
+                target = &candidate;
+                bestPriority = priority;
+                bestDistance = distance;
+            }
+        }
+        if (target) {
+            const float dx =
+                target->x - baseX;
+            const float dy =
+                target->y - baseY;
+            const float distance =
+                std::sqrt(dx * dx + dy * dy);
+            const float advance =
+                std::min(
+                    std::max(8.0f,
+                             distance * 0.65f),
+                    std::max(
+                        8.0f,
+                        distance - 6.0f));
+            if (distance > 0.001f) {
+                centerX =
+                    baseX + dx / distance *
+                                advance;
+                centerY =
+                    baseY + dy / distance *
+                                advance;
+            }
+        }
+    } else if (resource) {
         centerX = resource->x;
         centerY = resource->y;
     } else {
@@ -15716,6 +16265,11 @@ bool Game::evaluateAiFactValue(
             populationUsed(player));
         return true;
     }
+    if (fact == "population-cap") {
+        value = (int)std::floor(
+            populationCapacity(player));
+        return true;
+    }
     if (fact == "civilian-population" ||
         fact == "military-population" ||
         fact == "attack-soldier-count") {
@@ -15750,6 +16304,81 @@ bool Game::evaluateAiFactValue(
         value = (int)std::floor(
             populationCapacity(player) -
             populationUsed(player));
+        return true;
+    }
+    if (fact == "soldier-count" ||
+        fact == "defend-soldier-count" ||
+        fact == "defend-warboat-count" ||
+        fact == "attack-warboat-count") {
+        int count = 0;
+        for (const Object &object :
+             objects_)
+            if (object.active &&
+                !object.hidden &&
+                object.player == player &&
+                object.unit &&
+                object.unit->type !=
+                    dat::UT_Building &&
+                !isWorker(object) &&
+                canAttack(object))
+                ++count;
+        value = count;
+        return true;
+    }
+    if (fact == "random-number") {
+        value = state.randomNumber;
+        return true;
+    }
+    if (fact == "starting-resources") {
+        value =
+            currentSkirmishSettings_
+                .startingResources;
+        return true;
+    }
+    if (fact == "strategic-number" &&
+        argumentEnd >= 2) {
+        const auto found =
+            state.strategicNumbers.find(
+                normalizeAiSymbol(
+                    condition.children[1]
+                        .value));
+        value =
+            found == state.strategicNumbers.end()
+                ? 0
+                : found->second;
+        return true;
+    }
+    if (fact == "shared-goal" &&
+        argumentEnd >= 2) {
+        bool known = false;
+        const int goal = resolveAiValue(
+            player, state,
+            condition.children[1].value,
+            known);
+        if (!known) return false;
+        const auto found =
+            state.goals.find(goal);
+        value =
+            found == state.goals.end()
+                ? 0
+                : found->second;
+        return true;
+    }
+    if (fact == "escrow-amount" &&
+        argumentEnd >= 2) {
+        bool known = false;
+        const int aiResource =
+            resolveAiValue(
+                player, state,
+                condition.children[1].value,
+                known);
+        const int resourceType =
+            aiResourceIndex(aiResource);
+        if (!known || resourceType < 0)
+            return false;
+        value = (int)std::floor(
+            state.escrowResources[
+                (size_t)resourceType]);
         return true;
     }
     if (fact == "population-headroom") {
@@ -15934,6 +16563,256 @@ Game::AiTruth Game::evaluateAiCondition(
                    ? AiTruth::True
                    : AiTruth::False;
     }
+    if (fact == "event-detected" &&
+        condition.children.size() == 3) {
+        bool known = false;
+        const int event = resolveAiValue(
+            player, state,
+            condition.children[2].value,
+            known);
+        if (!known) return AiTruth::Unknown;
+        return state.events.count(event)
+                   ? AiTruth::True
+                   : AiTruth::False;
+    }
+    if (fact == "player-resigned" &&
+        condition.children.size() == 2) {
+        bool known = false;
+        const int candidate = resolveAiValue(
+            player, state,
+            condition.children[1].value,
+            known);
+        if (!known || candidate < 1 ||
+            (size_t)candidate >
+                players_.size())
+            return AiTruth::Unknown;
+        return players_[
+                   (size_t)candidate - 1]
+                       .active
+                   ? AiTruth::False
+                   : AiTruth::True;
+    }
+    if ((fact == "player-computer" ||
+         fact == "player-human" ||
+         fact == "player-in-game") &&
+        condition.children.size() == 2) {
+        bool known = false;
+        const int candidate = resolveAiValue(
+            player, state,
+            condition.children[1].value,
+            known);
+        if (!known || candidate < 1 ||
+            (size_t)candidate >
+                players_.size())
+            return AiTruth::False;
+        if (fact == "player-in-game")
+            return !players_[
+                         (size_t)candidate - 1]
+                         .active
+                       ? AiTruth::False
+                       : AiTruth::True;
+        const bool computer =
+            (size_t)candidate <
+                aiPlayers_.size() &&
+            aiPlayers_[(size_t)candidate]
+                .loaded;
+        return (fact == "player-computer"
+                    ? computer
+                    : !computer)
+                   ? AiTruth::True
+                   : AiTruth::False;
+    }
+    if ((fact == "unit-available" ||
+         fact == "can-afford-unit") &&
+        condition.children.size() == 2) {
+        const dat::Unit *unit =
+            aiUnit(
+                player,
+                condition.children[1].value);
+        if (!unit) return AiTruth::Unknown;
+        const dat::Unit *effective =
+            effectiveUnitForPlayer(
+                player, unit);
+        if (!effective ||
+            !unitAvailable(
+                player, effective->id))
+            return AiTruth::False;
+        return fact == "unit-available" ||
+                       aiCanAfford(
+                           player, *effective)
+                   ? AiTruth::True
+                   : AiTruth::False;
+    }
+    if (fact == "civ-selected" &&
+        condition.children.size() == 2) {
+        bool known = false;
+        const int civilization =
+            resolveAiValue(
+                player, state,
+                condition.children[1].value,
+                known);
+        if (!known) return AiTruth::Unknown;
+        return (int)players_[(size_t)player - 1]
+                           .civilization ==
+                       civilization
+                   ? AiTruth::True
+                   : AiTruth::False;
+    }
+    if (fact == "stance-toward" &&
+        condition.children.size() == 3) {
+        bool playerKnown = false;
+        bool stanceKnown = false;
+        const int target = resolveAiValue(
+            player, state,
+            condition.children[1].value,
+            playerKnown);
+        const int stance = resolveAiValue(
+            player, state,
+            condition.children[2].value,
+            stanceKnown);
+        if (!playerKnown || !stanceKnown ||
+            target < 1 || target > 16)
+            return AiTruth::Unknown;
+        const int actual =
+            (int)players_[
+                (size_t)player - 1]
+                .diplomacy[(size_t)target];
+        return actual == stance
+                   ? AiTruth::True
+                   : AiTruth::False;
+    }
+    if (fact == "resource-found") {
+        for (const Object &object :
+             objects_)
+            if (object.active &&
+                !object.hidden &&
+                objectVisibleToPlayer(
+                    object, player) &&
+                object.resourceAmount > 0.0f &&
+                object.resourceType >= 0 &&
+                object.resourceType <= 3)
+                return AiTruth::True;
+        return AiTruth::False;
+    }
+    if (fact ==
+        "sheep-and-forage-too-far") {
+        float baseX = 0.0f;
+        float baseY = 0.0f;
+        if (!aiBasePoint(
+                player, baseX, baseY))
+            return AiTruth::True;
+        for (const Object &object :
+             objects_) {
+            if (!object.active ||
+                object.hidden ||
+                object.player != 0 ||
+                object.resourceType != 0 ||
+                object.resourceAmount <= 0.0f ||
+                !objectVisibleToPlayer(
+                    object, player))
+                continue;
+            const float dx =
+                object.x - baseX;
+            const float dy =
+                object.y - baseY;
+            if (dx * dx + dy * dy <=
+                32.0f * 32.0f)
+                return AiTruth::False;
+        }
+        return AiTruth::True;
+    }
+    if (fact ==
+        "too-many-unpowered-buildings") {
+        int unpowered = 0;
+        for (const Object &object :
+             objects_)
+            if (object.active &&
+                !object.hidden &&
+                object.player == player &&
+                object.unit &&
+                object.unit->type ==
+                    dat::UT_Building &&
+                !object.underConstruction &&
+                requiresPower(object) &&
+                !isPowered(object))
+                ++unpowered;
+        return unpowered >= 3
+                   ? AiTruth::True
+                   : AiTruth::False;
+    }
+    if (fact == "taunt-detected")
+        return AiTruth::False;
+    if ((fact == "can-buy-commodity" ||
+         fact == "can-sell-commodity") &&
+        condition.children.size() == 2) {
+        bool known = false;
+        const int aiResource =
+            resolveAiValue(
+                player, state,
+                condition.children[1].value,
+                known);
+        const int resourceType =
+            aiResourceIndex(aiResource);
+        if (!known || resourceType < 0)
+            return AiTruth::Unknown;
+        bool market = false;
+        for (const Object &object :
+             objects_)
+            if (object.active &&
+                !object.hidden &&
+                object.player == player &&
+                object.unit &&
+                object.unit->type ==
+                    dat::UT_Building &&
+                (object.unit->name.find(
+                     "SPACEPORT") !=
+                     std::string::npos ||
+                 object.unit->name2.find(
+                     "SPACEPORT") !=
+                     std::string::npos))
+                market = true;
+        const int sourceResource =
+            fact == "can-buy-commodity"
+                ? 3
+                : resourceType;
+        return market &&
+                       resource(
+                           player,
+                           sourceResource) >=
+                           100.0f
+                   ? AiTruth::True
+                   : AiTruth::False;
+    }
+    if (fact ==
+        "enemy-buildings-in-town") {
+        float baseX = 0.0f;
+        float baseY = 0.0f;
+        if (!aiBasePoint(
+                player, baseX, baseY))
+            return AiTruth::False;
+        for (const Object &object :
+             objects_) {
+            if (!object.active ||
+                object.hidden ||
+                !object.unit ||
+                object.unit->type !=
+                    dat::UT_Building ||
+                object.player <= 0 ||
+                isFriendlyPlayer(
+                    player, object.player) ||
+                !objectVisibleToPlayer(
+                    object, player))
+                continue;
+            const float dx =
+                object.x - baseX;
+            const float dy =
+                object.y - baseY;
+            if (dx * dx + dy * dy <=
+                30.0f * 30.0f)
+                return AiTruth::True;
+        }
+        return AiTruth::False;
+    }
     if (fact == "timer-triggered" &&
         condition.children.size() == 2) {
         bool known = false;
@@ -16021,6 +16900,7 @@ Game::AiTruth Game::evaluateAiCondition(
                    : AiTruth::False;
     }
     if ((fact == "can-build" ||
+         fact == "can-build-with-escrow" ||
          fact == "can-train" ||
          fact == "can-train-with-escrow") &&
         condition.children.size() == 2) {
@@ -16031,7 +16911,9 @@ Game::AiTruth Game::evaluateAiCondition(
                     .value);
         if (!unit) return AiTruth::Unknown;
         const dat::Unit *actionUnit =
-            fact == "can-build"
+            (fact == "can-build" ||
+             fact ==
+                 "can-build-with-escrow")
                 ? unit
                 : effectiveUnitForPlayer(
                       player, unit);
@@ -16042,7 +16924,9 @@ Game::AiTruth Game::evaluateAiCondition(
             !aiCanAfford(
                 player, *actionUnit))
             return AiTruth::False;
-        if (fact == "can-build") {
+        if (fact == "can-build" ||
+            fact ==
+                "can-build-with-escrow") {
             const size_t pendingBuildPlans =
                 (size_t)std::count_if(
                     objects_.begin(),
@@ -16257,10 +17141,27 @@ Game::AiTruth Game::evaluateAiCondition(
         return result ? AiTruth::True
                       : AiTruth::False;
     }
-    if (state.warnedFacts.insert(fact).second)
+    if (state.warnedFacts.insert(fact).second) {
+        std::string arguments;
+        for (size_t index = 1;
+             index < condition.children.size();
+             ++index)
+            arguments +=
+                (arguments.empty() ? " " : " ") +
+                condition.children[index].value;
         log(
             "AI fact not implemented: " +
-            fact);
+            fact + arguments + " (" +
+            (state.currentRuleSource.empty()
+                 ? std::string("embedded")
+                 : state.currentRuleSource) +
+            ":" +
+            std::to_string(
+                state.currentRuleLine > 0
+                    ? state.currentRuleLine
+                    : condition.line) +
+            ")");
+    }
     return AiTruth::Unknown;
 }
 
@@ -16274,7 +17175,8 @@ bool Game::executeAiAction(
         rule.enabled = false;
         return true;
     }
-    if (name == "set-goal" &&
+    if ((name == "set-goal" ||
+         name == "set-shared-goal") &&
         action.children.size() == 3) {
         bool goalKnown = false;
         bool valueKnown = false;
@@ -16289,6 +17191,56 @@ bool Game::executeAiAction(
         if (!goalKnown || !valueKnown)
             return false;
         state.goals[goal] = value;
+        return true;
+    }
+    if (name ==
+            "generate-random-number" &&
+        action.children.size() == 2) {
+        bool known = false;
+        const int maximum = resolveAiValue(
+            player, state,
+            action.children[1].value,
+            known);
+        if (!known || maximum <= 0)
+            return false;
+        std::uniform_int_distribution<int>
+            distribution(0, maximum - 1);
+        state.randomNumber =
+            distribution(rng_);
+        return true;
+    }
+    if (name == "set-signal" &&
+        action.children.size() == 2) {
+        bool known = false;
+        const int signal = resolveAiValue(
+            player, state,
+            action.children[1].value,
+            known);
+        if (!known) return false;
+        state.signals.insert(signal);
+        return true;
+    }
+    if (name == "cc-add-resource" &&
+        action.children.size() == 3) {
+        bool resourceKnown = false;
+        bool amountKnown = false;
+        const int aiResource =
+            resolveAiValue(
+                player, state,
+                action.children[1].value,
+                resourceKnown);
+        const int amount = resolveAiValue(
+            player, state,
+            action.children[2].value,
+            amountKnown);
+        const int resourceType =
+            aiResourceIndex(aiResource);
+        if (!resourceKnown || !amountKnown ||
+            resourceType < 0)
+            return false;
+        resources_[(size_t)player]
+                  [(size_t)resourceType] +=
+            amount;
         return true;
     }
     if (name == "set-strategic-number" &&
@@ -16345,14 +17297,9 @@ bool Game::executeAiAction(
                 action.children[1].value,
                 resourceKnown);
         if (!resourceKnown) return false;
-        int resourceType = -1;
-        switch (aiResource) {
-        case 1: resourceType = 1; break;
-        case 2: resourceType = 0; break;
-        case 3: resourceType = 3; break;
-        case 4: resourceType = 2; break;
-        default: return false;
-        }
+        const int resourceType =
+            aiResourceIndex(aiResource);
+        if (resourceType < 0) return false;
         if (name == "release-escrow") {
             resources_[(size_t)player]
                       [(size_t)resourceType] +=
@@ -16382,6 +17329,20 @@ bool Game::executeAiAction(
                 player,
                 action.children[1].value);
         return unit &&
+               aiBuild(
+                   player, *unit,
+                   name == "build-forward");
+    }
+    if ((name == "build-wall" ||
+         name == "build-gate") &&
+        action.children.size() >= 1) {
+        const std::string symbol =
+            name == "build-wall"
+                ? "BLDG-WALL1"
+                : "BLDG-GATE1";
+        const dat::Unit *unit =
+            aiUnit(player, symbol);
+        return unit &&
                aiBuild(player, *unit);
     }
     if (name == "train" &&
@@ -16403,12 +17364,165 @@ bool Game::executeAiAction(
         action.children.size() == 1)
         return aiAttackNow(
             player, state);
-    if (name == "chat-local-to-self")
+    if (name == "resign" &&
+        action.children.size() == 1) {
+        eliminatePlayer(player, true);
         return true;
-    if (state.warnedActions.insert(name).second)
+    }
+    if ((name == "buy-commodity" ||
+         name == "sell-commodity") &&
+        action.children.size() == 2) {
+        bool known = false;
+        const int aiResource =
+            resolveAiValue(
+                player, state,
+                action.children[1].value,
+                known);
+        const int resourceType =
+            aiResourceIndex(aiResource);
+        if (!known || resourceType < 0)
+            return false;
+        const int source =
+            name == "buy-commodity"
+                ? 3
+                : resourceType;
+        const int target =
+            name == "buy-commodity"
+                ? resourceType
+                : 3;
+        if (resources_[(size_t)player]
+                      [(size_t)source] <
+            100.0f)
+            return false;
+        resources_[(size_t)player]
+                  [(size_t)source] -=
+            100.0f;
+        resources_[(size_t)player]
+                  [(size_t)target] +=
+            70.0f;
+        return true;
+    }
+    if (name == "acknowledge-event" &&
+        action.children.size() == 2) {
+        bool known = false;
+        const int event = resolveAiValue(
+            player, state,
+            action.children[1].value,
+            known);
+        if (!known) return false;
+        state.events.erase(event);
+        return true;
+    }
+    if (name == "acknowledge-taunt")
+        return true;
+    if (name == "set-stance" &&
+        action.children.size() == 3) {
+        bool targetKnown = false;
+        bool stanceKnown = false;
+        const int target = resolveAiValue(
+            player, state,
+            action.children[1].value,
+            targetKnown);
+        const int stance = resolveAiValue(
+            player, state,
+            action.children[2].value,
+            stanceKnown);
+        if (!targetKnown || !stanceKnown ||
+            target < 1 || target > 16 ||
+            stance < 0 || stance > 3)
+            return false;
+        players_[(size_t)player - 1]
+            .diplomacy[(size_t)target] =
+            (uint32_t)stance;
+        return true;
+    }
+    if (name == "tribute-to-player" &&
+        action.children.size() == 4) {
+        bool targetKnown = false;
+        bool resourceKnown = false;
+        bool amountKnown = false;
+        const int target = resolveAiValue(
+            player, state,
+            action.children[1].value,
+            targetKnown);
+        const int aiResource =
+            resolveAiValue(
+                player, state,
+                action.children[2].value,
+                resourceKnown);
+        const int amount = resolveAiValue(
+            player, state,
+            action.children[3].value,
+            amountKnown);
+        const int resourceType =
+            aiResourceIndex(aiResource);
+        if (!targetKnown ||
+            !resourceKnown ||
+            !amountKnown ||
+            target < 1 || target > 16 ||
+            resourceType < 0 ||
+            amount < 0)
+            return false;
+        const float transferred =
+            std::min(
+                (float)amount,
+                resources_[(size_t)player]
+                          [(size_t)resourceType]);
+        resources_[(size_t)player]
+                  [(size_t)resourceType] -=
+            transferred;
+        resources_[(size_t)target]
+                  [(size_t)resourceType] +=
+            transferred;
+        return true;
+    }
+    if ((name == "delete-building" ||
+         name == "delete-unit") &&
+        action.children.size() == 2) {
+        const dat::Unit *unit =
+            aiUnit(
+                player,
+                action.children[1].value);
+        if (!unit) return false;
+        for (Object &object : objects_)
+            if (object.active &&
+                object.player == player &&
+                object.unit &&
+                object.unit->id ==
+                    unit->id) {
+                releaseHolocronsForRemoval(
+                    object);
+                object.active = false;
+                return true;
+            }
+        return false;
+    }
+    if (name.rfind("chat-", 0) == 0) {
+        if (action.children.size() >= 2)
+            queueInstruction(
+                action.children.back().value,
+                4.0f, std::string(),
+                player);
+        return true;
+    }
+    if (state.warnedActions.insert(name).second) {
+        std::string arguments;
+        for (size_t index = 1;
+             index < action.children.size();
+             ++index)
+            arguments +=
+                (arguments.empty() ? " " : " ") +
+                action.children[index].value;
         log(
             "AI action not implemented: " +
-            name);
+            name + arguments + " (" +
+            (rule.source.empty()
+                 ? std::string("embedded")
+                 : rule.source) +
+            ":" +
+            std::to_string(
+                action.line) + ")");
+    }
     return false;
 }
 
@@ -16430,6 +17544,10 @@ void Game::updateAiPlayer(
             (state.ruleCursor + 1) %
             count;
         if (!rule.enabled) continue;
+        state.currentRuleSource =
+            rule.source;
+        state.currentRuleLine =
+            rule.line;
         bool matches = true;
         for (const AiNode &condition :
              rule.conditions)
@@ -22586,7 +23704,14 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                     : job == 2 ? "Repairer"
                     : job >= 10 && job <= 13
                         ? jobNames[job - 10]
-                        : unitDisplayName(*panelObject->unit);
+                        : !panelObject
+                                   ->triggerName
+                                   .empty()
+                              ? panelObject
+                                    ->triggerName
+                              : unitDisplayName(
+                                    *panelObject
+                                         ->unit);
             if (panelObject->player > 0)
                 title += " (" +
                          std::string(

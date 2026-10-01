@@ -411,7 +411,8 @@ int main() {
                     campaignScenario, &err,
                     mission->archiveName,
                     mission->entry,
-                    campaignProfile.difficulty))
+                    campaignProfile.difficulty,
+                    "ux0:data/swgb/AI"))
                 return false;
             campaignMatch = true;
             frontend.setCampaignMatch(true);

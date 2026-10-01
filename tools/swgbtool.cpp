@@ -24,7 +24,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <map>
+#include <set>
+#include <unordered_set>
 
 using namespace swgb;
 
@@ -858,12 +861,19 @@ static int cmdScenario(const char *path, int entryNumber) {
     for (size_t i = 0; i < 8; i++) {
         const ScenarioPlayer &player = scenario.players[i];
         printf("player %zu: active %d, human %d, civ %u, color %u, camera %.1f,%.1f, resources "
-               "%.0f/%.0f/%.0f/%.0f/%.0f, population %.0f, allied victory %d, name '%s', diplomacy",
+               "%.0f/%.0f/%.0f/%.0f/%.0f, population %.0f, allied victory %d, name '%s', "
+               "ai %u '%s' personality '%s' files '%s'/'%s'/%zu bytes, disables %zu/%zu/%zu, "
+               "age %d, diplomacy",
                i + 1, player.active, player.human, player.civilization, player.color,
                player.cameraX, player.cameraY,
                player.resources[0], player.resources[1], player.resources[2],
                player.resources[3], player.resources[4], player.populationLimit,
-               player.alliedVictory, player.name.c_str());
+               player.alliedVictory, player.name.c_str(), player.aiType,
+               player.aiName.c_str(), player.personalityName.c_str(),
+               player.aiFilename.c_str(), player.cityFilename.c_str(),
+               player.personality.size(), player.disabledTechnologies.size(),
+               player.disabledUnits.size(), player.disabledBuildings.size(),
+               player.startingAge);
         for (size_t other = 0; other < 9; other++) printf(" %u", player.diplomacy[other]);
         printf("\n");
     }
@@ -7181,6 +7191,64 @@ static int cmdTestAi(
     const uint32_t attacksIssued =
         openingGame
             .aiAttacksIssuedForTesting(2);
+    const auto forwardPlacement =
+        [&](SkirmishMapStyle style,
+            uint32_t seed) {
+            SkirmishSettings settings;
+            settings.seed = seed;
+            settings.mapSize = 96;
+            settings.mapStyle = style;
+            settings.playerCivilization = 3;
+            settings.computerCivilization = 3;
+            settings.startingResources = 10000;
+            settings.populationCap = 200;
+            Game forward(assets);
+            if (!forward.initSkirmish(
+                    settings, &err))
+                return false;
+            const auto base =
+                forward
+                    .playerBasePositionForTesting(
+                        2);
+            const float direction =
+                base[0] < 48.0f
+                    ? 1.0f
+                    : -1.0f;
+            const int enemyUnit =
+                forward.aiUnitIdForTesting(
+                    1, "BLDG-MAIN1");
+            if (enemyUnit < 0)
+                return false;
+            forward.spawnObjectForTesting(
+                forward
+                    .civilizationForPlayerForTesting(
+                        1),
+                enemyUnit, 1,
+                base[0] +
+                    direction * 6.0f,
+                base[1]);
+            forward.updateVisibilityForTesting();
+            if (!forward.aiBuildForTesting(
+                    2, "BLDG-DROPCARBON",
+                    true))
+                return false;
+            const auto foundation =
+                forward
+                    .newestFoundationPositionForTesting(
+                        2);
+            return foundation[0] >= 0.0f &&
+                   (foundation[0] - base[0]) *
+                           direction >
+                       0.0f;
+        };
+    const bool forwardLand =
+        forwardPlacement(
+            SkirmishMapStyle::Grasslands,
+            0xC411u);
+    const bool forwardIslands =
+        forwardPlacement(
+            SkirmishMapStyle::CompactIslands,
+            0xC412u);
     printf(
         "AI parser %zu files, %zu constants, "
         "%zu rules; opening %d%% gather/%zu "
@@ -7189,7 +7257,8 @@ static int cmdTestAi(
         "power cores %d, frigates %d, "
         "transports %d/%d, forces %d/%d/%d, "
         "explored +%zu, "
-        "attacks %u, enemy sounds %d\n",
+        "attacks %u, enemy sounds %d, "
+        "forward land/islands %d/%d\n",
         original.files.size(),
         original.constants.size(),
         original.rules.size(),
@@ -7208,7 +7277,9 @@ static int cmdTestAi(
         airForces,
         explored - openingExplored,
         attacksIssued,
-        enemyProductionSounds);
+        enemyProductionSounds,
+        forwardLand,
+        forwardIslands);
     fflush(stdout);
     if (!originalParsed ||
         !initialized || !gathered ||
@@ -7222,7 +7293,9 @@ static int cmdTestAi(
         explored <= openingExplored ||
         attacksIssued == 0 ||
         powerCores > 1 ||
-        enemyProductionSounds != 0) {
+        enemyProductionSounds != 0 ||
+        !forwardLand ||
+        !forwardIslands) {
         fprintf(
             stderr,
             "error: AI validation failed\n");
@@ -9209,7 +9282,7 @@ static int cmdTestMajorMechanics(
                 savePath, &err);
         std::remove(savePath.c_str());
         report(
-            "save-v2-roundtrip",
+            "save-v4-roundtrip",
             saved && restored &&
                 loaded
                         .victoryConditionForTesting() ==
@@ -9423,6 +9496,312 @@ static int cmdTestCampaign(
     }
     report("campaign-metadata-order", metadata);
 
+    bool conformance = discovered;
+    size_t conformanceRuns = 0;
+    size_t conformanceTriggers = 0;
+    size_t conformanceConditions = 0;
+    size_t conformanceEffects = 0;
+    size_t deferredReferences = 0;
+    size_t missingAiIncludes = 0;
+    std::set<std::string>
+        missingAiIncludeNames;
+    std::set<std::string>
+        unsupportedAiMessages;
+    std::string conformanceError;
+    const std::filesystem::path aiDirectory =
+        std::filesystem::path(campaignDir)
+            .parent_path() /
+        "AI";
+    if (discovered) {
+        for (size_t campaignIndex = 0;
+             campaignIndex <
+                 catalog.campaigns().size() &&
+             conformance;
+             ++campaignIndex) {
+            const CampaignInfo &campaign =
+                catalog.campaigns()[
+                    campaignIndex];
+            for (size_t missionIndex = 0;
+                 missionIndex <
+                     campaign.missions.size() &&
+                 conformance;
+                 ++missionIndex) {
+                Scenario scenario;
+                if (!catalog.loadScenario(
+                        campaignIndex,
+                        missionIndex,
+                        scenario,
+                        &conformanceError)) {
+                    conformance = false;
+                    break;
+                }
+                std::unordered_set<uint32_t>
+                    objectIds;
+                for (const ScenarioUnit &unit :
+                     scenario.units)
+                    objectIds.insert(
+                        unit.spawnId);
+                bool difficultySensitive =
+                    false;
+                for (const ScenarioTrigger &trigger :
+                     scenario.triggers) {
+                    ++conformanceTriggers;
+                    for (const ScenarioCondition &condition :
+                         trigger.conditions) {
+                        ++conformanceConditions;
+                        if (!Game::
+                                supportsTriggerCondition(
+                                    condition.type)) {
+                            conformance = false;
+                            conformanceError =
+                                "unsupported condition " +
+                                std::to_string(
+                                    condition.type);
+                            break;
+                        }
+                        difficultySensitive =
+                            difficultySensitive ||
+                            condition.type == 13;
+                        const auto field =
+                            [&](size_t index) {
+                                return index <
+                                               condition
+                                                   .fields
+                                                   .size()
+                                           ? condition
+                                                 .fields[
+                                                     index]
+                                           : -1;
+                            };
+                        for (size_t index :
+                             {size_t(2),
+                              size_t(3)}) {
+                            const int object =
+                                field(index);
+                            if (object > 0 &&
+                                !objectIds.count(
+                                    (uint32_t)
+                                        object))
+                                ++deferredReferences;
+                        }
+                        const int conditionPlayer =
+                            field(5);
+                        if (conditionPlayer > 16) {
+                            conformance = false;
+                            conformanceError =
+                                "condition player is out of range";
+                        }
+                        if (!conformance) break;
+                    }
+                    if (!conformance) break;
+                    for (const ScenarioEffect &effect :
+                         trigger.effects) {
+                        ++conformanceEffects;
+                        if (!Game::
+                                supportsTriggerEffect(
+                                    effect.type)) {
+                            conformance = false;
+                            conformanceError =
+                                "unsupported effect " +
+                                std::to_string(
+                                    effect.type);
+                            break;
+                        }
+                        for (uint32_t object :
+                             effect.selectedUnitIds)
+                            if (object > 0 &&
+                                !objectIds.count(
+                                    object))
+                                ++deferredReferences;
+                        const auto field =
+                            [&](size_t index) {
+                                return index <
+                                               effect.fields
+                                                   .size()
+                                           ? effect.fields[
+                                                 index]
+                                           : -1;
+                            };
+                        const int locationObject =
+                            field(5);
+                        if (locationObject > 0 &&
+                            !objectIds.count(
+                                (uint32_t)
+                                    locationObject))
+                            ++deferredReferences;
+                        if (field(7) > 16 ||
+                            field(8) > 16) {
+                            conformance = false;
+                            conformanceError =
+                                "effect player is out of range";
+                            break;
+                        }
+                    }
+                    if (!conformance) break;
+                }
+                if (!conformance) {
+                    conformanceError =
+                        campaign.archiveName +
+                        "/" +
+                        campaign.missions[
+                            missionIndex]
+                            .title +
+                        ": " +
+                        conformanceError;
+                    break;
+                }
+                const int firstDifficulty =
+                    difficultySensitive ? 0 : 2;
+                const int lastDifficulty =
+                    difficultySensitive ? 4 : 2;
+                for (int difficulty =
+                         firstDifficulty;
+                     difficulty <=
+                         lastDifficulty &&
+                     conformance;
+                     ++difficulty) {
+                    Game game(assets);
+                    game.setLogger(
+                        [&](const std::string
+                                &message) {
+                            if (message.rfind(
+                                    "AI fact not implemented:",
+                                    0) == 0 ||
+                                message.rfind(
+                                    "AI action not implemented:",
+                                    0) == 0)
+                                unsupportedAiMessages
+                                    .insert(
+                                        message);
+                        });
+                    const CampaignMission &mission =
+                        campaign.missions[
+                            missionIndex];
+                    if (!game.initScenario(
+                            scenario,
+                            &conformanceError,
+                            mission.archiveName,
+                            mission.entry,
+                            difficulty,
+                            aiDirectory.string())) {
+                        conformance = false;
+                        break;
+                    }
+                    for (size_t player = 0;
+                         player <
+                             scenario.players.size();
+                         ++player) {
+                        const ScenarioPlayer
+                            &scenarioPlayer =
+                                scenario.players[
+                                    player];
+                        if (scenarioPlayer.active &&
+                            !scenarioPlayer.human &&
+                            !scenarioPlayer
+                                 .personality
+                                 .empty() &&
+                            !game.aiLoadedForTesting(
+                                (int)player + 1)) {
+                            conformance = false;
+                            conformanceError =
+                                "embedded AI did not initialize for player " +
+                                std::to_string(
+                                    player + 1);
+                            break;
+                        }
+                        if (difficulty ==
+                            firstDifficulty) {
+                            missingAiIncludes +=
+                                game.aiMissingIncludeCountForTesting(
+                                    (int)player +
+                                    1);
+                            for (const std::string
+                                     &include :
+                                 game.aiMissingIncludesForTesting(
+                                     (int)player +
+                                     1))
+                                missingAiIncludeNames
+                                    .insert(
+                                        std::filesystem::path(
+                                            include)
+                                            .filename()
+                                            .string());
+                        }
+                    }
+                    InputState noInput;
+                    for (int step = 0;
+                         step < 60 &&
+                         conformance;
+                         ++step)
+                        game.update(
+                            0.1f, noInput);
+                    ++conformanceRuns;
+                }
+                if (!conformance) {
+                    conformanceError =
+                        campaign.archiveName +
+                        "/" +
+                        campaign.missions[
+                            missionIndex]
+                            .title +
+                        ": " +
+                        conformanceError;
+                    break;
+                }
+            }
+        }
+    }
+    const bool runtimeConformance =
+        conformance &&
+        unsupportedAiMessages.empty();
+    if (conformance &&
+        !runtimeConformance)
+        conformanceError =
+            "campaign simulation reached unsupported AI forms";
+    report(
+        "stock-campaign-runtime-conformance",
+        runtimeConformance,
+        runtimeConformance
+            ? std::to_string(
+                  conformanceRuns) +
+                  " runs, " +
+                  std::to_string(
+                      conformanceTriggers) +
+                  " triggers, " +
+                  std::to_string(
+                      conformanceConditions) +
+                  " conditions, " +
+                  std::to_string(
+                      conformanceEffects) +
+                  " effects, " +
+                  std::to_string(
+                      deferredReferences) +
+                  " safe deferred references, " +
+                  std::to_string(
+                      missingAiIncludes) +
+                  " explicitly reported optional AI includes, " +
+                  std::to_string(
+                      unsupportedAiMessages
+                          .size()) +
+                  " runtime unsupported AI forms"
+            : conformanceError);
+    if (runtimeConformance &&
+        !missingAiIncludeNames.empty()) {
+        std::string names;
+        for (const std::string &name :
+             missingAiIncludeNames)
+            names +=
+                (names.empty() ? "" : ",") +
+                name;
+        printf(
+            "    optional AI include names: %s\n",
+            names.c_str());
+    }
+    if (!unsupportedAiMessages.empty())
+        for (const std::string &message :
+             unsupportedAiMessages)
+            printf("    %s\n", message.c_str());
+
     CampaignProfile profile;
     profile.developmentAccess = false;
     bool progression = discovered;
@@ -9493,7 +9872,8 @@ static int cmdTestCampaign(
             campaignSave &&
             game.initScenario(
                 scenario, &err, mission.archiveName,
-                mission.entry);
+                mission.entry, 2,
+                aiDirectory.string());
         const char *savePath = "test-campaign.save";
         campaignSave =
             campaignSave && game.saveMatch(savePath, &err);
@@ -9511,7 +9891,8 @@ static int cmdTestCampaign(
             campaignSave &&
             restored.initScenario(
                 scenario, &err, mission.archiveName,
-                mission.entry) &&
+                mission.entry, 2,
+                aiDirectory.string()) &&
             restored.loadMatch(savePath, &err);
         FILE *saveFile = std::fopen(savePath, "r+b");
         if (saveFile) {
@@ -9526,7 +9907,8 @@ static int cmdTestCampaign(
         const bool corruptSaveRejected =
             corrupt.initScenario(
                 scenario, &corruptError,
-                mission.archiveName, mission.entry) &&
+                mission.archiveName, mission.entry,
+                2, aiDirectory.string()) &&
             !corrupt.loadMatch(
                 savePath, &corruptError) &&
             corruptError.find("checksum") !=
@@ -9594,7 +9976,8 @@ static int cmdTestCampaign(
         for (int i = 0; i < 3 && transitions; ++i) {
             transitions =
                 game.initScenario(
-                    scenario, &err, "XCAM1", 0);
+                    scenario, &err, "XCAM1", 0,
+                    2, aiDirectory.string());
             game.clearMatch();
             SkirmishSettings settings;
             settings.seed = (uint32_t)i + 1;

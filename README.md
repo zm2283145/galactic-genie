@@ -4,7 +4,7 @@ A from-scratch, portable reimplementation of the Genie engine, as used by *Star 
 
 It is written clean-room style: file formats come from public documentation (openage, genieutils). Game behaviour is to be matched by observation, and by using Ghidra only to answer "how does X work" questions. Decompiled code is never copied into the tree.
 
-## Status: native skirmish and campaign frontend
+## Status: native skirmish and stock-campaign runtime
 
 | Area | State |
 |---|---|
@@ -16,7 +16,7 @@ It is written clean-room style: file formats come from public documentation (ope
 | Isometric terrain renderer with `blendomatic.dat` priority/mode edge blending | done |
 | Terrain elevation with original slope geometry and neighbor-sensitive lighting | done |
 | CPX/SCX discovery, metadata, structural validation, and initialization for all 43 stock XCAM missions | done |
-| Initial trigger runtime: timers, object/area/resource conditions, ordered effects, voiced dialogue, and collision-aware scripted movement | in progress |
+| Stock campaign runtime: all 43 missions, authored state, every stock-used trigger type, embedded personalities, objectives/dialogue, and bounded conformance | done |
 | Units: idle/walk animation, 8-way facing with mirroring, graphic deltas for buildings | done |
 | Combat: contextual orders, deterministic accuracy/misses, projectiles/blast, DAT-driven attributes, shields, damage, and death | in progress |
 | Major SWGB mechanics: conversion, Holocrons, stealth/detection, Standard/Conquest/Time/Score/Command Center victory, and aircraft rules | done |
@@ -67,7 +67,9 @@ cmake -B build-pc && cmake --build build-pc
    `-MusicData` and `-TerrainSoundData` copy these soundtrack and ambience files.
 5. Copy the original `Game/AI` directory to `ux0:data/swgb/AI/`.
    `tools\deploy_vita.ps1 -AiData` copies every `.per` file while preserving
-   personality subdirectories required by Computer Classic.
+   personality subdirectories required by Computer Classic. Scenario-embedded
+   personalities are loaded automatically; original `data\load\*.per` modules
+   remain native engine behavior and are not deployment files.
 6. Install `swgb.vpk` with VitaShell. `tools\deploy_vita.ps1 -Vpk` uploads it to `ux0:data/swgb/`.
 7. The app writes a log to `ux0:data/swgb/swgb.log`. `tools\deploy_vita.ps1 -PullLog` fetches it.
 
@@ -128,8 +130,9 @@ Settings are stored in `ux0:data/swgb/settings.bin`, campaign completion/unlock 
 `ux0:data/swgb/skirmish.save`. All are bounded, versioned, checksummed, and atomically replaced.
 Corrupt settings recover to defaults with an explicit message; corrupt, oversized, mismatched, or
 unsupported campaign profiles and saves are rejected without replacing the current match. Save
-version 3 adds a campaign archive/entry context while retaining version-1 and version-2 generated
-skirmish compatibility.
+version 4 adds campaign trigger state, active/queued instructions, scripted object names, freeze
+state, and trigger attack overrides without replaying an already-active one-shot sound. Versions
+1-3 retain their bounded migration paths.
 
 Combat includes pursuit with collision-aware A* pathfinding, attack animations and
 acknowledgements, original projectile graphics and weapon sounds, researched accuracy with

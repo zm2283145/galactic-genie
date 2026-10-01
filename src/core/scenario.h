@@ -35,8 +35,15 @@ struct ScenarioUnit {
 
 struct ScenarioPlayer {
     std::string name;
+    std::string aiName;
+    std::string cityName;
+    std::string personalityName;
+    std::string aiFilename;
+    std::string cityFilename;
+    std::string personality;
     uint32_t civilization = 0;
     uint32_t color = 0;
+    uint8_t aiType = 2;
     bool active = false;
     bool human = false;
     bool alliedVictory = false;
@@ -44,7 +51,21 @@ struct ScenarioPlayer {
     float cameraY = -1;
     std::array<float, 6> resources{};
     std::array<uint32_t, 16> diplomacy{};
+    std::vector<uint32_t> disabledTechnologies;
+    std::vector<uint32_t> disabledUnits;
+    std::vector<uint32_t> disabledBuildings;
+    int32_t startingAge = -1;
     float populationLimit = 0;
+};
+
+struct ScenarioVictory {
+    bool conquestRequired = false;
+    uint32_t requiredHolocrons = 0;
+    uint32_t requiredExploredPercent = 0;
+    bool allConditionsRequired = false;
+    uint32_t mode = 4;
+    uint32_t requiredScore = 0;
+    uint32_t timeLimit = 0;
 };
 
 struct ScenarioEffect {
@@ -85,13 +106,22 @@ struct Scenario {
     float playerDataVersion = 0;
     std::string originalFilename;
     std::string hints;
+    std::string victoryMessage;
+    std::string lossMessage;
+    std::string history;
     std::string scouts;
+    std::string pregameCinematic;
+    std::string victoryCinematic;
+    std::string lossCinematic;
+    std::string background;
     float cameraX = -1;
     float cameraY = -1;
     float mapCameraX = -1;
     float mapCameraY = -1;
     std::array<uint32_t, 16> civilizations{};
     std::array<ScenarioPlayer, 16> players{};
+    ScenarioVictory victory;
+    bool allTechnologies = false;
     ScenarioMap map;
     std::vector<ScenarioUnit> units;
     double triggerSystemVersion = 0;

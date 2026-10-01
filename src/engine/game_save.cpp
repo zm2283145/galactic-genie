@@ -14,7 +14,7 @@ namespace {
 
 constexpr char kSaveMagic[8] = {
     'S', 'W', 'G', 'B', 'S', 'A', 'V', 'E'};
-constexpr uint32_t kSaveVersion = 3;
+constexpr uint32_t kSaveVersion = 4;
 constexpr uint32_t kOldestSaveVersion = 1;
 constexpr size_t kMaxSaveBytes = 32u * 1024u * 1024u;
 constexpr uint32_t kMaxObjects = 20000;
@@ -732,6 +732,9 @@ bool Game::saveMatch(
         SAVE_FIELD(holocronTargetId);
         SAVE_FIELD(carriedHolocronId);
         SAVE_FIELD(carriedById);
+        SAVE_FIELD(triggerAttack);
+        SAVE_FIELD(frozen);
+        writer.string(object.triggerName);
 #undef SAVE_FIELD
     }
 
@@ -863,6 +866,15 @@ bool Game::saveMatch(
             writer.scalar(group.retryTime);
             writer.scalar(group.initialStrength);
         }
+        writer.scalar(state.randomNumber);
+        writer.scalar(
+            (uint32_t)state.events.size());
+        for (int event : state.events)
+            writer.scalar(event);
+        writer.scalar(
+            (uint32_t)state.signals.size());
+        for (int signal : state.signals)
+            writer.scalar(signal);
     }
 
     writer.scalars(selectionOrder_);
@@ -899,6 +911,26 @@ bool Game::saveMatch(
             writer.scalar(point);
         writer.scalar(group.spacing);
         writer.scalar(group.straggling);
+    }
+    writer.scalar(
+        (uint32_t)triggerRuntime_.size());
+    for (const TriggerRuntime &runtime :
+         triggerRuntime_) {
+        writer.scalar(runtime.enabled);
+        writer.scalar(runtime.fired);
+        writer.scalar(runtime.elapsed);
+    }
+    writer.string(currentInstruction_);
+    writer.scalar(currentInstructionPlayer_);
+    writer.scalar(instructionTime_);
+    writer.scalar(
+        (uint32_t)instructions_.size());
+    for (const Instruction &instruction :
+         instructions_) {
+        writer.string(instruction.text);
+        writer.string(instruction.sound);
+        writer.scalar(instruction.duration);
+        writer.scalar(instruction.player);
     }
 
     if (writer.data.size() > kMaxSaveBytes - 20) {
@@ -1444,6 +1476,15 @@ bool Game::loadMatch(
             if (err) *err = reader.error();
             return false;
         }
+        if (version >= 4 &&
+            (!LOAD_FIELD(triggerAttack) ||
+             !LOAD_FIELD(frozen) ||
+             !reader.string(
+                 object.triggerName,
+                 65536))) {
+            if (err) *err = reader.error();
+            return false;
+        }
 #undef LOAD_FIELD
         object.unit =
             resolveUnit(object.player, unitId);
@@ -1646,20 +1687,37 @@ bool Game::loadMatch(
         bool loaded = false;
         uint32_t ruleCount = 0;
         if (!reader.scalar(loaded) ||
-            !reader.scalar(ruleCount) ||
-            ruleCount != state.program.rules.size()) {
-            if (err)
-                *err = reader.ok()
-                           ? "save AI personality does not match loaded script"
-                           : reader.error();
+            !reader.scalar(ruleCount)) {
+            if (err) *err = reader.error();
             return false;
         }
-        state.loaded = loaded;
-        for (AiRule &rule : state.program.rules)
-            if (!reader.scalar(rule.enabled)) {
+        const bool preserveCampaignAi =
+            version < 4 &&
+            saveKind ==
+                MatchSaveKind::Campaign &&
+            ruleCount == 0 &&
+            !state.program.rules.empty();
+        if (!preserveCampaignAi &&
+            ruleCount !=
+                state.program.rules.size()) {
+            if (err)
+                *err =
+                    "save AI personality does not match loaded script";
+            return false;
+        }
+        if (!preserveCampaignAi)
+            state.loaded = loaded;
+        for (uint32_t rule = 0;
+             rule < ruleCount; ++rule) {
+            bool enabled = false;
+            if (!reader.scalar(enabled)) {
                 if (err) *err = reader.error();
                 return false;
             }
+            state.program.rules[
+                (size_t)rule]
+                .enabled = enabled;
+        }
         uint32_t size = 0;
         if (!reader.scalar(size) || size > 100000) {
             if (err) *err = "save AI goals exceed limit";
@@ -1804,6 +1862,54 @@ bool Game::loadMatch(
             state.militaryGroups.push_back(
                 std::move(group));
         }
+        if (version >= 4 &&
+            !reader.scalar(
+                state.randomNumber)) {
+            if (err) *err = reader.error();
+            return false;
+        }
+        if (version >= 4) {
+            uint32_t eventCount = 0;
+            if (!reader.scalar(eventCount) ||
+                eventCount > 100000) {
+                if (err)
+                    *err =
+                        "save AI event count exceeds limit";
+                return false;
+            }
+            state.events.clear();
+            for (uint32_t event = 0;
+                 event < eventCount;
+                 ++event) {
+                int value = 0;
+                if (!reader.scalar(value)) {
+                    if (err)
+                        *err = reader.error();
+                    return false;
+                }
+                state.events.insert(value);
+            }
+            uint32_t signalCount = 0;
+            if (!reader.scalar(signalCount) ||
+                signalCount > 100000) {
+                if (err)
+                    *err =
+                        "save AI signal count exceeds limit";
+                return false;
+            }
+            state.signals.clear();
+            for (uint32_t signal = 0;
+                 signal < signalCount;
+                 ++signal) {
+                int value = 0;
+                if (!reader.scalar(value)) {
+                    if (err)
+                        *err = reader.error();
+                    return false;
+                }
+                state.signals.insert(value);
+            }
+        }
     }
 
     std::vector<uint32_t> selectionOrder;
@@ -1902,6 +2008,86 @@ bool Game::loadMatch(
         group.pathIndex = (size_t)pathIndex;
         marchGroups.push_back(std::move(group));
     }
+    std::vector<TriggerRuntime>
+        loadedTriggerRuntime;
+    std::string loadedInstruction;
+    int loadedInstructionPlayer = -1;
+    float loadedInstructionTime = 0.0f;
+    std::deque<Instruction>
+        loadedInstructions;
+    if (version >= 4) {
+        uint32_t triggerCount = 0;
+        if (!reader.scalar(triggerCount) ||
+            triggerCount != triggers_.size()) {
+            if (err)
+                *err =
+                    "save trigger state does not match initialized scenario";
+            return false;
+        }
+        loadedTriggerRuntime.resize(
+            triggerCount);
+        for (TriggerRuntime &runtime :
+             loadedTriggerRuntime)
+            if (!reader.scalar(runtime.enabled) ||
+                !reader.scalar(runtime.fired) ||
+                !reader.scalar(runtime.elapsed) ||
+                !std::isfinite(runtime.elapsed) ||
+                runtime.elapsed < 0.0f) {
+                if (err)
+                    *err =
+                        "save contains invalid trigger state";
+                return false;
+            }
+        if (!reader.string(
+                loadedInstruction, 65536) ||
+            !reader.scalar(
+                loadedInstructionPlayer) ||
+            !reader.scalar(
+                loadedInstructionTime) ||
+            loadedInstructionPlayer < -1 ||
+            loadedInstructionPlayer >= 17 ||
+            !std::isfinite(
+                loadedInstructionTime) ||
+            loadedInstructionTime < 0.0f) {
+            if (err)
+                *err =
+                    "save contains invalid active instruction";
+            return false;
+        }
+        uint32_t instructionCount = 0;
+        if (!reader.scalar(instructionCount) ||
+            instructionCount > 4096) {
+            if (err)
+                *err =
+                    "save instruction queue exceeds limit";
+            return false;
+        }
+        for (uint32_t index = 0;
+             index < instructionCount;
+             ++index) {
+            Instruction instruction;
+            if (!reader.string(
+                    instruction.text, 65536) ||
+                !reader.string(
+                    instruction.sound, 4096) ||
+                !reader.scalar(
+                    instruction.duration) ||
+                !reader.scalar(
+                    instruction.player) ||
+                instruction.player < -1 ||
+                instruction.player >= 17 ||
+                !std::isfinite(
+                    instruction.duration) ||
+                instruction.duration < 0.0f) {
+                if (err)
+                    *err =
+                        "save contains invalid queued instruction";
+                return false;
+            }
+            loadedInstructions.push_back(
+                std::move(instruction));
+        }
+    }
     if (!reader.finished()) {
         if (err)
             *err = reader.ok()
@@ -1979,12 +2165,26 @@ bool Game::loadMatch(
     moveGroupDestinations_ =
         std::move(moveGroupDestinations);
     marchGroups_ = std::move(marchGroups);
+    if (version >= 4)
+        triggerRuntime_ =
+            std::move(loadedTriggerRuntime);
 
     pathGridCache_.clear();
     pendingCarcasses_.clear();
     instructions_.clear();
     currentInstruction_.clear();
     currentInstructionPlayer_ = -1;
+    instructionTime_ = 0.0f;
+    if (version >= 4) {
+        instructions_ =
+            std::move(loadedInstructions);
+        currentInstruction_ =
+            std::move(loadedInstruction);
+        currentInstructionPlayer_ =
+            loadedInstructionPlayer;
+        instructionTime_ =
+            loadedInstructionTime;
+    }
     actionMenuOpen_ = false;
     actionMenuObjectId_ = 0;
     placementUnit_ = nullptr;

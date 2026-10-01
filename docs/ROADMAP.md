@@ -25,14 +25,19 @@ The goal is a playable SWGB: Clone Campaigns reimplementation on the PS Vita, ru
 - Player names, civilizations, colors, resources, population limits, diplomacy, and allied-victory state
   are parsed. Trigger definitions, objective metadata, conditions, effects, display order, dialogue, and
   selected-object references are parsed and validated across all 43 original `XCAM` scenarios.
-- The first trigger runtime executes ordered trigger chains, timers, object/area/resource/difficulty
-  conditions, player/resource/diplomacy changes, object creation/removal/ownership, gate state,
-  collision-aware scripted movement, and visible queued dialogue. Movement uses DAT terrain
+- The stock trigger runtime executes ordered, delayed, looping, activation/deactivation chains and
+  every condition/effect type used by the 43 original missions. This includes object/area/type/class,
+  technology, AI-signal, visibility, garrison, foundation, power, population, resource, diplomacy,
+  difficulty, defeat, camera, objectives, dialogue/audio, task/patrol/freeze/stop, damage/HP/attack,
+  ownership, foundation, gate, enable/disable, victory, and defeat behavior. Movement uses DAT terrain
   restrictions, flying-unit behavior, static obstacle footprints, destination formations, dynamic
   occupancy, and bounded A* routes. Scenario MP3 dialogue is decoded and queued with its matching
   subtitle on Vita. DAT-driven selection and movement acknowledgements are loaded from the original
   sound archives and mixed over dialogue. Combat-driven object removal now feeds trigger conditions.
-  AI goals, full technology effects, general world effects, music, and campaign progression remain.
+  Scenario-authored restrictions, starting ages, resources, population, diplomacy, allied victory,
+  embedded personalities, and AI goals are initialized. A deterministic host gate parses all 43
+  missions and runs 79 bounded difficulty-relevant simulations with zero unsupported stock-used
+  trigger types.
 - Per-player fog of war is implemented from researched DAT line of sight.
   Current visibility moves with units while exploration persists; allied
   players share sight. Unexplored terrain is shrouded, explored terrain is
@@ -234,7 +239,8 @@ The goal is a playable SWGB: Clone Campaigns reimplementation on the PS Vita, ru
   maintains Tech-Level-scaled land, naval, air, and transport targets; balances DAT production,
   escorts invasions with ships and aircraft, prioritizes critical targets, regroups survivors, and
   retreats badly outmatched armies for a timed rebuild. Scenario-selected personalities and
-  build-forward strategy remain.
+  Scenario-selected embedded personalities and objective-aware, fog-constrained build-forward
+  placement are implemented; generated matches retain selectable Expanded and Classic personalities.
 - AI workers near a threatened Command Center enter it through ordinary garrison orders, remain
   excluded from economy retasking while moving or sheltered, and eject after five safe seconds.
   All completed garrison-capable non-transport buildings evacuate and reject new occupants at or

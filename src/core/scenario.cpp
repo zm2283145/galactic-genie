@@ -80,14 +80,42 @@ void skipBitmap(ByteReader &reader) {
     reader.skip((size_t)paletteSize * 4 + rawSize);
 }
 
-void skipAiFiles(ByteReader &reader, float version) {
+void readAiFiles(ByteReader &reader, float version, Scenario &scenario) {
     for (size_t i = 0; i < kPlayers; i++) {
         const uint32_t aiNameSize = reader.u32();
         const uint32_t citySize = reader.u32();
         const uint32_t personalitySize = versionAbove(version, 1.07f) ? reader.u32() : 0;
         const uint64_t total = (uint64_t)aiNameSize + citySize + personalitySize;
         if (total > reader.remaining()) throw FormatError("scenario AI file exceeds remaining data");
-        reader.skip((size_t)total);
+        auto readText = [&](uint32_t size) {
+            const char *data = reinterpret_cast<const char *>(reader.ptr(size));
+            size_t length = size;
+            while (length && data[length - 1] == '\0') length--;
+            return std::string(data, length);
+        };
+        scenario.players[i].aiFilename = readText(aiNameSize);
+        scenario.players[i].cityFilename = readText(citySize);
+        scenario.players[i].personality = readText(personalitySize);
+    }
+}
+
+void readFixedIds(
+    ByteReader &reader,
+    const std::array<uint32_t, kPlayers> &counts,
+    size_t slots,
+    std::array<ScenarioPlayer, kPlayers> &players,
+    std::vector<uint32_t> ScenarioPlayer::*member,
+    const char *what) {
+    for (size_t player = 0; player < kPlayers; ++player) {
+        if (counts[player] > slots)
+            throw FormatError(std::string("scenario ") + what + " count exceeds slots");
+        std::vector<uint32_t> &values = players[player].*member;
+        values.clear();
+        values.reserve(counts[player]);
+        for (size_t slot = 0; slot < slots; ++slot) {
+            const uint32_t value = reader.u32();
+            if (slot < counts[player]) values.push_back(value);
+        }
     }
 }
 
@@ -119,9 +147,9 @@ void skipPlayerData(ByteReader &reader, Scenario &scenario) {
     scenario.instructions = sizedString16(reader);
     if (versionAbove(version, 1.1f)) {
         scenario.hints = sizedString16(reader);
-        sizedString16(reader);
-        sizedString16(reader);
-        sizedString16(reader);
+        scenario.victoryMessage = sizedString16(reader);
+        scenario.lossMessage = sizedString16(reader);
+        scenario.history = sizedString16(reader);
     }
     if (versionAbove(version, 1.21f)) scenario.scouts = sizedString16(reader);
     if (version < 1.03f) {
@@ -129,17 +157,19 @@ void skipPlayerData(ByteReader &reader, Scenario &scenario) {
         sizedString16(reader);
         sizedString16(reader);
     }
-    sizedString16(reader);
-    sizedString16(reader);
-    sizedString16(reader);
-    if (versionAbove(version, 1.08f)) sizedString16(reader);
+    scenario.pregameCinematic = sizedString16(reader);
+    scenario.victoryCinematic = sizedString16(reader);
+    scenario.lossCinematic = sizedString16(reader);
+    if (versionAbove(version, 1.08f)) scenario.background = sizedString16(reader);
     if (versionAbove(version, 1.07f)) skipBitmap(reader);
 
-    for (size_t i = 0; i < kPlayers * 2; i++) sizedString16(reader);
+    for (ScenarioPlayer &player : scenario.players) player.aiName = sizedString16(reader);
+    for (ScenarioPlayer &player : scenario.players) player.cityName = sizedString16(reader);
     if (versionAbove(version, 1.07f))
-        for (size_t i = 0; i < kPlayers; i++) sizedString16(reader);
-    skipAiFiles(reader, version);
-    if (versionAbove(version, 1.1f) && std::fabs(version - 1.14f) > 0.0001f) reader.skip(kPlayers);
+        for (ScenarioPlayer &player : scenario.players) player.personalityName = sizedString16(reader);
+    readAiFiles(reader, version, scenario);
+    if (versionAbove(version, 1.1f) && std::fabs(version - 1.14f) > 0.0001f)
+        for (ScenarioPlayer &player : scenario.players) player.aiType = reader.u8();
     if (versionAbove(version, 1.01f)) expectSeparator(reader, "player resources");
 
     if (version < 1.14f) {
@@ -156,28 +186,57 @@ void skipPlayerData(ByteReader &reader, Scenario &scenario) {
     }
     if (versionAbove(version, 1.01f)) expectSeparator(reader, "victory conditions");
 
-    reader.skip((versionAbove(version, 1.12f) ? 10 : 7) * 4);
+    scenario.victory.conquestRequired = reader.u32() != 0;
+    reader.u32();
+    scenario.victory.requiredHolocrons = reader.u32();
+    reader.u32();
+    scenario.victory.requiredExploredPercent = reader.u32();
+    reader.u32();
+    scenario.victory.allConditionsRequired = reader.u32() != 0;
+    if (versionAbove(version, 1.12f)) {
+        scenario.victory.mode = reader.u32();
+        scenario.victory.requiredScore = reader.u32();
+        scenario.victory.timeLimit = reader.u32();
+    }
     for (ScenarioPlayer &player : scenario.players)
         for (uint32_t &stance : player.diplomacy) stance = reader.u32();
     reader.skip(kPlayers * 180 * 4);
     if (versionAbove(version, 1.01f)) expectSeparator(reader, "allied victories");
-    reader.skip((version < 1.02f ? kPlayers * kPlayers : kPlayers) * 4);
+    const size_t alliedVictoryCount = version < 1.02f ? kPlayers * kPlayers : kPlayers;
+    for (size_t index = 0; index < alliedVictoryCount; ++index) {
+        const bool enabled = reader.u32() != 0;
+        if (index < kPlayers) scenario.players[index].alliedVictory = enabled;
+    }
     if (versionAbove(version, 1.22f)) reader.u32();
 
     if (versionAbove(version, 1.03f)) {
-        if (versionAbove(version, 1.17f)) reader.skip(kPlayers * 4);
+        std::array<uint32_t, kPlayers> counts{};
+        if (versionAbove(version, 1.17f))
+            for (uint32_t &count : counts) count = reader.u32();
+        else
+            counts.fill(version < 1.04f ? 20u : 30u);
         const size_t techSlots = version < 1.04f || version <= 1.14f ? 20 : version < 1.3f ? 30 : 60;
-        reader.skip(kPlayers * techSlots * 4);
+        readFixedIds(reader, counts, techSlots, scenario.players,
+                     &ScenarioPlayer::disabledTechnologies, "disabled technology");
         if (versionAbove(version, 1.17f)) {
             const size_t unitSlots = version < 1.3f ? 30 : 60;
             const size_t buildingSlots = version < 1.3f ? 20 : 60;
-            reader.skip(kPlayers * 4 + kPlayers * unitSlots * 4);
-            reader.skip(kPlayers * 4 + kPlayers * buildingSlots * 4);
+            for (uint32_t &count : counts) count = reader.u32();
+            readFixedIds(reader, counts, unitSlots, scenario.players,
+                         &ScenarioPlayer::disabledUnits, "disabled unit");
+            for (uint32_t &count : counts) count = reader.u32();
+            readFixedIds(reader, counts, buildingSlots, scenario.players,
+                         &ScenarioPlayer::disabledBuildings, "disabled building");
         }
     }
     if (versionAbove(version, 1.04f)) reader.u32();
-    if (versionAbove(version, 1.11f)) reader.skip(8);
-    if (versionAbove(version, 1.05f)) reader.skip(kPlayers * 4);
+    if (versionAbove(version, 1.11f)) {
+        reader.u32();
+        scenario.allTechnologies = reader.u32() != 0;
+    }
+    if (versionAbove(version, 1.05f))
+        for (ScenarioPlayer &player : scenario.players)
+            player.startingAge = reader.i32();
     if (versionAbove(version, 1.01f)) expectSeparator(reader, "camera");
     if (versionAbove(version, 1.18f)) {
         scenario.cameraX = (float)reader.i32();
@@ -186,7 +245,8 @@ void skipPlayerData(ByteReader &reader, Scenario &scenario) {
         scenario.mapCameraY = scenario.cameraY;
     }
     if (versionAbove(version, 1.2f)) reader.i32();
-    if (versionAbove(version, 1.23f)) reader.skip(kPlayers);
+    if (versionAbove(version, 1.23f))
+        for (ScenarioPlayer &player : scenario.players) player.aiType = reader.u8();
 }
 
 ScenarioEffect readEffect(ByteReader &reader) {

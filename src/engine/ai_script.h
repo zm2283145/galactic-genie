@@ -41,7 +41,10 @@ public:
         const std::string &name,
         const std::string &source,
         const std::unordered_set<std::string> &defines,
-        std::string *err = nullptr);
+        std::string *err = nullptr,
+        const std::unordered_map<
+            std::string, std::string>
+            *virtualFiles = nullptr);
 
     int constant(
         const std::string &name,
@@ -51,10 +54,15 @@ public:
     std::vector<AiRule> rules;
     std::unordered_map<std::string, int> constants;
     std::vector<std::string> files;
+    std::vector<std::string> missingFiles;
 
 private:
     std::unordered_set<std::string> defines_;
     std::unordered_set<std::string> loaded_;
+    std::unordered_map<
+        std::string, std::string>
+        virtualFiles_;
+    bool allowMissingIncludes_ = false;
 
     bool loadFile(
         const std::string &path,
