@@ -175,7 +175,7 @@ int main() {
         const bool initialized =
             kUseCompactTestMap
                 ? game.initCompactTestMap(
-                      0x5A17u, 64, &err)
+                      0x5A17u, 96, &err)
                 : game.initScenario(scenario, &err);
         if (!initialized) {
             errorScreen(err);

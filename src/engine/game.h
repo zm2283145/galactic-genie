@@ -282,6 +282,8 @@ public:
         return object ? object->productionRemaining : 0.0f;
     }
     int objectUnitId(uint32_t spawnId) const;
+    size_t objectCountForTesting(
+        int player, int unitId) const;
     int objectAttackDamage(uint32_t sourceId,
                            uint32_t targetId) const;
     bool objectSelected(uint32_t spawnId) const;
@@ -954,6 +956,7 @@ private:
     void applyUnitUpgrades(int player);
     bool technologyRequirementsMet(int player,
                                   const dat::Tech &technology) const;
+    void initializeCivilizationRestrictions();
     void refreshAutomaticTechnologies(int player);
     bool technologyVisible(int player, const dat::Tech &technology) const;
     void refreshAllAutomaticTechnologies();

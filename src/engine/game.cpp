@@ -419,6 +419,7 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
         return false;
     }
     rebuildAdjacency();
+    initializeCivilizationRestrictions();
     refreshAllAutomaticTechnologies();
     lookAt(mapSize * 0.30f + 2, mapSize * 0.35f + 2);
     return true;
@@ -429,6 +430,49 @@ bool Game::initCompactTestMap(
     std::string *err) {
     if (!init(seed, mapSize, err))
         return false;
+    if (mapSize >= 96) {
+        const int shoreLeft = mapSize / 2 - 6;
+        const int deepLeft = mapSize / 2 - 1;
+        const int deepRight = mapSize / 2;
+        const int shoreRight = mapSize / 2 + 5;
+        for (int y = 0; y < mapSize; ++y)
+            for (int x = shoreLeft;
+                 x <= shoreRight; ++x)
+                terrain_[(size_t)y * mapSize + x] =
+                    x == shoreLeft ||
+                            x == shoreRight
+                        ? T_SHORE
+                    : x == deepLeft ||
+                            x == deepRight
+                        ? T_WATER2
+                        : T_WATER1;
+        for (int y = 0; y <= mapSize; ++y)
+            for (int x = shoreLeft;
+                 x <= shoreRight + 1; ++x)
+                cornerElevation_[
+                    (size_t)y * (mapSize + 1) +
+                    x] = 0;
+        for (Object &object : objects_)
+            if (object.active &&
+                object.player == 0 &&
+                object.x > shoreLeft &&
+                object.x < shoreRight)
+                object.active = false;
+        auto clearResourceArea =
+            [&](int left, int top,
+                int right, int bottom) {
+                for (int y = top; y <= bottom;
+                     ++y)
+                    for (int x = left;
+                         x <= right; ++x)
+                        terrain_[
+                            (size_t)y * mapSize +
+                            x] = T_GRASS1;
+            };
+        clearResourceArea(16, 42, 31, 55);
+        clearResourceArea(56, 65, 70, 77);
+        buildTileElevation();
+    }
     for (int player = 1;
          player <= 2; ++player)
         for (int resourceType = 0;
@@ -495,38 +539,75 @@ bool Game::initCompactTestMap(
                   0);
     spawn(civ, "BLDG-DWELLING1", 1,
           testX + 13.0f, testY + 7.0f, 0);
-    spawn(civ, "BLDG-DWELLING1", 1,
-          testX + 26.0f, testY + 7.0f, 0);
+    if (mapSize < 96)
+        spawn(civ, "BLDG-DWELLING1", 1,
+              testX + 26.0f, testY + 7.0f, 0);
     spawn(0, "ANIMAL-CAPTUREA1", 0,
           testX + 8.0f, testY + 12.0f, 0);
     // A small herd a short walk away to test capturing and the animal
     // nursery (garrisoned animals produce food).
     for (int index = 0; index < 4; index++)
         spawn(0, "ANIMAL-CAPTUREA1", 0,
-              testX + 18.0f + (index % 2) * 1.6f,
+              testX +
+                  (mapSize >= 96 ? 8.0f : 18.0f) +
+                  (index % 2) * 1.6f,
               testY + 20.0f + (index / 2) * 1.6f, 0);
     static constexpr const char *resources[] = {
         "OBJ-VEGETABLE", "OBJ-BULLION",
         "OBJ-MINERAL", "OBJ-TIMBERA",
     };
     for (size_t type = 0;
-         type < std::size(resources); type++)
-        for (int index = 0; index < 5; index++)
+         type < std::size(resources); type++) {
+        const int count =
+            mapSize >= 96 ? 12 : 5;
+        for (int index = 0; index < count;
+             index++) {
+            const float x =
+                mapSize >= 96
+                    ? testX - 11.0f +
+                          (type % 2) * 7.0f +
+                          (index % 4) * 1.15f
+                    : testX - 9.0f +
+                          type * 2.25f;
+            const float y =
+                mapSize >= 96
+                    ? testY + 10.0f +
+                          (type / 2) * 7.0f +
+                          (index / 4) * 1.15f
+                    : testY + 8.0f +
+                          index * 1.1f;
             spawn(
                 0, resources[type], 0,
-                testX - 9.0f + type * 2.25f,
-                testY + 8.0f + index * 1.1f,
-                0);
+                x, y, 0);
+        }
+    }
     const float aiX = mapSize * 0.62f;
     const float aiY = mapSize * 0.60f;
     for (size_t type = 0;
-         type < std::size(resources); type++)
-        for (int index = 0; index < 5; index++)
+         type < std::size(resources); type++) {
+        const int count =
+            mapSize >= 96 ? 12 : 5;
+        for (int index = 0; index < count;
+             index++) {
+            const float x =
+                mapSize >= 96
+                    ? aiX - 2.0f +
+                          (type % 2) * 7.0f +
+                          (index % 4) * 1.15f
+                    : aiX - 6.0f +
+                          type * 3.0f;
+            const float y =
+                mapSize >= 96
+                    ? aiY + 9.0f +
+                          (type / 2) * 7.0f +
+                          (index / 4) * 1.15f
+                    : aiY + 11.0f +
+                          index * 1.1f;
             spawn(
                 0, resources[type], 0,
-                aiX - 6.0f + type * 3.0f,
-                aiY + 11.0f + index * 1.1f,
-                0);
+                x, y, 0);
+        }
+    }
     rebuildAdjacency();
     refreshAllAutomaticTechnologies();
     lookAt(testX + 2.0f, testY + 5.0f);
@@ -730,6 +811,7 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
                     if (Object *object = findObject(spawnId))
                         configureGate(*object);
     rebuildAdjacency();
+    initializeCivilizationRestrictions();
     refreshAllAutomaticTechnologies();
     const Object *hero = nullptr;
     size_t heroCount = 0;
@@ -1512,7 +1594,10 @@ bool Game::researchTechnology(int player, int technologyId) {
         technologyId < 0 ||
         (size_t)technologyId >= assets_.dat().techs.size())
         return false;
-    researchedTechs_[(size_t)player].insert(technologyId);
+    if (!researchedTechs_[(size_t)player]
+             .insert(technologyId)
+             .second)
+        return true;
     techGeneration_++;
     refreshAutomaticTechnologies(player);
     return true;
@@ -1940,6 +2025,18 @@ int Game::objectUnitId(uint32_t spawnId) const {
     return object && object->active && object->unit
                ? object->unit->id
                : -1;
+}
+
+size_t Game::objectCountForTesting(
+    int player, int unitId) const {
+    return (size_t)std::count_if(
+        objects_.begin(), objects_.end(),
+        [&](const Object &object) {
+            return object.active &&
+                   object.player == player &&
+                   object.unit &&
+                   object.unit->id == unitId;
+        });
 }
 
 int Game::objectAttackDamage(uint32_t sourceId,
@@ -3288,6 +3385,35 @@ void Game::refreshAutomaticTechnologies(int player) {
     applyUnitUpgrades(player);
 }
 
+void Game::initializeCivilizationRestrictions() {
+    for (int player = 1; player <= 8; ++player) {
+        const int civilization =
+            civilizationForPlayer(player);
+        if (civilization < 0 ||
+            (size_t)civilization >=
+                assets_.dat().civs.size())
+            continue;
+        const int effectId =
+            assets_.dat()
+                .civs[(size_t)civilization]
+                .techTreeId;
+        if (effectId < 0 ||
+            (size_t)effectId >=
+                assets_.dat().effects.size())
+            continue;
+        for (const dat::EffectCommand &command :
+             assets_.dat()
+                 .effects[(size_t)effectId]
+                 .commands)
+            if (command.type == 102 &&
+                command.d >= 0.0f)
+                disabledTechs_[(size_t)player]
+                    .insert((int)std::lround(
+                        command.d));
+    }
+    techGeneration_++;
+}
+
 void Game::refreshAllAutomaticTechnologies() {
     for (int player = 1; player <= 8; player++)
         refreshAutomaticTechnologies(player);
@@ -4116,7 +4242,12 @@ float Game::populationCapacity(int player) const {
 
 bool Game::queueUnitForTesting(uint32_t buildingId, int unitId) {
     Object *building = findObject(buildingId);
-    const dat::Unit *unit = findUnit(civilizationForPlayer(localPlayer_), unitId);
+    const dat::Unit *unit = building
+                                ? findUnit(
+                                      civilizationForPlayer(
+                                          building->player),
+                                      unitId)
+                                : nullptr;
     if (!building || !unit) return false;
     if (unit->cls == 7) return queueFarmReseed(*building, *unit);
     ProductionItem item;
@@ -4648,11 +4779,19 @@ bool Game::selfShielded(const Object &object) const {
     if (unit.cls == 6) return false;
     switch (unit.cls) {
     case 0x30: case 0x3f: case 0x40: case 0x3e: case 0x3b: case 0x2b:
-        return resource(object.player, 38) > 0 && unit.id != 1273 && unit.cls != 0x3b;
+        return playerAttribute(
+                   object.player, 38) >
+                   0 &&
+               unit.id != 1273 &&
+               unit.cls != 0x3b;
     default: break;
     }
-    if ((unit.id == 4 || unit.id == 977) && resource(object.player, 51) > 0) return true;
-    if (unit.id == 12 && resource(object.player, 33) > 0) return true;
+    if ((unit.id == 4 || unit.id == 977) &&
+        playerAttribute(object.player, 51) > 0)
+        return true;
+    if (unit.id == 12 &&
+        playerAttribute(object.player, 33) > 0)
+        return true;
     return false;
 }
 

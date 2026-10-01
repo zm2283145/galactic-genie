@@ -14,8 +14,10 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
 - Cliffs, trees and gaia resources (carbon, ore, nova, fruit, animals).
 - CPX campaign archive and SCX terrain/elevation loading are done. The Vita vertical slice now opens
   Galactic Empire mission 2, “Breaking Bread,” directly from the original `XCAM3.CPX`. Development
-  builds can instead start on an isolated compact test map containing both bases, power and shield
-  coverage, a walled gate, resources, livestock, and shielded/unshielded targets.
+  builds can instead start on a 96-by-96 two-island test map. A full-height ocean channel blocks
+  ground passage while aircraft cross normally; both shorelines accept Shipyards and each island
+  retains a base, livestock, power/shield coverage, test targets, and 12 deterministic nodes of
+  each resource type on accessible land.
 - Initial scenario objects and the saved camera are loaded, including trees, resources, buildings, and
   units. Terrain aliases and civilization-specific farm terrain are resolved from the original data.
 - Player names, civilizations, colors, resources, population limits, diplomacy, and allied-victory state
@@ -93,16 +95,19 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   Production waits at 100% when housing is full and resumes after capacity is added. Fishing
   remains.
 - Researched technology effects apply packed DAT attack/armor modifiers plus generic health, speed,
-  and reload-time modifiers, along with chained unit/building upgrade and age effects. Remaining
-  attributes and resource effects still need
-  to be applied.
+  and reload-time modifiers, along with chained unit/building upgrade and age effects. Civilization
+  `techTreeId` effects now apply their disabled-research lists before menus and automatic technologies
+  are evaluated. Player resource attributes drive aircraft Shield Modifications consistently; remaining
+  attributes and resource-effect consumers still need to be applied.
 - SWGB-specific mechanics: power and shield coverage are implemented. A powered Shield Generator
   gives eligible units and buildings a gold shield bar equal to maximum HP, with original
   tiered regeneration, non-stacking coverage, overflow damage, and one-HP per-hit leakage for
   mobile units but not buildings. Shields retained after leaving coverage drain visibly at 40
   points per second, reduced to 20 by Superconducting Shields; Shield Wall enables adjacent wall
   coverage. World and selection bars display the remaining shield amount numerically.
-  Air-unit special behavior, Jedi/Sith conversion, and holocrons remain.
+  Civilization-correct Air Transports and Transport Ships are available from completed Airbases and
+  Shipyards through their original `AVAIL-*` technologies. Other air-unit special behavior,
+  Jedi/Sith conversion, holocrons, stealth, and detection remain.
 
 ## Milestone 4: interface and input on Vita
 - Replace the temporary bitmap trigger-dialogue font with UI rendering from `interfac.drs` SLPs.
@@ -141,7 +146,9 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   progress. A scrollable L + R + Select test menu exposes
   the original base-game and Clone Campaigns cheats, including resource grants, unit spawns, instant
   production/construction, victory/player defeat, and hidden DAT cheat technologies.
-  Minimap and pause menu remain.
+  A Star Wars/Clone Campaigns visual redesign of the remaining temporary panel framing, tabs,
+  typography, resource bar, queues, tooltips, and status areas remains. The replacement minimap
+  and its matching frame, pause/options menus, control groups, and skirmish setup also remain.
 - Audio: selection, move, and attack acknowledgements plus camera-relative weapon-fire, impact, and
   death effects are implemented. The original Ogg soundtrack streams from storage, ducks beneath
   scenario dialogue, and mixes with terrain-specific world ambience. Scenario speaker text uses

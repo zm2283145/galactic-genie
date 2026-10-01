@@ -39,6 +39,7 @@ static int usage() {
             "  swgbtool tech <DataDir> <techId>\n"
             "  swgbtool techs <DataDir> <name-fragment>\n"
             "  swgbtool effect-refs <DataDir> <value>\n"
+            "  swgbtool effect <DataDir> <effectId>\n"
             "  swgbtool attack-ground-candidates <DataDir>\n"
             "  swgbtool options <DataDir> <civId> <buildingId>\n"
             "  swgbtool sound <DataDir> <soundId>\n"
@@ -578,6 +579,43 @@ static int cmdEffectRefs(
     return 0;
 }
 
+static int cmdEffect(
+    const char *dataDir, int effectId) {
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    std::string err;
+    if (!assets.init(dataDir, &err)) {
+        fprintf(
+            stderr, "error: %s\n",
+            err.c_str());
+        return 1;
+    }
+    if (effectId < 0 ||
+        (size_t)effectId >=
+            assets.dat().effects.size()) {
+        fprintf(
+            stderr,
+            "error: effect %d is unavailable\n",
+            effectId);
+        return 1;
+    }
+    const dat::Effect &effect =
+        assets.dat().effects[(size_t)effectId];
+    printf(
+        "effect %d '%s' (%zu commands)\n",
+        effectId, effect.name.c_str(),
+        effect.commands.size());
+    for (const dat::EffectCommand &command :
+         effect.commands)
+        printf(
+            "  type %u a %d b %d c %d "
+            "d %.3f\n",
+            command.type, command.a,
+            command.b, command.c,
+            command.d);
+    return 0;
+}
+
 static int cmdOptions(const char *dataDir, int civId,
                       int buildingId) {
     SoftRenderer renderer;
@@ -594,8 +632,10 @@ static int cmdOptions(const char *dataDir, int civId,
         return 1;
     }
     const auto &civ = assets.dat().civs[(size_t)civId];
-    printf("units at building %d for civ %d '%s'\n",
-           buildingId, civId, civ.name.c_str());
+    printf("units at building %d for civ %d '%s' "
+           "tech-tree %d\n",
+           buildingId, civId, civ.name.c_str(),
+           civ.techTreeId);
     for (const dat::Unit &unit : civ.units) {
         if (!unit.exists ||
             unit.trainLocationId != buildingId)
@@ -5455,6 +5495,221 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
                 std::to_string(
                     mechs.size()));
     }
+    // The Vita compact map is two land masses divided by a full-height
+    // channel. Ground units cannot route across it, aircraft can, and the
+    // shallow-water/shore bands accept Shipyards on both coasts.
+    {
+        Game g(assets);
+        if (!g.initCompactTestMap(
+                0x5A17u, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        const uint32_t worker =
+            g.spawnObjectForTesting(
+                1, 83, 1, 38.0f, 48.0f);
+        const uint32_t fighter =
+            g.spawnObjectForTesting(
+                1, 773, 1, 38.0f, 44.0f);
+        g.groupMoveForTesting(
+            {worker}, 58.0f, 48.0f);
+        g.groupMoveForTesting(
+            {fighter}, 58.0f, 44.0f);
+        step(g, 20.0f);
+        const auto workerPosition =
+            g.objectPosition(worker);
+        const auto fighterPosition =
+            g.objectPosition(fighter);
+        float westShipyardX = -1.0f;
+        float eastShipyardX = -1.0f;
+        for (float x = 42.0f;
+             x <= 54.0f; x += 0.5f) {
+            if (!g.placementValidForTesting(
+                    1, 45, x, 20.0f))
+                continue;
+            if (x < 48.0f &&
+                westShipyardX < 0.0f)
+                westShipyardX = x;
+            if (x > 48.0f &&
+                eastShipyardX < 0.0f)
+                eastShipyardX = x;
+        }
+        const bool fullHeightWater =
+            g.terrainAtForTesting(47, 0) == 22 &&
+            g.terrainAtForTesting(48, 95) == 22;
+        const bool abundantResources =
+            g.aiObjectCountForTesting(
+                0, "OBJ-VEGETABLE") >= 24 &&
+            g.aiObjectCountForTesting(
+                0, "OBJ-BULLION") >= 24 &&
+            g.aiObjectCountForTesting(
+                0, "OBJ-MINERAL") >= 24 &&
+            g.aiObjectCountForTesting(
+                0, "OBJ-TIMBERA") >= 24;
+        report(
+            "compact-island-channel",
+            workerPosition[0] < 47.0f &&
+                fighterPosition[0] > 53.0f &&
+                westShipyardX >= 0.0f &&
+                eastShipyardX >= 0.0f &&
+                fullHeightWater &&
+                abundantResources,
+            "ground x " +
+                std::to_string(workerPosition[0]) +
+                " air x " +
+                std::to_string(fighterPosition[0]) +
+                " shipyards " +
+                std::to_string(westShipyardX) +
+                "/" +
+                std::to_string(eastShipyardX) +
+                " resources " +
+                std::to_string(
+                    abundantResources));
+    }
+    // Civilization tech-tree effects control research menus. The Empire's
+    // effect disables Shield Modifications; the Rebels retain it, and its
+    // resource attribute shields every eligible fighter/bomber class.
+    {
+        Game g(assets);
+        if (!g.init(7, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        const uint32_t empireAirbase =
+            g.spawnObjectForTesting(
+                1, 317, 1, 28.0f, 18.0f);
+        const uint32_t rebelAirbase =
+            g.spawnObjectForTesting(
+                3, 317, 2, 68.0f, 18.0f);
+        for (int technology : {1, 2, 3}) {
+            g.researchTechnology(
+                1, technology);
+            g.researchTechnology(
+                2, technology);
+        }
+        g.update(1.0f / 30.0f, {});
+        const std::vector<int> empireResearch =
+            g.researchOptionIds(empireAirbase);
+        const std::vector<int> rebelResearch =
+            g.researchOptionIds(rebelAirbase);
+        const bool empireHidden =
+            std::find(
+                empireResearch.begin(),
+                empireResearch.end(), 73) ==
+            empireResearch.end();
+        const bool rebelVisible =
+            std::find(
+                rebelResearch.begin(),
+                rebelResearch.end(), 73) !=
+            rebelResearch.end();
+        const uint32_t fighter =
+            g.spawnObjectForTesting(
+                3, 779, 2, 64.0f, 26.0f);
+        const uint32_t bomber =
+            g.spawnObjectForTesting(
+                3, 769, 2, 66.0f, 26.0f);
+        const bool initiallyUnshielded =
+            !g.objectShielded(fighter) &&
+            !g.objectShielded(bomber);
+        g.researchTechnology(2, 73);
+        const bool upgradedShielded =
+            g.objectShielded(fighter) &&
+            g.objectShielded(bomber);
+        report(
+            "civilization-air-research",
+            empireHidden && rebelVisible &&
+                initiallyUnshielded &&
+                upgradedShielded,
+            "empire hidden " +
+                std::to_string(empireHidden) +
+                " rebel visible " +
+                std::to_string(rebelVisible) +
+                " shield " +
+                std::to_string(
+                    initiallyUnshielded) +
+                "->" +
+                std::to_string(
+                    upgradedShielded));
+    }
+    // Airbases and Shipyards expose and complete their civilization-specific
+    // transports through the ordinary DAT-driven production path.
+    {
+        Game g(assets);
+        if (!g.initCompactTestMap(
+                0x5A17u, 96, &err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        g.setLocalPlayerForTesting(1);
+        const uint32_t empireAirbase =
+            g.spawnObjectForTesting(
+                1, 317, 1, 28.0f, 18.0f);
+        const uint32_t rebelAirbase =
+            g.spawnObjectForTesting(
+                3, 317, 2, 68.0f, 18.0f);
+        const uint32_t empireShipyard =
+            g.spawnObjectForTesting(
+                1, 45, 1, 44.0f, 20.0f);
+        const uint32_t rebelShipyard =
+            g.spawnObjectForTesting(
+                3, 45, 2, 52.0f, 20.0f);
+        for (int index = 0; index < 8;
+             ++index) {
+            g.spawnObjectForTesting(
+                1, 70, 1,
+                18.0f + index * 3.0f,
+                8.0f);
+            g.spawnObjectForTesting(
+                3, 70, 2,
+                62.0f + (index % 4) * 3.0f,
+                8.0f + (index / 4) * 3.0f);
+        }
+        for (int technology : {1, 2, 3}) {
+            g.researchTechnology(
+                1, technology);
+            g.researchTechnology(
+                2, technology);
+        }
+        g.update(1.0f / 30.0f, {});
+        auto hasOption = [&](uint32_t building,
+                             int unitId) {
+            const std::vector<int> options =
+                g.productionOptionIds(building);
+            return std::find(
+                       options.begin(),
+                       options.end(),
+                       unitId) != options.end();
+        };
+        const bool menus =
+            hasOption(empireAirbase, 1036) &&
+            hasOption(rebelAirbase, 1046) &&
+            hasOption(empireShipyard, 838) &&
+            hasOption(rebelShipyard, 841);
+        const bool queued =
+            g.queueUnitForTesting(
+                empireAirbase, 1036) &&
+            g.queueUnitForTesting(
+                rebelAirbase, 1046) &&
+            g.queueUnitForTesting(
+                empireShipyard, 838) &&
+            g.queueUnitForTesting(
+                rebelShipyard, 841);
+        step(g, 2.0f);
+        const bool completed =
+            g.objectCountForTesting(1, 1036) > 0 &&
+            g.objectCountForTesting(2, 1046) > 0 &&
+            g.objectCountForTesting(1, 838) > 0 &&
+            g.objectCountForTesting(2, 841) > 0;
+        report(
+            "transport-production",
+            menus && queued && completed,
+            "menus " +
+                std::to_string(menus) +
+                " queued " +
+                std::to_string(queued) +
+                " completed " +
+                std::to_string(completed));
+    }
     printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }
@@ -5792,6 +6047,9 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "techs") && argc >= 4) return cmdTechs(argv[2], argv[3]);
     if (!strcmp(cmd, "effect-refs") && argc >= 4)
         return cmdEffectRefs(
+            argv[2], atoi(argv[3]));
+    if (!strcmp(cmd, "effect") && argc >= 4)
+        return cmdEffect(
             argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "attack-ground-candidates"))
         return cmdAttackGroundCandidates(argv[2]);

@@ -27,6 +27,39 @@ build and test on Vita.
 | Attack Ground | Command-panel construction at `0x503aca`; opcode `0x6b`; DAT blast/projectile fields | Verified and covered |
 | Firing presentation | DAT attack graphic, frame delay, projectile totals, secondary projectile, and impact data | Partially verified and covered |
 | AI scripts | Original Computer Expanded `.per` files and DAT `name2` aliases | First economy slice implemented and covered |
+| Civilization technology trees | Each DAT civilization's `techTreeId` effect; type-102 disabled-technology commands | Verified and covered |
+| Air/naval transports | DAT `AVAIL-*` technologies and Airbase/Shipyard train locations | Verified and covered |
+| Compact island map | Shipyard terrain `1/4`, side terrain `2/35`, and DAT movement restrictions | Covered |
+
+## Compact island match
+
+The Vita development match uses a deterministic 96-by-96 map with the Empire
+and Rebel Alliance on separate land masses. A full-height ocean channel prevents
+ground units from walking around either map edge, while aircraft retain their
+DAT flying movement and cross normally. Each coast has shore terrain beside
+shallow water wide enough for the Shipyard's complete clearance footprint; deep
+water fills the channel center. Both economies retain guaranteed nearby
+resource clusters: each island receives 12 nodes of food, carbon, ore, and
+nova (48 deterministic nodes per side), placed on cleared accessible land.
+
+Airbases and Shipyards expose transports through the original data rather than
+hardcoded menu entries. At their normal prerequisite levels the Empire receives
+Air Transport 1036 and Transport Ship 838, while the Rebel Alliance receives
+Air Transport 1046 and Transport Ship 841. Deterministic coverage queues and
+completes all four through normal production-exit handling.
+
+## Civilization technology restrictions
+
+Every civilization identifies a technology-tree effect through its DAT
+`techTreeId`. Type-102 commands in that effect disable research for the player
+before automatic technologies and menus are evaluated. This is why the Empire
+does not receive technology 73, Shield Modifications; this is a source-data
+restriction, not a UI exception.
+
+Player-attribute technology commands are evaluated by `playerAttribute`.
+Shield Modifications sets attribute 38, and the original eligible aircraft
+classes use that value for self-shielding. Fighter and bomber coverage verifies
+that the effect applies consistently for a civilization that can research it.
 
 ## AI scripts
 
