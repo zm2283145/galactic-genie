@@ -13,6 +13,7 @@
 #include "../src/core/scenario.h"
 #include "../src/engine/assets.h"
 #include "../src/engine/ai_script.h"
+#include "../src/engine/editor.h"
 #include "../src/engine/frontend.h"
 #include "../src/engine/game.h"
 #include "../src/engine/startup.h"
@@ -71,6 +72,7 @@ static int usage() {
             "  swgbtool test-major-mechanics <DataDir>\n"
             "  swgbtool test-fidelity <DataDir>\n"
             "  swgbtool test-campaign <DataDir> <CampaignDir>\n"
+            "  swgbtool test-editor <DataDir> <CampaignDir>\n"
             "  swgbtool mp3 <file.mp3>\n");
     return 2;
 }
@@ -11189,6 +11191,550 @@ static int cmdTestFidelity(
     return failures ? 1 : 0;
 }
 
+static int cmdTestEditor(
+    const char *dataDir, const char *campaignDir) {
+    std::string err;
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    int failures = 0;
+    auto report = [&](const char *name, bool ok,
+                      const std::string &detail) {
+        printf(
+            "%s %s %s\n",
+            ok ? "PASS" : "FAIL",
+            name, detail.c_str());
+        if (!ok) ++failures;
+    };
+
+    bool templates = true;
+    size_t largestBytes = 0;
+    std::set<uint64_t> fingerprints;
+    for (ScenarioTemplate scenarioTemplate :
+         {ScenarioTemplate::BlankLand,
+          ScenarioTemplate::Islands,
+          ScenarioTemplate::SkirmishBase,
+          ScenarioTemplate::TriggerTutorial}) {
+        for (uint32_t players : {1u, 2u, 8u}) {
+            EditableScenarioDocument document;
+            templates =
+                templates &&
+                makeScenarioTemplate(
+                    scenarioTemplate, 160,
+                    0x45444954u + players,
+                    players, document, &err);
+            if (!templates) break;
+            const ValidationReport validation =
+                validateEditableScenario(
+                    document, assets);
+            std::vector<uint8_t> bytes;
+            templates =
+                templates &&
+                !validation.hasErrors() &&
+                encodeEditableScenario(
+                    document, bytes, &err);
+            largestBytes =
+                std::max(largestBytes, bytes.size());
+            fingerprints.insert(
+                editableScenarioSemanticFingerprint(
+                    document));
+        }
+    }
+    report(
+        "templates-players-vita-cap",
+        templates && fingerprints.size() == 12 &&
+            largestBytes < 8u * 1024u * 1024u,
+        "cases=12 fingerprints=" +
+            std::to_string(fingerprints.size()) +
+            " max-native-bytes=" +
+            std::to_string(largestBytes));
+
+    EditableScenarioDocument triggerTemplate;
+    const bool triggerSchema =
+        makeScenarioTemplate(
+            ScenarioTemplate::TriggerTutorial,
+            32, 1, 2, triggerTemplate, &err) &&
+        triggerTemplate.triggers.size() == 1 &&
+        triggerTemplate.triggers[0]
+                .conditions.size() == 1 &&
+        triggerTemplate.triggers[0]
+                .conditions[0].scenario.type == 10 &&
+        triggerTemplate.triggers[0]
+                .conditions[0].scenario.fields.size() ==
+            16 &&
+        triggerTemplate.triggers[0]
+                .conditions[0].scenario.fields[7] == 1 &&
+        triggerTemplate.triggers[0]
+                .effects.size() == 1 &&
+        triggerTemplate.triggers[0]
+                .effects[0].scenario.type == 3 &&
+        triggerTemplate.triggers[0]
+                .effects[0].scenario.fields.size() ==
+            23;
+    report(
+        "trigger-editor-runtime-schema",
+        triggerSchema,
+        "timer-fields=" +
+            std::to_string(
+                triggerTemplate.triggers.empty()
+                    ? 0
+                    : triggerTemplate.triggers[0]
+                          .conditions[0].scenario.fields
+                          .size()));
+
+    EditableScenarioDocument document;
+    bool created =
+        makeScenarioTemplate(
+            ScenarioTemplate::TriggerTutorial,
+            96, 0x5A17u, 2, document, &err);
+    document.metadata.title =
+        "Round Trip / Unknown Test";
+    document.unknownRecords.push_back(
+        {0x554E4B4Eu, {0, 1, 2, 3, 255}});
+    document.originalScxBytes =
+        {0x53, 0x43, 0x58, 0x00, 0x7f};
+    document.hasImportFingerprint = true;
+    document.importSemanticFingerprint =
+        editableScenarioSemanticFingerprint(document);
+    std::vector<uint8_t> encoded;
+    EditableScenarioDocument decoded;
+    const bool roundTrip =
+        created &&
+        encodeEditableScenario(
+            document, encoded, &err) &&
+        decodeEditableScenario(
+            encoded, decoded, &err) &&
+        decoded.metadata.title ==
+            document.metadata.title &&
+        decoded.map.tiles.size() ==
+            document.map.tiles.size() &&
+        decoded.triggers.size() ==
+            document.triggers.size() &&
+        decoded.unknownRecords.size() == 1 &&
+        decoded.unknownRecords[0].bytes ==
+            document.unknownRecords[0].bytes &&
+        decoded.originalScxBytes ==
+            document.originalScxBytes &&
+        editableScenarioSemanticFingerprint(
+            decoded) ==
+            editableScenarioSemanticFingerprint(
+                document);
+    report(
+        "native-roundtrip-unknown-preservation",
+        roundTrip,
+        "bytes=" + std::to_string(encoded.size()) +
+            " unknown=" +
+            std::to_string(
+                decoded.unknownRecords.size()));
+
+    EditableScenarioUndo undo(8, 8u * 1024u * 1024u);
+    const std::string oldTitle =
+        decoded.metadata.title;
+    bool undoRedo =
+        undo.begin(decoded, &err);
+    decoded.metadata.title = "Changed";
+    undoRedo =
+        undoRedo &&
+        undo.commit(decoded, &err) &&
+        undo.dirty() &&
+        undo.undo(decoded, &err) &&
+        decoded.metadata.title == oldTitle &&
+        undo.redo(decoded, &err) &&
+        decoded.metadata.title == "Changed";
+    report(
+        "bounded-undo-redo", undoRedo,
+        "snapshot-bytes=" +
+            std::to_string(undo.snapshotBytes()));
+
+    std::vector<uint8_t> smallSnapshot;
+    encodeEditableScenario(
+        decoded, smallSnapshot, &err);
+    EditableScenarioUndo failingUndo(
+        2, smallSnapshot.size() + 64);
+    const std::string priorDescription =
+        decoded.metadata.description;
+    const bool beganFailing =
+        failingUndo.begin(decoded, &err);
+    decoded.metadata.description.assign(
+        2048, 'x');
+    const bool failedCommit =
+        !failingUndo.commit(decoded, &err);
+    decoded.metadata.description =
+        priorDescription;
+    const bool reopened =
+        failingUndo.begin(decoded, &err);
+    failingUndo.cancel();
+    report(
+        "undo-failed-commit-cleanup",
+        beganFailing && failedCommit && reopened,
+        err);
+
+    ScenarioEditor editor(assets, ".", ".");
+    bool brush =
+        editor.createForTesting(
+            ScenarioTemplate::BlankLand,
+            32, 7, 2, &err);
+    const uint8_t replacement =
+        assets.dat().terrainBlock.terrains.size() > 1
+            ? 1
+            : 0;
+    brush =
+        brush &&
+        editor.applyBrushForTesting(
+            16, 16, EditorMapTool::Terrain,
+            replacement, 5, true, &err) &&
+        editor.applyBrushForTesting(
+            16, 16, EditorMapTool::Elevation,
+            4, 3, false, &err) &&
+        editor.applyBrushForTesting(
+            0, 0, EditorMapTool::Fill,
+            replacement, 1, false, &err);
+    const EditableScenarioDocument &painted =
+        editor.document();
+    brush =
+        brush &&
+        painted.map.tiles[
+            16u * painted.map.width + 16]
+                .elevation == 4;
+    report(
+        "brush-fill-elevation", brush, err);
+
+    uint16_t placeable = 0;
+    bool foundPlaceable = false;
+    if (!assets.dat().civs.empty()) {
+        const size_t civilization =
+            assets.dat().civs.size() > 1 ? 1 : 0;
+        const auto &units =
+            assets.dat().civs[civilization].units;
+        for (size_t id = 0; id < units.size(); ++id)
+            if (units[id].exists &&
+                !units[id].hideInEditor &&
+                units[id].standingGraphic[0] >= 0) {
+                placeable = (uint16_t)id;
+                foundPlaceable = true;
+                break;
+            }
+    }
+    const bool placement =
+        foundPlaceable &&
+        editor.placeObjectForTesting(
+            placeable, 1, 16.5f, 16.5f,
+            &err) &&
+        !editor.placeObjectForTesting(
+            65535, 1, 1.0f, 1.0f,
+            &err) &&
+        !editor.placeObjectForTesting(
+            placeable, 1, 16.5f, 16.5f,
+            &err);
+    report(
+        "dat-placement-bounds-overlap",
+        placement,
+        "unit=" + std::to_string(placeable) +
+            " objects=" +
+            std::to_string(
+                editor.document().objects.size()));
+
+    const std::string archivePath =
+        std::string(campaignDir) + "\\XCAM1.CPX";
+    std::unique_ptr<CpxArchive> archive =
+        CpxArchive::open(archivePath, &err);
+    std::vector<uint8_t> stockScx;
+    if (archive)
+        for (size_t entry = 0;
+             entry < archive->entries().size();
+             ++entry) {
+            const std::string &name =
+                archive->entries()[entry].filename;
+            std::string extension =
+                name.size() >= 4
+                    ? name.substr(name.size() - 4)
+                    : std::string();
+            std::transform(
+                extension.begin(), extension.end(),
+                extension.begin(),
+                [](unsigned char c) {
+                    return (char)std::tolower(c);
+                });
+            if (name.size() >= 4 &&
+                extension == ".scx") {
+                archive->read(entry, stockScx, &err);
+                break;
+            }
+        }
+    EditableScenarioDocument exportDocument;
+    const bool importedStock =
+        !stockScx.empty() &&
+        importScxBytes(
+            stockScx, exportDocument, &err);
+    std::vector<uint8_t> exact;
+    const bool exactExport =
+        importedStock &&
+        exportScxBytes(
+            exportDocument, exact, &err) &&
+        exact == stockScx;
+    std::vector<uint8_t> importedNative;
+    EditableScenarioDocument importedReloaded;
+    const bool importedSidecar =
+        importedStock &&
+        encodeEditableScenario(
+            exportDocument, importedNative,
+            &err) &&
+        decodeEditableScenario(
+            importedNative, importedReloaded,
+            &err) &&
+        importedReloaded.originalScxBytes ==
+            stockScx &&
+        importedReloaded.importSemanticFingerprint ==
+            exportDocument.importSemanticFingerprint;
+    importedReloaded.metadata.modifiedTimestamp =
+        123456789;
+    importedReloaded.metadata.description =
+        "Native editor-only metadata";
+    importedReloaded.unknownRecords.push_back(
+        {0x4E415456u, {9, 8, 7}});
+    std::vector<uint8_t> metadataExact;
+    const bool metadataSavePreservesExport =
+        exportScxBytes(
+            importedReloaded, metadataExact, &err) &&
+        metadataExact == stockScx;
+    exportDocument.messages.instructions +=
+        " modified";
+    const bool modifiedRejected =
+        !exportScxBytes(
+            exportDocument, exact, &err) &&
+        err.find("native") != std::string::npos;
+    EditableScenarioDocument generated =
+        exportDocument;
+    generated.originalScxBytes.clear();
+    generated.hasImportFingerprint = false;
+    const bool generatedRejected =
+        !exportScxBytes(
+            generated, exact, &err);
+    report(
+        "honest-scx-export-gate",
+        exactExport && importedSidecar &&
+            metadataSavePreservesExport &&
+            modifiedRejected && generatedRejected,
+        "source=" + std::to_string(stockScx.size()) +
+            " sidecar=" +
+            std::to_string(importedNative.size()) +
+            " " + err);
+
+    const char *nativePath =
+        "test-editor.swscenario";
+    std::remove(nativePath);
+    std::remove("test-editor.swscenario.bak");
+    std::remove("test-editor.swscenario.tmp");
+    std::string storageError;
+    const bool saved =
+        saveEditableScenario(
+            nativePath, document,
+            &storageError);
+    EditableScenarioDocument loaded;
+    const bool loadedOk =
+        saved &&
+        loadEditableScenario(
+            nativePath, loaded,
+            &storageError);
+    const bool backupSaved =
+        saveEditableScenario(
+            "test-editor.swscenario.bak",
+            document, &storageError);
+    FILE *corrupt =
+        std::fopen(nativePath, "r+b");
+    if (corrupt) {
+        std::fseek(corrupt, -1, SEEK_END);
+        const int original = std::fgetc(corrupt);
+        std::fseek(corrupt, -1, SEEK_END);
+        std::fputc(original ^ 0x5a, corrupt);
+        std::fclose(corrupt);
+    }
+    const bool backupRecovered =
+        corrupt &&
+        backupSaved &&
+        loadEditableScenario(
+            nativePath, loaded,
+            &storageError);
+    FILE *corruptBackup =
+        std::fopen(
+            "test-editor.swscenario.bak",
+            "r+b");
+    if (corruptBackup) {
+        std::fseek(corruptBackup, -1, SEEK_END);
+        const int original =
+            std::fgetc(corruptBackup);
+        std::fseek(corruptBackup, -1, SEEK_END);
+        std::fputc(
+            original ^ 0x35, corruptBackup);
+        std::fclose(corruptBackup);
+    }
+    const bool corruptRejected =
+        corruptBackup &&
+        !loadEditableScenario(
+            nativePath, loaded, &storageError) &&
+        storageError.find("checksum") !=
+            std::string::npos;
+    const bool ioRejected =
+        !saveEditableScenario(
+            "missing-editor-dir\\scenario.swscenario",
+            document, &storageError);
+    std::remove(nativePath);
+    std::remove("test-editor.swscenario.bak");
+    report(
+        "atomic-storage-corrupt-io",
+        loadedOk && backupRecovered &&
+            corruptRejected && ioRejected,
+        storageError);
+
+    const EditorStoragePaths firstPaths =
+        scenarioStoragePaths(
+            "root", "First Title");
+    const EditorStoragePaths secondPaths =
+        scenarioStoragePaths(
+            "root", "Second Title");
+    report(
+        "persistent-recent-recovery-paths",
+        firstPaths.recent ==
+                secondPaths.recent &&
+            firstPaths.recovery ==
+                secondPaths.recovery &&
+            firstPaths.autosave !=
+                secondPaths.autosave &&
+            firstPaths.userCreated !=
+                secondPaths.userCreated,
+        firstPaths.recent + " " +
+            firstPaths.recovery);
+
+    Scenario playtest;
+    ScenarioEditor playtestEditor(
+        assets, ".", ".");
+    bool lifecycle =
+        playtestEditor.createForTesting(
+            ScenarioTemplate::TriggerTutorial,
+            64, 0x504C4159u, 2, &err) &&
+        playtestEditor.buildPlaytestScenario(
+            playtest, &err);
+    Game playtestGame(assets);
+    lifecycle =
+        lifecycle &&
+        playtestGame.initScenario(
+            playtest, &err);
+    if (lifecycle) {
+        for (int frame = 0; frame < 10; ++frame)
+            playtestGame.update(
+                1.0f / 30.0f, {});
+        playtestGame.clearMatch();
+        lifecycle =
+            playtestGame.activeObjectCount() == 0 &&
+            playtestEditor.document().map.width ==
+                64;
+    }
+    Frontend frontend;
+    InputState input;
+    input.menuActivate = true;
+    frontend.update(input, -1);
+    input = {};
+    input.menuDown = true;
+    frontend.update(input, -1);
+    frontend.update(input, -1);
+    input = {};
+    input.menuActivate = true;
+    const FrontendAction openEditor =
+        frontend.update(input, -1);
+    frontend.setPlaytestMatch(true);
+    frontend.showGameplay();
+    input = {};
+    input.pausePressed = true;
+    frontend.update(input, -1);
+    input = {};
+    input.menuDown = true;
+    for (int row = 0; row < 6; ++row)
+        frontend.update(input, -1);
+    input = {};
+    input.menuActivate = true;
+    const FrontendAction returnEditor =
+        frontend.update(input, -1);
+    lifecycle =
+        lifecycle &&
+        openEditor ==
+            FrontendAction::OpenScenarioEditor &&
+        returnEditor ==
+            FrontendAction::ReturnToEditor &&
+        frontend.screen() ==
+            FrontendScreen::ScenarioEditor;
+    playtestEditor.render(renderer, 960, 544);
+    report(
+        "playtest-lifecycle-layout",
+        lifecycle,
+        "actions=" +
+            std::to_string((int)openEditor) + "/" +
+            std::to_string((int)returnEditor) +
+            " map=" +
+            std::to_string(playtest.map.width));
+
+    EditableScenarioDocument invalid =
+        document;
+    invalid.map.tiles[0].terrain = 255;
+    invalid.players[1].scenario.color =
+        invalid.players[0].scenario.color;
+    EditorObject broken;
+    broken.scenario.unitId = 65535;
+    broken.scenario.player = 9;
+    broken.scenario.x = -1;
+    broken.scenario.y = 500;
+    broken.scenario.spawnId = 42;
+    invalid.objects.push_back(broken);
+    EditorTriggerEffect brokenTriggerReference;
+    brokenTriggerReference.scenario.type = 8;
+    brokenTriggerReference.scenario.fields.assign(
+        23, -1);
+    brokenTriggerReference.scenario.fields[13] =
+        9999;
+    invalid.triggers[0].effects.push_back(
+        brokenTriggerReference);
+    invalid.triggers[0].effectOrder.push_back(
+        (int32_t)invalid.triggers[0]
+            .effects.size() -
+        1);
+    const ValidationReport invalidReport =
+        validateEditableScenario(
+            invalid, assets);
+    bool hasTile = false, hasObject = false,
+         hasPlayer = false, hasTrigger = false;
+    for (const ValidationIssue &issue :
+         invalidReport.issues) {
+        hasTile =
+            hasTile ||
+            issue.focus.kind ==
+                ValidationFocusKind::Tile;
+        hasObject =
+            hasObject ||
+            issue.focus.kind ==
+                ValidationFocusKind::Object;
+        hasPlayer =
+            hasPlayer ||
+            issue.focus.kind ==
+                ValidationFocusKind::Player;
+        hasTrigger =
+            hasTrigger ||
+            issue.code ==
+                "trigger.effect.trigger_reference";
+    }
+    report(
+        "validation-focus-errors",
+        invalidReport.hasErrors() &&
+            hasTile && hasObject && hasPlayer &&
+            hasTrigger,
+        "issues=" +
+            std::to_string(
+                invalidReport.issues.size()));
+
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) return usage();
     const char *cmd = argv[1];
@@ -11280,6 +11826,9 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "test-campaign") &&
         argc >= 4)
         return cmdTestCampaign(argv[2], argv[3]);
+    if (!strcmp(cmd, "test-editor") &&
+        argc >= 4)
+        return cmdTestEditor(argv[2], argv[3]);
     if (!strcmp(cmd, "mp3")) return cmdMp3(argv[2]);
     return usage();
 }

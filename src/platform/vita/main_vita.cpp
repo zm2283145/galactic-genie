@@ -4,6 +4,7 @@
 #include "../../core/scenario.h"
 #include "../../engine/assets.h"
 #include "../../engine/campaign.h"
+#include "../../engine/editor.h"
 #include "../../engine/frontend.h"
 #include "../../engine/game.h"
 #include "../../engine/settings.h"
@@ -42,6 +43,12 @@ const char *kTerrainSoundDir = "ux0:data/swgb/Sound/Terrain";
 const char *kSettingsPath = "ux0:data/swgb/settings.bin";
 const char *kProfilePath = "ux0:data/swgb/campaign.profile";
 const char *kSavePath = "ux0:data/swgb/skirmish.save";
+const char *kPlaytestSavePath =
+    "ux0:data/swgb/Scenarios/playtest.save";
+const char *kScenarioRoot =
+    "ux0:data/swgb/Scenarios";
+const char *kScenarioImport =
+    "ux0:data/swgb/Scenarios/Import";
 const int kScreenW = 960, kScreenH = 544;
 
 FILE *g_log = nullptr;
@@ -172,6 +179,16 @@ void runStartupPresentation(
 
 int main() {
     sceIoMkdir(kRoot, 0777);
+    sceIoMkdir(kScenarioRoot, 0777);
+    sceIoMkdir(kScenarioImport, 0777);
+    sceIoMkdir(
+        "ux0:data/swgb/Scenarios/scenarios", 0777);
+    sceIoMkdir(
+        "ux0:data/swgb/Scenarios/recent", 0777);
+    sceIoMkdir(
+        "ux0:data/swgb/Scenarios/autosave", 0777);
+    sceIoMkdir(
+        "ux0:data/swgb/Scenarios/recovery", 0777);
     g_log = fopen("ux0:data/swgb/swgb.log", "w");
     logf("swgb-vita starting");
 
@@ -248,6 +265,8 @@ int main() {
 
         swgb::Game game(assets);
         swgb::Frontend frontend;
+        swgb::ScenarioEditor editor(
+            assets, kScenarioRoot, kScenarioImport);
         frontend.setStringLookup(
             [&](int id, const std::string &fallback) {
                 const std::string &localized =
@@ -341,6 +360,7 @@ int main() {
             });
         bool campaignMatch = false;
         swgb::Scenario campaignScenario;
+        swgb::Scenario playtestScenario;
         const auto startSkirmish = [&]() {
             audio.resetSession();
             const swgb::SkirmishSettings &settings =
@@ -443,6 +463,29 @@ int main() {
                 (unsigned)campaignScenario.map.width,
                 (unsigned)campaignScenario.map.height,
                 (unsigned)campaignScenario.units.size());
+            return true;
+        };
+        const auto startEditorPlaytest = [&]() {
+            audio.resetSession();
+            err.clear();
+            if (!editor.buildPlaytestScenario(
+                    playtestScenario, &err))
+                return false;
+            if (!game.initScenario(
+                    playtestScenario, &err,
+                    std::string(), 0,
+                    editor.playtestDifficulty(),
+                    "ux0:data/swgb/AI"))
+                return false;
+            campaignMatch = false;
+            frontend.setCampaignMatch(false);
+            frontend.setPlaytestMatch(true);
+            frontend.setPlaytestObjectives(
+                editor.document().messages.objectives.empty()
+                    ? editor.document()
+                          .messages.instructions
+                    : editor.document()
+                          .messages.objectives);
             return true;
         };
 
@@ -635,8 +678,15 @@ int main() {
                 touching = false;
             }
 
-            const swgb::FrontendAction action =
-                frontend.update(
+            swgb::FrontendAction action =
+                swgb::FrontendAction::None;
+            swgb::EditorAction editorAction =
+                swgb::EditorAction::None;
+            if (frontend.screen() ==
+                swgb::FrontendScreen::ScenarioEditor)
+                editorAction = editor.update(dt, in);
+            else
+                action = frontend.update(
                     in, game.victoryStateForTesting());
             if (frontend.takeSettingsChanged()) {
                 userSettings =
@@ -672,6 +722,39 @@ int main() {
                 }
             }
             if (action ==
+                swgb::FrontendAction::OpenScenarioEditor) {
+                audio.resetSession();
+                game.clearMatch();
+                frontend.setPlaytestMatch(false);
+                editor.enter();
+            } else if (
+                editorAction ==
+                swgb::EditorAction::Close) {
+                frontend.showMainMenu();
+                frontend.setPlaytestMatch(false);
+            } else if (
+                editorAction ==
+                swgb::EditorAction::Playtest) {
+                editor.render(
+                    renderer, kScreenW, kScreenH);
+                vglSwapBuffers(GL_FALSE);
+                const bool started =
+                    startEditorPlaytest();
+                if (started) {
+                    frontend.showGameplay();
+                } else {
+                    editor.playtestFinished(
+                        false,
+                        "PLAYTEST FAILED: " + err);
+                    frontend.showEditor();
+                    game.clearMatch();
+                }
+                touching = false;
+                touchMoved = false;
+                touchBox = false;
+                stickBoxArmed = false;
+                stickBoxMoved = false;
+            } else if (action ==
                     swgb::FrontendAction::StartSkirmish ||
                 action ==
                     swgb::FrontendAction::StartCampaign ||
@@ -693,7 +776,9 @@ int main() {
                 else if (action ==
                          swgb::FrontendAction::RestartMatch)
                     started =
-                        campaignMatch
+                        frontend.playtestMatch()
+                            ? startEditorPlaytest()
+                        : campaignMatch
                             ? startCampaign()
                             : startSkirmish();
                 else {
@@ -757,12 +842,32 @@ int main() {
                 swgb::FrontendAction::SaveMatch) {
                 err.clear();
                 const bool saved =
-                    game.saveMatch(kSavePath, &err);
+                    game.saveMatch(
+                        frontend.playtestMatch()
+                            ? kPlaytestSavePath
+                            : kSavePath,
+                        &err);
                 frontend.actionFinished(
                     action, saved,
                     saved ? std::string() : err);
-                if (saved)
+                if (saved &&
+                    !frontend.playtestMatch())
                     frontend.setContinueAvailable(true);
+            } else if (
+                action ==
+                    swgb::FrontendAction::ReturnToEditor) {
+                audio.resetSession();
+                game.clearMatch();
+                editor.playtestFinished(
+                    false,
+                    "PLAYTEST RETURNED - EDITS PRESERVED");
+                frontend.showEditor();
+                unitSoundChoice = 0;
+                touching = false;
+                touchMoved = false;
+                touchBox = false;
+                stickBoxArmed = false;
+                stickBoxMoved = false;
             } else if (
                 action ==
                     swgb::FrontendAction::ReturnToMainMenu ||
@@ -770,6 +875,12 @@ int main() {
                     swgb::FrontendAction::ReturnToCampaignBrowser) {
                 audio.resetSession();
                 game.clearMatch();
+                if (frontend.playtestMatch()) {
+                    editor.playtestFinished(
+                        true,
+                        "PLAYTEST ENDED - EDITS PRESERVED");
+                    frontend.setPlaytestMatch(false);
+                }
                 unitSoundChoice = 0;
                 touching = false;
                 touchMoved = false;
@@ -805,6 +916,10 @@ int main() {
             if (frontend.screen() ==
                 swgb::FrontendScreen::Gameplay)
                 game.render(
+                    renderer, kScreenW, kScreenH);
+            else if (frontend.screen() ==
+                     swgb::FrontendScreen::ScenarioEditor)
+                editor.render(
                     renderer, kScreenW, kScreenH);
             else
                 frontend.render(

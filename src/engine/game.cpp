@@ -1161,6 +1161,14 @@ bool Game::initScenario(
              players_[i].disabledBuildings)
             disabledUnits_[(size_t)player]
                 .insert((int)building);
+        for (uint32_t unit :
+             players_[i].researchedUnits)
+            disabledUnits_[(size_t)player]
+                .erase((int)unit);
+        for (uint32_t building :
+             players_[i].researchedBuildings)
+            disabledUnits_[(size_t)player]
+                .erase((int)building);
         const int startingAge =
             std::clamp(
                 players_[i].startingAge,
@@ -1170,6 +1178,14 @@ bool Game::initScenario(
              ++age)
             researchedTechs_[(size_t)player]
                 .insert(age);
+        for (uint32_t technology :
+             players_[i].researchedTechnologies)
+            if (technology <
+                    assets_.dat().techs.size() &&
+                !disabledTechs_[(size_t)player].count(
+                    (int)technology))
+                researchedTechs_[(size_t)player]
+                    .insert((int)technology);
     }
     if (scenario.allTechnologies)
         for (size_t player = 1;

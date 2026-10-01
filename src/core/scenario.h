@@ -54,6 +54,9 @@ struct ScenarioPlayer {
     std::vector<uint32_t> disabledTechnologies;
     std::vector<uint32_t> disabledUnits;
     std::vector<uint32_t> disabledBuildings;
+    std::vector<uint32_t> researchedTechnologies;
+    std::vector<uint32_t> researchedUnits;
+    std::vector<uint32_t> researchedBuildings;
     int32_t startingAge = -1;
     float populationLimit = 0;
 };

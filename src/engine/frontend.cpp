@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "frontend.h"
+#include "menu_framework.h"
 #include "ui_text.h"
 
 #include <algorithm>
@@ -28,12 +29,7 @@ void centeredText(
 void panel(
     Renderer &renderer, float x, float y,
     float w, float h) {
-    renderer.fillRect(x + 5, y + 7, w, h, 0, 0, 0, 120);
-    renderer.fillRect(x, y, w, h, 7, 17, 31, 246);
-    renderer.fillRect(x, y, w, 3, 202, 168, 74, 255);
-    renderer.fillRect(x, y + h - 2, w, 2, 72, 102, 132, 255);
-    renderer.fillRect(x, y, 2, h, 72, 102, 132, 255);
-    renderer.fillRect(x + w - 2, y, 2, h, 72, 102, 132, 255);
+    drawModernPanel(renderer, x, y, w, h);
 }
 
 void wrappedText(
@@ -527,8 +523,10 @@ FrontendAction Frontend::update(
             } else if (selection_ == 1) {
                 message_ = "MULTIPLAYER IS UNAVAILABLE IN THIS BUILD";
             } else if (selection_ == 2) {
-                message_ =
-                    "SCENARIO EDITOR ROUTE RESERVED - EDITOR NOT INSTALLED";
+                screen_ = FrontendScreen::ScenarioEditor;
+                selection_ = 0;
+                message_.clear();
+                return FrontendAction::OpenScenarioEditor;
             } else if (selection_ == 3) {
                 optionsReturnScreen_ = FrontendScreen::MainMenu;
                 screen_ = FrontendScreen::Options;
@@ -541,6 +539,8 @@ FrontendAction Frontend::update(
                     FrontendAction::Quit,
                     "EXIT GALACTIC BATTLEGROUNDS?");
             }
+            if (screen_ == FrontendScreen::ScenarioEditor)
+                return FrontendAction::None;
         }
         return FrontendAction::None;
     }
@@ -748,6 +748,44 @@ FrontendAction Frontend::update(
     }
 
     if (screen_ == FrontendScreen::Pause) {
+        if (playtestMatch_) {
+            constexpr size_t count = 7;
+            const size_t touched =
+                rowFromPointer(input, 132, 42, count);
+            if (touched < count) selection_ = touched;
+            if (input.menuUp) moveSelection(-1, count);
+            if (input.menuDown) moveSelection(1, count);
+            if (input.menuBack || input.pausePressed) {
+                screen_ = FrontendScreen::Gameplay;
+            } else if (input.menuActivate || touched < count) {
+                if (selection_ == 0) {
+                    screen_ = FrontendScreen::Gameplay;
+                } else if (selection_ == 1) {
+                    screen_ = FrontendScreen::Objectives;
+                    selection_ = 0;
+                } else if (selection_ == 2) {
+                    message_ = "SAVING PLAYTEST SNAPSHOT...";
+                    return FrontendAction::SaveMatch;
+                } else if (selection_ == 3) {
+                    screen_ = FrontendScreen::Loading;
+                    message_ = "RESTARTING PLAYTEST...";
+                    return FrontendAction::RestartMatch;
+                } else if (selection_ == 4) {
+                    optionsReturnScreen_ = FrontendScreen::Pause;
+                    screen_ = FrontendScreen::Options;
+                    selection_ = 0;
+                } else if (selection_ == 5) {
+                    beginConfirmation(
+                        FrontendAction::CompleteCampaignMission,
+                        "END THIS PLAYTEST?");
+                } else {
+                    screen_ = FrontendScreen::ScenarioEditor;
+                    selection_ = 0;
+                    return FrontendAction::ReturnToEditor;
+                }
+            }
+            return FrontendAction::None;
+        }
         const size_t count = campaignMatch_ ? 9 : 8;
         const float top = campaignMatch_ ? 101.0f : 120.0f;
         const float row = 39.0f;
@@ -893,6 +931,31 @@ FrontendAction Frontend::update(
     }
 
     if (screen_ == FrontendScreen::Outcome) {
+        if (playtestMatch_) {
+            constexpr size_t count = 3;
+            const size_t touched =
+                rowFromPointer(input, 286, 45, count);
+            if (touched < count) selection_ = touched;
+            if (input.menuUp) moveSelection(-1, count);
+            if (input.menuDown) moveSelection(1, count);
+            if (input.menuActivate || touched < count) {
+                if (selection_ == 0) {
+                    screen_ = FrontendScreen::Loading;
+                    message_ = "RESTARTING PLAYTEST...";
+                    return FrontendAction::RestartMatch;
+                }
+                if (selection_ == 1) {
+                    screen_ = FrontendScreen::ScenarioEditor;
+                    selection_ = 0;
+                    return FrontendAction::ReturnToEditor;
+                }
+                screen_ = FrontendScreen::MainMenu;
+                selection_ = 0;
+                playtestMatch_ = false;
+                return FrontendAction::ReturnToMainMenu;
+            }
+            return FrontendAction::None;
+        }
         const size_t count = campaignMatch_ ? 4 : 2;
         const size_t touched =
             rowFromPointer(input, 286, 45, count);
@@ -951,7 +1014,9 @@ void Frontend::loadingFinished(
         selection_ = 0;
         message_.clear();
     } else {
-        screen_ = campaignMatch_
+        screen_ = playtestMatch_
+                      ? FrontendScreen::ScenarioEditor
+                      : campaignMatch_
                       ? FrontendScreen::CampaignBriefing
                       : FrontendScreen::SinglePlayer;
         selection_ = 0;
@@ -973,10 +1038,12 @@ void Frontend::actionFinished(
                              ? "MATCH COULD NOT BE SAVED"
                              : error;
         if (success) {
-            continueAvailable_ = true;
-            continueKind_ =
-                campaignMatch_ ? MatchSaveKind::Campaign
-                               : MatchSaveKind::Skirmish;
+            if (!playtestMatch_) {
+                continueAvailable_ = true;
+                continueKind_ =
+                    campaignMatch_ ? MatchSaveKind::Campaign
+                                   : MatchSaveKind::Skirmish;
+            }
         }
         return;
     }
@@ -986,6 +1053,18 @@ void Frontend::actionFinished(
 void Frontend::showGameplay() {
     screen_ = FrontendScreen::Gameplay;
     selection_ = 0;
+}
+
+void Frontend::showEditor() {
+    screen_ = FrontendScreen::ScenarioEditor;
+    selection_ = 0;
+    message_.clear();
+}
+
+void Frontend::showMainMenu() {
+    screen_ = FrontendScreen::MainMenu;
+    selection_ = 0;
+    message_.clear();
 }
 
 void Frontend::render(
@@ -1067,7 +1146,7 @@ void Frontend::render(
             text(9201, "GALACTIC BATTLEGROUNDS"),
             {text(9202, "SINGLE PLAYER"),
              text(9203, "MULTIPLAYER") + " - UNAVAILABLE",
-             text(9206, "SCENARIO EDITOR") + " - RESERVED",
+             text(9206, "SCENARIO EDITOR"),
              text(9274, "OPTIONS"),
              text(9209, "CREDITS / DATA STATUS"),
              text(9207, "EXIT")});
@@ -1332,16 +1411,31 @@ void Frontend::render(
                 163, 190, 208);
         }
     } else if (screen_ == FrontendScreen::Pause) {
-        std::vector<std::string> entries{
+        std::vector<std::string> entries =
+            playtestMatch_
+                ? std::vector<std::string>{
+                      "RESUME TEST", "OBJECTIVES / STATUS",
+                      "SAVE PLAYTEST", "RESTART PLAYTEST",
+                      "OPTIONS", "END TEST",
+                      "RETURN TO EDITOR"}
+                : std::vector<std::string>{
             "RESUME", "OBJECTIVES / STATUS", "SAVE MATCH",
             "LOAD MATCH", "RESTART MATCH", "OPTIONS",
             "SURRENDER"};
-        if (campaignMatch_)
+        if (!playtestMatch_ && campaignMatch_)
             entries.push_back("RETURN TO CAMPAIGN");
-        entries.push_back("RETURN TO MAIN MENU");
+        if (!playtestMatch_)
+            entries.push_back("RETURN TO MAIN MENU");
         drawMenu(
-            campaignMatch_ ? "CAMPAIGN PAUSED" : "MATCH PAUSED",
-            entries, campaignMatch_ ? 101.0f : 120.0f, 39.0f);
+            playtestMatch_
+                ? "EDITOR PLAYTEST PAUSED"
+                : campaignMatch_ ? "CAMPAIGN PAUSED"
+                                 : "MATCH PAUSED",
+            entries,
+            playtestMatch_ ? 132.0f
+                           : campaignMatch_ ? 101.0f
+                                            : 120.0f,
+            playtestMatch_ ? 42.0f : 39.0f);
     } else if (screen_ == FrontendScreen::Objectives) {
         centeredText(
             renderer, "OBJECTIVES", 25, 2.5f,
@@ -1351,7 +1445,10 @@ void Frontend::render(
             selectedCampaignMission();
         wrappedText(
             renderer,
-            mission && !mission->objectives.empty()
+            playtestMatch_ &&
+                    !playtestObjectives_.empty()
+                ? playtestObjectives_
+                : mission && !mission->objectives.empty()
                 ? mission->objectives
                 : "Complete the active match victory conditions.",
             115, 145, 1.0f, 88, 12,
@@ -1401,7 +1498,7 @@ void Frontend::render(
                                             : "NOT INSTALLED"),
              "",
              "MULTIPLAYER: UNAVAILABLE",
-             "SCENARIO EDITOR: RESERVED FOR A LATER MILESTONE"},
+             "SCENARIO EDITOR: NATIVE / ENABLED"},
             145, 145, 1.03f, 196, 215, 229);
         centeredText(
             renderer, "X / O: CLOSE", 486, 0.95f,
@@ -1430,7 +1527,11 @@ void Frontend::render(
         }
     } else if (screen_ == FrontendScreen::Outcome) {
         std::vector<std::string> entries;
-        if (campaignMatch_) {
+        if (playtestMatch_) {
+            entries = {
+                "RESTART PLAYTEST", "RETURN TO EDITOR",
+                "RETURN TO MAIN MENU"};
+        } else if (campaignMatch_) {
             entries = {
                 outcome_ == 1 ? "CONTINUE TO NEXT MISSION"
                               : "RETRY MISSION",
@@ -1441,7 +1542,11 @@ void Frontend::render(
                 "RESTART MATCH", "RETURN TO MAIN MENU"};
         }
         drawMenu(
-            outcome_ == 1 ? "VICTORY" : "DEFEAT",
+            playtestMatch_
+                ? outcome_ == 1
+                      ? "PLAYTEST VICTORY"
+                      : "PLAYTEST ENDED"
+                : outcome_ == 1 ? "VICTORY" : "DEFEAT",
             entries, 286, 45);
     }
     if (!message_.empty() &&

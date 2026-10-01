@@ -21,6 +21,7 @@ enum class FrontendScreen : uint8_t {
     CampaignMissions,
     CampaignBriefing,
     SkirmishLobby,
+    ScenarioEditor,
     Loading,
     Gameplay,
     Pause,
@@ -35,10 +36,12 @@ enum class FrontendAction : uint8_t {
     None,
     StartSkirmish,
     StartCampaign,
+    OpenScenarioEditor,
     RestartMatch,
     SaveMatch,
     LoadMatch,
     ReturnToCampaignBrowser,
+    ReturnToEditor,
     ReturnToMainMenu,
     CompleteCampaignMission,
     Quit,
@@ -58,6 +61,8 @@ public:
         bool success,
         const std::string &error = std::string());
     void showGameplay();
+    void showEditor();
+    void showMainMenu();
     void actionFinished(
         FrontendAction action, bool success,
         const std::string &error = std::string());
@@ -85,9 +90,20 @@ public:
     }
     void setCampaignMatch(bool campaign) {
         campaignMatch_ = campaign;
+        if (campaign) playtestMatch_ = false;
     }
     bool campaignMatch() const {
         return campaignMatch_;
+    }
+    void setPlaytestMatch(bool playtest) {
+        playtestMatch_ = playtest;
+        if (playtest) campaignMatch_ = false;
+    }
+    bool playtestMatch() const {
+        return playtestMatch_;
+    }
+    void setPlaytestObjectives(std::string objectives) {
+        playtestObjectives_ = std::move(objectives);
     }
     size_t selectedCampaign() const {
         return campaignSelection_;
@@ -181,6 +197,8 @@ private:
     size_t dataMissions_ = 0;
     bool optionalMedia_ = false;
     bool campaignMatch_ = false;
+    bool playtestMatch_ = false;
+    std::string playtestObjectives_;
     bool continueAvailable_ = false;
     bool settingsChanged_ = false;
     bool profileChanged_ = false;

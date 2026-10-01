@@ -25,9 +25,12 @@ set(SWGB_CORE_SOURCES
     src/engine/assets.cpp
     src/engine/ai_script.cpp
     src/engine/campaign.cpp
+    src/engine/editor.cpp
+    src/engine/editor_document.cpp
     src/engine/frontend.cpp
     src/engine/game.cpp
     src/engine/game_save.cpp
+    src/engine/menu_framework.cpp
     src/engine/pathfinding.cpp
     src/engine/settings.cpp
     src/engine/skirmish.cpp

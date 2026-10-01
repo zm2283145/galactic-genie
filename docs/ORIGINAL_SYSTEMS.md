@@ -48,6 +48,7 @@ build and test on Vita.
 | Stock campaign catalog | six `XCAM*.CPX` archives, 43 SCX entries; localized IDs 35228-35445/36128-36438 | Verified and covered |
 | Campaign trigger/runtime conformance | all six XCAM archives; 43 SCX entries; 1,770 triggers, 1,752 conditions, and 5,854 effects | Every stock-used numeric condition/effect type supported; 79 bounded difficulty-relevant initialization/simulation runs covered |
 | Campaign progression and saves | campaign-menu strings, ordered CPX entries, original save-screen path `0x5286f0` | Native bounded profile and save-v6 continuation covered |
+| Scenario editor entry and storage | strings at `0x68e658`/`0x68e670`/`0x699e68`; `%s.scx`, `trigger_info.txt`, and `trigger_text.txt`; all 43 XCAM payloads | Native editor, lossless imported-source sidecars, validation, and playtest covered; modified SCX writing remains evidence-limited |
 
 ## Startup, frontend, and campaign contracts
 
@@ -157,6 +158,75 @@ Effect execution follows authored effect order; non-looping triggers fire once,
 looping triggers re-arm, delay uses accumulated fixed-step time, and explicit
 activation/deactivation updates the target trigger without invalidating the
 current ordered pass.
+
+### Scenario editor and SCX preservation contract
+
+The final editor audit used the installed GOG Clone Campaigns
+`battlegrounds_x1.exe` (2,813,952 bytes) and the original resources under
+`Game\Data`, `Game\Campaign`, and the three installed language DLLs. Addresses
+are preferred-base virtual addresses; file offsets are given where only string
+placement, not a code path, is established.
+
+| Evidence | Location |
+|---|---:|
+| `Scenario Editor` | `0x68e658`, `0x68e670`, `0x699e68` |
+| `Scenario Editor Open` | file offset `0x28e658` |
+| `Scenario Editor Screen` | file offset `0x28e670` |
+| `Scenario Editor Menu` | file offset `0x299e68` |
+| `Campaign Editor Screen` | file offset `0x290c44` |
+| `ScenarioEditorInfo` | file offset `0x291080` |
+
+The executable also names `Scenario Menu Dialog`, `Select Scenario Screen`,
+`Campaign Selection Screen`, `Campaign Game Screen`, `Saving campaign`,
+`%s.scx`, `trigger_info.txt`, and `trigger_text.txt`. Together with localized
+ID 9206 (`Scenario Builder`), this establishes an editor route, scenario
+selection/save naming, and trigger-support resources. It does **not** establish
+the complete original control geometry, mouse/keyboard behavior, or a
+byte-perfect SCX writer. The native editor therefore uses the repository's
+shared Vita-bounded panel/tab/tooltip framework instead of inventing an
+unverified pixel copy.
+
+The installed campaign directory contains no loose stock `.scx` files. Its 43
+SCX payloads are the 7/7/7/8/7/7 entries in `XCAM1`, `XCAM2`, `XCAM3`,
+`XCAM4`, `XCAM5`, and `XCAM8`. Those payloads establish the editable known
+model and trigger semantics recorded above: authored order, looping and
+activation state, player/resources/diplomacy/technology restrictions, objects,
+map/elevation, cameras, objectives/messages, embedded AI, and global victory.
+Unknown condition/effect forms are marked read-only in the editor. Their
+numeric fields, selected-object lists, and the complete source SCX remain in
+the native document rather than being discarded.
+
+Editable files use the native `.swscenario` format. It has an eight-byte
+magic, format/document versions, 32 MiB file/payload cap, 16 MiB original-SCX
+cap, bounded strings/collections/opaque records, FNV-1a payload checksum,
+strict truncation/trailing-data/version rejection, and temporary-file atomic
+replacement with rollback backup. Snapshots use the same validated encoding;
+undo/redo is capped at 32 entries and 24 MiB in the Vita editor. File names are
+sanitized for control characters, separators, trailing dots/spaces, Windows
+device names, and length. Title-specific documents and autosaves are accompanied
+by canonical `recent/last.swscenario` and `recovery/autosave.swscenario`
+snapshots so restart does not require knowing the previous title. Loading also
+accepts a valid rollback `.bak` after an interrupted replacement. Dirty
+replacement and existing-file overwrite remain explicit user decisions.
+
+SCX compatibility is deliberately asymmetric:
+
+- Import parses the evidenced 1.21 SCX structure and embeds the complete
+  original byte stream.
+- Native saves preserve known edits, opaque native records, and that immutable
+  source stream.
+- Export writes the original SCX bytes only when a semantic fingerprint proves
+  that no editable value changed. Generated or modified documents are refused
+  with an explicit instruction to keep the native sidecar.
+- No generated or modified file is labeled stock-compatible `.scx` without an
+  evidenced writer. This supersedes no part of the gameplay-save contract;
+  `.swscenario`, `.save`, and original `.scx` are distinct formats.
+
+Playtest converts a validated editor snapshot into the normal scenario runtime.
+It uses a separate playtest save, outcome state, and pause menu; restart rebuilds
+from the snapshot, and return clears simulation/audio/AI/fog/transient state
+before restoring the still-open editor document. Playtest outcomes never
+advance campaign progress or replace the normal skirmish continuation.
 
 SCX player payloads preserve embedded personality source/name/type, starting
 age, disabled technologies/units/buildings, resources, population, diplomacy,

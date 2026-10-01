@@ -11,6 +11,7 @@
 #   tools\deploy_vita.ps1 -TerrainSoundData # copies camera-relative terrain ambience
 #   tools\deploy_vita.ps1 -LanguageData  # copies localized interface strings
 #   tools\deploy_vita.ps1 -AiData        # copies the original .per AI personalities
+#   tools\deploy_vita.ps1 -ScenarioImport -ScenarioFile <file.scx> # stages an editor import
 #   tools\deploy_vita.ps1 -PullLog      # downloads ux0:data/swgb/swgb.log to build-vita\swgb.log
 param(
     [string]$Vita = "10.1.1.93",
@@ -22,6 +23,7 @@ param(
     [string]$MusicDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\MUSIC",
     [string]$TerrainSoundDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Sound\Terrain",
     [string]$AiDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\AI",
+    [string]$ScenarioFile = "",
     [int]$CampaignEntry = 2,
     [switch]$Vpk,
     [switch]$GameData,
@@ -34,6 +36,7 @@ param(
     [switch]$TerrainSoundData,
     [switch]$LanguageData,
     [switch]$AiData,
+    [switch]$ScenarioImport,
     [switch]$PullLog
 )
 $ErrorActionPreference = "Stop"
@@ -73,6 +76,11 @@ function Ftp-Get($remote, $local) {
 }
 
 Ftp-MkDir "ux0:/data/swgb"
+Ftp-MkDir "ux0:/data/swgb/Scenarios"
+Ftp-MkDir "ux0:/data/swgb/Scenarios/Import"
+Ftp-MkDir "ux0:/data/swgb/Scenarios/scenarios"
+Ftp-MkDir "ux0:/data/swgb/Scenarios/autosave"
+Ftp-MkDir "ux0:/data/swgb/Scenarios/recovery"
 if ($GameData) {
     Ftp-MkDir "ux0:/data/swgb/Data"
     $files = "genie_x1.dat", "GRAPHICS.DRS", "graphics_x1.drs", "TERRAIN.DRS", "terrain_x1.drs",
@@ -163,6 +171,21 @@ if ($AiData) {
         }
         Ftp-Put $file.FullName "ux0:/data/swgb/AI/$relative"
     }
+}
+if ($ScenarioImport) {
+    if (-not $ScenarioFile) {
+        throw "-ScenarioImport requires -ScenarioFile"
+    }
+    if (-not (Test-Path -LiteralPath $ScenarioFile -PathType Leaf)) {
+        throw "missing scenario file $ScenarioFile"
+    }
+    $extension = [IO.Path]::GetExtension($ScenarioFile).ToLowerInvariant()
+    if ($extension -ne ".scx") {
+        throw "Scenario Editor import staging accepts an original .scx file"
+    }
+    Ftp-MkDir "ux0:/data/swgb/Scenarios"
+    Ftp-MkDir "ux0:/data/swgb/Scenarios/Import"
+    Ftp-Put $ScenarioFile "ux0:/data/swgb/Scenarios/Import/import.scx"
 }
 if ($Vpk) { Ftp-Put (Join-Path $repo "build-vita\swgb.vpk") "ux0:/data/swgb/swgb.vpk" }
 if ($PullLog) {

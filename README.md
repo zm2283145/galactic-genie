@@ -4,7 +4,7 @@ A from-scratch, portable reimplementation of the Genie engine, as used by *Star 
 
 It is written clean-room style: file formats come from public documentation (openage, genieutils). Game behaviour is to be matched by observation, and by using Ghidra only to answer "how does X work" questions. Decompiled code is never copied into the tree.
 
-## Status: native skirmish and stock-campaign runtime
+## Status: native skirmish, campaigns, and scenario editor
 
 | Area | State |
 |---|---|
@@ -24,6 +24,7 @@ It is written clean-room style: file formats come from public documentation (ope
 | Vita: renderer, camera controls, original cursors, unit selection/status markers, formation movement, and fog-aware navigable minimap | done |
 | Vita frontend: startup validation, title/main/campaign menus, shared pause/options/objectives, saves, and outcomes | done |
 | Deterministic random maps: 2-8 local-human/AI slots, ten stock-named biome/topology families, preview, validated resources/coasts, and compact-island regression | done |
+| Native scenario editor: templates, map/object/player/trigger tools, validation, atomic recovery, honest SCX import/export, and isolated playtest | done |
 | PC `swgbtool`: data inspection, CPX/SCX listing, and procedural/scenario PNG rendering | done |
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for what comes next.
@@ -80,7 +81,7 @@ set it Closed, Human, or Computer, then choose its unique color, civilization, A
 difficulty, team, and allied-victory participation. X on the seed row advances to a safely bounded
 32-bit randomized seed; left/right provides exact seed adjustment. The cached minimap preview and
 hash update immediately when the map, size, player count, or seed changes. The main
-menu exposes Single Player, visibly unavailable Multiplayer, a reserved Scenario Editor route,
+menu exposes Single Player, visibly unavailable Multiplayer, the native Scenario Editor,
 Options, Credits/Data Status, and Exit. Campaign browsing uses the original localized language
 tables and discovered XCAM contents rather than a hardcoded mission. L toggles sequential versus
 development mission access in the mission browser.
@@ -150,6 +151,49 @@ the version-5 shield regeneration/drain timer phases and the campaign trigger, a
 instruction, scripted-name, freeze, and trigger-attack state added by version 4. Versions 1-5
 retain bounded migration paths; an old unsupported map size is rejected with a clear setup error
 rather than allocated on Vita.
+
+### Scenario editor
+
+Choose **Scenario Editor** from the main menu. The hub creates deterministic
+Blank Land, Islands, Skirmish Base, or Objective/Trigger Tutorial documents,
+or opens the recent document, autosave recovery, or
+`ux0:data/swgb/Scenarios/Import/import.scx`. Templates support 32-160 tile maps,
+1-8 players, and an exact seed. They contain no bundled original scenario.
+
+The workspace uses L/R to switch Map, Objects, Players, Triggers, Scenario,
+Validate, and Files. D-pad/left stick changes the selected tool or property;
+X/touch applies it; O returns/cancels; Triangle changes the page-specific
+secondary operation. Map tools include terrain, elevation, water, cliff,
+foundation, flood fill, replace-all, rectangular areas, player starts, and the
+camera marker, with bounded round/square brushes, pan/zoom, and a compact
+top-down map. Objects use searchable localized DAT names, reject hidden or
+malformed IDs, out-of-map footprints, and overlap, and expose owner/selection/
+delete workflows. Player and scenario panels edit the stored civilization,
+color, team, directional diplomacy matrix, resources, population, starting
+age, AI difficulty, allied victory, localized DAT-backed technology/unit
+availability and researched state, camera, objective text state, and victory settings. The trigger panel
+keeps authored order and support state; imported unsupported forms are
+read-only and preserved rather than dropped. The Validate page classifies
+errors versus warnings and jumps to map/object/player/trigger targets.
+
+START validates, autosaves, and enters an isolated playtest through the normal
+scenario runtime. Its pause menu can save a separate playtest snapshot,
+restart from the editor snapshot, or return to the editor. Campaign unlocks and
+the normal skirmish continuation are never changed. Repeated transitions clear
+simulation, audio, AI, fog, selection, and transient save state.
+
+User documents live under `ux0:data/swgb/Scenarios/scenarios/`; autosaves under
+`ux0:data/swgb/Scenarios/autosave/`; canonical restart-safe recent/recovery
+copies live under `recent/last.swscenario` and `recovery/autosave.swscenario`;
+import and unchanged-source export use
+`ux0:data/swgb/Scenarios/Import/`. Native `.swscenario` files are bounded to
+32 MiB, versioned, checksummed, filename-sanitized, and atomically replaced.
+Replacing a dirty document or overwriting an existing user file requires an
+explicit save/discard/overwrite choice.
+An imported SCX's complete original bytes are retained in the native sidecar.
+SCX export is intentionally refused after any semantic edit, and for generated
+documents, because available evidence does not support a stock-compatible SCX
+writer. Only an unchanged import can be exported byte-for-byte.
 
 Combat includes pursuit with collision-aware A* pathfinding, attack animations and
 acknowledgements, original projectile graphics and weapon sounds, researched accuracy with

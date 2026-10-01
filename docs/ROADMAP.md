@@ -210,7 +210,7 @@ The goal is a playable SWGB: Clone Campaigns reimplementation on the PS Vita, ru
   The startup/title/main/campaign/pause/objectives/options/data-status/confirmation/outcome surfaces
   now share a Vita-bounded modern Star Wars visual and navigation framework with localized original
   labels where available. Multiplayer remains visibly unavailable and the Scenario Editor route is
-  reserved without entering a false flow. Campaign saves carry their source archive/entry and the
+  now enters the native editor. Campaign saves carry their source archive/entry and the
   campaign profile persists completion/unlocks independently. Further in-game HUD art fidelity and
   keyboard mappings for control groups 5-10 remain.
 - Audio: selection, move, and attack acknowledgements plus camera-relative weapon-fire, impact, and
@@ -270,6 +270,37 @@ The goal is a playable SWGB: Clone Campaigns reimplementation on the PS Vita, ru
 - Original AI `hold-holocrons` and `enemy-captured-holocrons` facts now read authoritative
   carried/secured Holocron state. Native AI carriers only acquire currently visible Holocrons,
   return them to friendly Temples, and never query hidden positions.
+
+## Milestone 6: native scenario editor (done)
+- The localized Scenario Builder route is enabled through the reusable modern
+  menu framework. The Vita editor provides a controller/touch hub for four
+  native templates, recent/recovery/import routes, explicit storage paths,
+  dirty state, tabbed map/object/player/trigger/scenario/validation/file
+  panels, tooltips, and confirmations. Multiplayer remains unavailable.
+- A versioned editable model covers terrain/elevation, 1-8 players,
+  resources/diplomacy/teams/AI/technology state, DAT objects and properties,
+  areas, ordered triggers/conditions/effects, messages/objectives, cameras,
+  victory, AI metadata, editor metadata, and opaque records. Imported SCX
+  source bytes and unsupported trigger forms survive native round trips.
+- Blank Land, Islands, Skirmish Base, and Objective/Trigger Tutorial templates
+  are deterministic at 32-160 tiles and do not bundle original scenarios.
+  Top-down Vita map editing includes bounded terrain/elevation/water/cliff/
+  foundation brushes, round/square sizes, fill/replace, areas, player/camera
+  markers, pan/zoom, object placement/selection/deletion, DAT footprint and ID
+  checks, player setup, trigger ordering/duplication, and scenario victory.
+- `.swscenario` storage is bounded, versioned, checksummed, atomically
+  replaced, recoverable, and filename-sanitized. Modified/generated documents
+  cannot masquerade as stock SCX; byte-exact export is available only for an
+  unchanged imported source. Validation reports error/warning focus targets
+  for maps, IDs, footprints, players/colors/diplomacy, trigger references,
+  AI/technology/victory/export constraints, and Vita memory limits.
+- START validates and snapshots a document into the normal scenario runtime.
+  Playtest has distinct pause/save/restart/outcome routes and returns to the
+  editor without losing edits or affecting campaign/skirmish progression.
+  `test-editor` covers templates through eight players/160 tiles, native and
+  imported-source round trips, opaque preservation, undo/redo, brushes,
+  placement, export refusal, autosave/storage failures, corruption, validation
+  focus, playtest cleanup, and 960x544 layout rendering.
 
 ## Vita performance notes
 - The main memory cost is texture atlases. Terrain and sprite working sets are capped at 64 MB,
