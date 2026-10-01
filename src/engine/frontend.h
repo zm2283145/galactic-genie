@@ -139,6 +139,7 @@ public:
 private:
     void moveSelection(int direction, size_t count);
     void adjustLobbyValue(int direction);
+    void refreshLobbyPreview();
     void adjustOptionValue(int direction);
     void beginConfirmation(
         FrontendAction action,
@@ -155,7 +156,11 @@ private:
 
     FrontendScreen screen_ = FrontendScreen::Title;
     SkirmishSettings settings_;
+    SkirmishPreview lobbyPreview_ =
+        generateSkirmishPreview(settings_);
     size_t selection_ = 0;
+    size_t lobbyPage_ = 0;
+    size_t lobbySlot_ = 0;
     size_t campaignSelection_ = 0;
     size_t missionSelection_ = 0;
     int outcome_ = -1;

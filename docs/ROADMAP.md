@@ -250,14 +250,20 @@ The goal is a playable SWGB: Clone Campaigns reimplementation on the PS Vita, ru
   All completed garrison-capable non-transport buildings evacuate and reject new occupants at or
   below 20 percent health, then unlock after repair above that threshold.
 - Generated matches now expose original Computer Expanded and Computer Classic personalities,
-  five difficulty defines, both civilizations, diplomacy/team state, deterministic seeds,
-  population and resource presets, and Standard, Conquest, Time Limit, Score, or Command Center
+  five difficulty defines, all eight civilizations, deterministic 2-8-slot local-human/AI setup,
+  unique colors, names, free-for-all/fixed/mixed teams, allied victory, locked/unlocked diplomacy,
+  deterministic seeds with live minimap preview, population/resource/Tech Level/reveal/cheat/speed
+  presets, and Standard, Conquest, Time Limit, Score, or Command Center
   victory. Standard combines conquest with controlled Monument and all-Holocron countdowns;
   control loss resets the countdown, mutual allies share team evaluation, and ties resolve by the
-  lowest player number. Grasslands,
-  Archipelago, and the compact two-island regression map are selectable. Starts have symmetric
-  DAT resource patches and island maps retain DAT-valid Shipyard shorelines. Repeated matches
-  reset simulation, AI, trigger, fog, queue, outcome, input, and audio state.
+  lowest player number. Savannah, Forest, Desert, Tundra, Swamp, Rivers, Shoreline, Sea, Land
+  Mass, and the compact two-island regression map are selectable at 64/96/128/160 Vita-safe
+  presets. Starts have symmetric reachable DAT resource patches, water maps retain fish and
+  DAT-valid Shipyard shorelines, dense starts are rejected before allocation, and malformed
+  generations fail explicitly. A many-seed/player/style property matrix checks determinism,
+  distinct topology, resources, footprints, simulation invariants, team outcomes, v6 save/load,
+  and measured 160-tile allocation. Repeated matches reset simulation, AI, trigger, fog, queue,
+  outcome, input, and audio state.
 - Generated matches now enforce conquest elimination, AI recognition of defeated players, and
   collapse/outmatched surrender. Local victory and defeat display full-screen outcome panels and
   play the original `WON1.MP3` or `lost.mp3` stream.

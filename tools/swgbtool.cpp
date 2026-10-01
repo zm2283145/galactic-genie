@@ -65,6 +65,7 @@ static int usage() {
             "  swgbtool ai-script <entry.per>\n"
             "  swgbtool test-ai <DataDir> <AiDir>\n"
             "  swgbtool test-skirmish <DataDir>\n"
+            "  swgbtool test-maps-modes <DataDir>\n"
             "  swgbtool test-interface <DataDir>\n"
             "  swgbtool test-core-gameplay <DataDir>\n"
             "  swgbtool test-major-mechanics <DataDir>\n"
@@ -7351,6 +7352,19 @@ static int cmdTestSkirmish(const char *dataDir) {
     settings.difficulty = 4;
     settings.personality = AiPersonality::Classic;
     settings.allied = true;
+    settings.slots[0].civilization = 7;
+    settings.slots[0].team = 1;
+    settings.slots[0].alliedVictory = true;
+    settings.slots[1].civilization = 5;
+    settings.slots[1].difficulty = 4;
+    settings.slots[1].personality =
+        AiPersonality::Classic;
+    settings.slots[1].team = 1;
+    settings.slots[1].alliedVictory = true;
+    settings.slots[2].type =
+        SkirmishSlotType::Computer;
+    settings.slots[2].civilization = 3;
+    settings.slots[2].team = 2;
     settings.mapStyle = SkirmishMapStyle::Grasslands;
     settings.startingResources = 1000;
     settings.populationCap = 150;
@@ -7364,6 +7378,7 @@ static int cmdTestSkirmish(const char *dataDir) {
     const bool settingsApplied =
         game.civilizationForPlayerForTesting(1) == 7 &&
         game.civilizationForPlayerForTesting(2) == 5 &&
+        game.activePlayerCountForTesting() == 3 &&
         game.difficultyForTesting() == 4 &&
         game.populationLimitForTesting(1) == 150.0f &&
         game.populationLimitForTesting(2) == 150.0f &&
@@ -7388,8 +7403,16 @@ static int cmdTestSkirmish(const char *dataDir) {
                 (int)game.populationLimitForTesting(1)));
 
     settings.allied = false;
+    settings.slots[0].team = 1;
+    settings.slots[0].alliedVictory = false;
+    settings.slots[1].team = 2;
+    settings.slots[1].alliedVictory = false;
+    settings.slots[2].type =
+        SkirmishSlotType::Closed;
     settings.playerCivilization = 3;
     settings.computerCivilization = 3;
+    settings.slots[0].civilization = 3;
+    settings.slots[1].civilization = 3;
     settings.mapStyle = SkirmishMapStyle::Grasslands;
     game.initSkirmish(settings, &err);
     const uint64_t grassHash = game.mapHashForTesting();
@@ -7506,7 +7529,7 @@ static int cmdTestSkirmish(const char *dataDir) {
     frontend.update(input, -1);
     input = {};
     input.menuDown = true;
-    for (int row = 0; row < 11; ++row)
+    for (int row = 0; row < 10; ++row)
         frontend.update(input, -1);
     input = {};
     input.menuActivate = true;
@@ -7557,6 +7580,467 @@ static int cmdTestSkirmish(const char *dataDir) {
             std::to_string((int)outcomeRestart) +
             "/" +
             std::to_string((int)outcomeMenu));
+
+    return failures ? 1 : 0;
+}
+
+static int cmdTestMapsModes(const char *dataDir) {
+    std::string err;
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    int failures = 0;
+    auto report = [&](const char *name, bool ok,
+                      const std::string &detail) {
+        printf(
+            "%s %s %s\n",
+            ok ? "PASS" : "FAIL",
+            name, detail.c_str());
+        if (!ok) ++failures;
+    };
+    const auto configure =
+        [](SkirmishSettings &settings,
+           int players, int teams) {
+            for (int slot = 0;
+                 slot < kMaxSkirmishSlots;
+                 ++slot) {
+                SkirmishSlot &player =
+                    settings.slots[(size_t)slot];
+                player.type =
+                    slot >= players
+                        ? SkirmishSlotType::Closed
+                    : slot == 0
+                        ? SkirmishSlotType::Human
+                        : SkirmishSlotType::Computer;
+                player.name =
+                    slot == 0
+                        ? "Local Commander"
+                        : "Computer " +
+                              std::to_string(
+                                  slot + 1);
+                player.color = (uint8_t)slot;
+                player.civilization =
+                    (uint8_t)(1 + slot % 8);
+                player.difficulty =
+                    (uint8_t)(slot % 5);
+                player.personality =
+                    slot & 1
+                        ? AiPersonality::Classic
+                        : AiPersonality::Expanded;
+                player.team =
+                    teams <= 0
+                        ? 0
+                        : (uint8_t)(
+                              1 +
+                              slot %
+                                  std::max(
+                                      1, teams));
+                player.alliedVictory =
+                    teams > 0;
+            }
+        };
+
+    SkirmishSettings validation;
+    validation.mapSize = 160;
+    configure(validation, 8, 4);
+    std::string validationError;
+    const bool eightValid =
+        validateSkirmishSettings(
+            validation, &validationError);
+    validation.slots[7].color =
+        validation.slots[6].color;
+    const bool duplicateRejected =
+        !validateSkirmishSettings(
+            validation, &validationError) &&
+        validationError.find("unique") !=
+            std::string::npos;
+    validation.slots[7].color = 7;
+    validation.slots[0].type =
+        SkirmishSlotType::Computer;
+    const bool noHumanRejected =
+        !validateSkirmishSettings(
+            validation, &validationError) &&
+        validationError.find("human") !=
+            std::string::npos;
+    validation.slots[0].type =
+        SkirmishSlotType::Human;
+    validation.slots[1].type =
+        SkirmishSlotType::Human;
+    const bool multipleHumansRejected =
+        !validateSkirmishSettings(
+            validation, &validationError) &&
+        validationError.find("exactly one") !=
+            std::string::npos;
+    validation.slots[1].type =
+        SkirmishSlotType::Computer;
+    validation.mapSize = 64;
+    const bool unsafeDensityRejected =
+        !validateSkirmishSettings(
+            validation, &validationError) &&
+        validationError.find("larger") !=
+            std::string::npos;
+    report(
+        "lobby-validation-2-8",
+        eightValid && duplicateRejected &&
+            noHumanRejected &&
+            multipleHumansRejected &&
+            unsafeDensityRejected,
+        validationError);
+
+    static constexpr SkirmishMapStyle styles[] = {
+        SkirmishMapStyle::Grasslands,
+        SkirmishMapStyle::Forest,
+        SkirmishMapStyle::Desert,
+        SkirmishMapStyle::Ice,
+        SkirmishMapStyle::Swamp,
+        SkirmishMapStyle::InlandWater,
+        SkirmishMapStyle::Coastal,
+        SkirmishMapStyle::Archipelago,
+        SkirmishMapStyle::LandMass,
+        SkirmishMapStyle::CompactIslands,
+    };
+    bool previews = true;
+    std::set<uint64_t> previewHashes;
+    for (SkirmishMapStyle style : styles) {
+        SkirmishSettings settings;
+        settings.mapSize = 128;
+        configure(settings, 6, 3);
+        settings.mapStyle = style;
+        settings.seed = 0x4d415000u +
+                        (uint32_t)style;
+        const SkirmishPreview first =
+            generateSkirmishPreview(settings);
+        const SkirmishPreview same =
+            generateSkirmishPreview(settings);
+        settings.seed++;
+        const SkirmishPreview varied =
+            generateSkirmishPreview(settings);
+        previews =
+            previews &&
+            first.error.empty() &&
+            first.hash == same.hash &&
+            first.hash != varied.hash;
+        previewHashes.insert(first.hash);
+    }
+    report(
+        "preview-determinism-families",
+        previews &&
+            previewHashes.size() ==
+                std::size(styles),
+        "distinct=" +
+            std::to_string(
+                previewHashes.size()));
+
+    bool generated = true;
+    int generatedCases = 0;
+    size_t maximumAllocation = 0;
+    std::set<uint64_t> terrainHashes;
+    for (size_t styleIndex = 0;
+         styleIndex < std::size(styles);
+         ++styleIndex) {
+        for (int pass = 0; pass < 2; ++pass) {
+            const int players =
+                2 + (int)(
+                        styleIndex * 2 +
+                        pass * 3) %
+                        7;
+            SkirmishSettings settings;
+            settings.mapSize =
+                players > 6
+                    ? 128
+                : players > 4
+                    ? 96
+                    : 64;
+            configure(
+                settings, players,
+                pass ? 0
+                     : std::max(
+                           2, players / 2));
+            settings.mapStyle =
+                styles[styleIndex];
+            settings.seed =
+                0x51000000u +
+                (uint32_t)(styleIndex * 17 +
+                           pass);
+            settings.startingResources = 1000;
+            settings.populationCap = 100;
+            Game game(assets);
+            const bool initialized =
+                game.initSkirmish(
+                    settings, &err);
+            const bool initialInvariant =
+                initialized &&
+                game.invariantsForTesting();
+            bool fair =
+                initialized &&
+                game.activePlayerCountForTesting() ==
+                    players &&
+                game.localPlayerForTesting() == 1 &&
+                initialInvariant;
+            if (initialized) {
+                maximumAllocation =
+                    std::max(
+                        maximumAllocation,
+                        game
+                            .allocationBytesForTesting());
+                terrainHashes.insert(
+                    game.mapHashForTesting());
+                for (int player = 1;
+                     player <= players;
+                     ++player) {
+                    const auto base =
+                        game
+                            .playerBasePositionForTesting(
+                                player);
+                    fair =
+                        fair && base[0] >= 0.0f;
+                    for (int resource = 0;
+                         resource < 4;
+                         ++resource)
+                        fair =
+                            fair &&
+                            game
+                                    .reachableStartingResourceCountForTesting(
+                                        player,
+                                        resource) >
+                                0;
+                }
+                for (int frame = 0;
+                     frame < 90; ++frame)
+                    game.update(
+                        1.0f / 30.0f, {});
+                fair =
+                    fair &&
+                    game.invariantsForTesting();
+            }
+            generated = generated && fair;
+            if (!fair)
+                for (int player = 1;
+                     player <= players;
+                     ++player)
+                    printf(
+                        "DETAIL player=%d base=%.1f,%.1f resources=%d/%d/%d/%d\n",
+                        player,
+                        game.playerBasePositionForTesting(
+                            player)[0],
+                        game.playerBasePositionForTesting(
+                            player)[1],
+                        game.reachableStartingResourceCountForTesting(
+                            player, 0),
+                        game.reachableStartingResourceCountForTesting(
+                            player, 1),
+                        game.reachableStartingResourceCountForTesting(
+                            player, 2),
+                        game.reachableStartingResourceCountForTesting(
+                            player, 3));
+            if (!fair)
+                printf(
+                    "DETAIL generation style=%s players=%d active=%d initial-invariant=%d final-invariant=%d error=%s\n",
+                    mapStyleName(
+                        settings.mapStyle),
+                    players,
+                    game.activePlayerCountForTesting(),
+                    initialInvariant,
+                    game.invariantsForTesting(),
+                    err.c_str());
+            ++generatedCases;
+        }
+    }
+    SkirmishSettings largestSettings;
+    largestSettings.mapSize = 160;
+    configure(largestSettings, 8, 4);
+    largestSettings.mapStyle =
+        SkirmishMapStyle::Forest;
+    largestSettings.seed = 0x56495441u;
+    largestSettings.startingResources = 1000;
+    Game largest(assets);
+    const bool largestValid =
+        largest.initSkirmish(
+            largestSettings, &err) &&
+        largest.activePlayerCountForTesting() ==
+            8 &&
+        largest.invariantsForTesting();
+    if (largestValid) {
+        maximumAllocation =
+            std::max(
+                maximumAllocation,
+                largest
+                    .allocationBytesForTesting());
+        terrainHashes.insert(
+            largest.mapHashForTesting());
+    }
+    generated = generated && largestValid;
+    ++generatedCases;
+    report(
+        "generation-property-matrix",
+        generated &&
+            terrainHashes.size() >= 16,
+        "cases=" +
+            std::to_string(generatedCases) +
+            " hashes=" +
+            std::to_string(
+                terrainHashes.size()) +
+            " max-bytes=" +
+            std::to_string(
+                maximumAllocation));
+    report(
+        "vita-map-allocation-cap",
+        maximumAllocation > 0 &&
+            maximumAllocation <
+                64u * 1024u * 1024u,
+        "measured-largest=" +
+            std::to_string(
+                maximumAllocation) +
+            " cap=67108864");
+
+    SkirmishSettings teams;
+    teams.mapSize = 96;
+    configure(teams, 4, 2);
+    teams.slots[0].team = 1;
+    teams.slots[1].team = 1;
+    teams.slots[2].team = 2;
+    teams.slots[3].team = 2;
+    for (int slot = 0; slot < 4; ++slot)
+        teams.slots[(size_t)slot]
+            .alliedVictory = true;
+    teams.reveal = SkirmishReveal::Explored;
+    teams.gameSpeed = SkirmishGameSpeed::Fast;
+    teams.startingTechLevel = 2;
+    teams.endingTechLevel = 3;
+    teams.victory = SkirmishVictory::Conquest;
+    Game teamGame(assets);
+    bool teamVictory =
+        teamGame.initSkirmish(teams, &err);
+    if (teamVictory) {
+        const char *lockedStanceScript =
+            "(defrule\n"
+            "  (true)\n"
+            "=>\n"
+            "  (set-stance 1 3)\n"
+            "  (disable-self))\n";
+        const bool stanceLoaded =
+            teamGame.loadAiSourceForTesting(
+                2, "locked-stance.per",
+                lockedStanceScript, {}, &err);
+        for (int frame = 0;
+             stanceLoaded && frame < 90; ++frame)
+            teamGame.update(
+                1.0f / 30.0f, {});
+        teamVictory =
+            stanceLoaded &&
+            teamGame.diplomacyForTesting(
+                2, 1) == 0 &&
+            teamGame.difficultyForPlayer(2) ==
+                teams.slots[1].difficulty &&
+            teamGame.difficultyForPlayer(3) ==
+                teams.slots[2].difficulty &&
+            teamGame.difficultyForPlayer(4) ==
+                teams.slots[3].difficulty;
+        teamGame.eliminatePlayerForTesting(3);
+        teamGame.eliminatePlayerForTesting(4);
+        for (int frame = 0;
+             frame < 120; ++frame)
+            teamGame.update(
+                1.0f / 30.0f, {});
+        teamVictory =
+            teamVictory &&
+            teamGame.victoryStateForTesting() == 1 &&
+            teamGame.exploredTileCountForTesting(
+                1) ==
+                (size_t)teams.mapSize *
+                    teams.mapSize &&
+            teamGame.aiTechLevelForTesting(1) == 2;
+    }
+    report(
+        "fixed-team-allied-victory",
+        teamVictory, err);
+
+    teams.teamsLocked = false;
+    Game brokenAlliance(assets);
+    bool allyBreak =
+        brokenAlliance.initSkirmish(
+            teams, &err);
+    if (allyBreak) {
+        brokenAlliance.setDiplomacyForTesting(
+            1, 2, 3);
+        brokenAlliance.setDiplomacyForTesting(
+            2, 1, 3);
+        brokenAlliance
+            .eliminatePlayerForTesting(3);
+        brokenAlliance
+            .eliminatePlayerForTesting(4);
+        for (int frame = 0;
+             frame < 120; ++frame)
+            brokenAlliance.update(
+                1.0f / 30.0f, {});
+        allyBreak =
+            brokenAlliance
+                    .victoryStateForTesting() ==
+                -1;
+        brokenAlliance
+            .eliminatePlayerForTesting(2);
+        for (int frame = 0;
+             frame < 120; ++frame)
+            brokenAlliance.update(
+                1.0f / 30.0f, {});
+        allyBreak =
+            allyBreak &&
+            brokenAlliance
+                    .victoryStateForTesting() ==
+                1;
+    }
+    report(
+        "unlocked-team-ally-break",
+        allyBreak, err);
+
+    const char *savePath =
+        "test-maps-modes.sav";
+    std::remove(savePath);
+    teams.seed = 0x53415636u;
+    teams.mapStyle =
+        SkirmishMapStyle::Coastal;
+    teams.victory = SkirmishVictory::Score;
+    teams.scoreLimit = 5500;
+    teams.cheatsEnabled = true;
+    Game saved(assets);
+    const bool initialized =
+        saved.initSkirmish(teams, &err);
+    const uint64_t savedHash =
+        saved.mapHashForTesting();
+    const bool written =
+        initialized &&
+        saved.saveMatch(savePath, &err);
+    MatchSaveMetadata metadata;
+    const bool probed =
+        written &&
+        Game::readSaveMetadata(
+            savePath, metadata, &err);
+    Game restored(assets);
+    const bool restoredInit =
+        probed &&
+        restored.initSkirmish(
+            metadata.skirmish, &err);
+    const bool loaded =
+        restoredInit &&
+        restored.loadMatch(
+            savePath, &err);
+    std::remove(savePath);
+    const bool saveRoundTrip =
+        loaded &&
+        metadata.skirmish.slots[3].type ==
+            SkirmishSlotType::Computer &&
+        metadata.skirmish.slots[3].team == 2 &&
+        metadata.skirmish.reveal ==
+            SkirmishReveal::Explored &&
+        metadata.skirmish.scoreLimit == 5500 &&
+        restored.mapHashForTesting() ==
+            savedHash;
+    report(
+        "save-v6-settings-roundtrip",
+        saveRoundTrip, err);
 
     return failures ? 1 : 0;
 }
@@ -8546,29 +9030,42 @@ static int cmdTestCoreGameplay(
                 1000;
             settings.populationCap = 75;
             Game game(assets);
-            soak =
-                soak &&
+            bool mapOk =
                 game.initSkirmish(
                     settings, &err);
+            if (!mapOk)
+                printf(
+                    "DETAIL soak style=%s error=%s\n",
+                    mapStyleName(
+                        settings.mapStyle),
+                    err.c_str());
             const char *savePath =
                 "swgb-core-soak.tmp";
             std::remove(savePath);
             for (int frame = 0;
-                 frame < 600 && soak;
+                 frame < 600 && mapOk;
                  ++frame) {
                 game.update(0.2f, {});
                 if (frame == 299)
-                    soak =
+                    mapOk =
                         game.saveMatch(
                             savePath, &err) &&
                         game.loadMatch(
                             savePath, &err);
-                soak =
-                    soak &&
+                mapOk =
+                    mapOk &&
                     game.invariantsForTesting();
             }
             std::remove(savePath);
-            if (soak)
+            if (!mapOk)
+                printf(
+                    "DETAIL soak runtime style=%s invariant=%d error=%s\n",
+                    mapStyleName(
+                        settings.mapStyle),
+                    game.invariantsForTesting(),
+                    err.c_str());
+            soak = soak && mapOk;
+            if (mapOk)
                 completed++;
         }
         report(
@@ -10768,6 +11265,8 @@ int main(int argc, char **argv) {
             argv[2], argv[3]);
     if (!strcmp(cmd, "test-skirmish"))
         return cmdTestSkirmish(argv[2]);
+    if (!strcmp(cmd, "test-maps-modes"))
+        return cmdTestMapsModes(argv[2]);
     if (!strcmp(cmd, "test-interface"))
         return cmdTestInterface(argv[2]);
     if (!strcmp(cmd, "test-core-gameplay"))

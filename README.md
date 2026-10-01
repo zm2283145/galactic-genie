@@ -23,7 +23,7 @@ It is written clean-room style: file formats come from public documentation (ope
 | Fishing/naval economy: Utility Trawler gathering, Aqua Harvesters, naval construction/repair, island resources, and AI use | done |
 | Vita: renderer, camera controls, original cursors, unit selection/status markers, formation movement, and fog-aware navigable minimap | done |
 | Vita frontend: startup validation, title/main/campaign menus, shared pause/options/objectives, saves, and outcomes | done |
-| Deterministic random maps: grasslands, archipelago, and compact two-island regression layout | done |
+| Deterministic random maps: 2-8 local-human/AI slots, ten stock-named biome/topology families, preview, validated resources/coasts, and compact-island regression | done |
 | PC `swgbtool`: data inspection, CPX/SCX listing, and procedural/scenario PNG rendering | done |
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for what comes next.
@@ -74,7 +74,12 @@ cmake -B build-pc && cmake --build build-pc
 7. The app writes a log to `ux0:data/swgb/swgb.log`. `tools\deploy_vita.ps1 -PullLog` fetches it.
 
 Frontend controls: d-pad or left-stick up/down selects an entry, left/right changes difficulty or
-a lobby value, X activates, and O returns. Touching an entry selects and activates it. The main
+a lobby value, X activates, and O returns. Touching an entry selects and activates it. In the
+skirmish lobby, L/R switches between the player-slot and match-settings pages. Select a slot to
+set it Closed, Human, or Computer, then choose its unique color, civilization, AI personality and
+difficulty, team, and allied-victory participation. X on the seed row advances to a safely bounded
+32-bit randomized seed; left/right provides exact seed adjustment. The cached minimap preview and
+hash update immediately when the map, size, player count, or seed changes. The main
 menu exposes Single Player, visibly unavailable Multiplayer, a reserved Scenario Editor route,
 Options, Credits/Data Status, and Exit. Campaign browsing uses the original localized language
 tables and discovered XCAM contents rather than a hardcoded mission. L toggles sequential versus
@@ -116,7 +121,18 @@ Holocrons are not exposed. Each secured Holocron generates the civilization's DA
 rate. Vita fog presentation is a cached screen-space overlay rather than per-row rectangle fan-out,
 keeping its render cost to one draw while preserving the existing visibility state.
 
-The skirmish lobby offers the original **Standard**, **Conquest**, **Time Limit**, and **Score**
+The skirmish lobby supports 2-8 local simulation participants (exactly one local Human and at least one
+hostile Computer), unique colors, free-for-all or fixed/mixed teams, and per-AI difficulty and
+Classic/Expanded personality. It offers 64, 96, 128, and 160 tile Vita-supported presets; 160 is
+the measured allocation cap exposed by the UI, while the old 48-tile size remains internal for
+regression saves/tests. The selectable stock-named families are **Savannah**, **Forest**,
+**Desert**, **Tundra**, **Swamp**, **Rivers**, **Shoreline**, **Sea**, and **Land Mass**, plus
+the native **Compact Two Islands** regression layout. These are native deterministic generators,
+not copies of the unavailable stock RMS scripts.
+
+The lobby also applies starting resources, population, starting/ending Tech Level, Normal/Explored/
+All Visible reveal, locked/unlocked teams, cheats, Slow/Normal/Fast speed, and the original
+**Standard**, **Conquest**, **Time Limit**, and **Score**
 victory choices plus the existing Command Center compatibility mode. Standard combines military
 conquest with Monument and all-Holocron control. Monument/Holocron control displays a persistent
 countdown and resets when control is lost. Time Limit and Score show live objective status; team
@@ -129,10 +145,11 @@ Settings are stored in `ux0:data/swgb/settings.bin`, campaign completion/unlock 
 `ux0:data/swgb/campaign.profile`, and the current continuation in
 `ux0:data/swgb/skirmish.save`. All are bounded, versioned, checksummed, and atomically replaced.
 Corrupt settings recover to defaults with an explicit message; corrupt, oversized, mismatched, or
-unsupported campaign profiles and saves are rejected without replacing the current match. Save
-version 5 preserves shield regeneration/drain timer phases in addition to the campaign trigger,
-active/queued instruction, scripted-name, freeze, and trigger-attack state added by version 4.
-Versions 1-4 retain their bounded migration paths.
+unsupported campaign profiles and saves are rejected without replacing the current match. Save version 6 adds all eight slot descriptors and expanded setup/runtime options while preserving
+the version-5 shield regeneration/drain timer phases and the campaign trigger, active/queued
+instruction, scripted-name, freeze, and trigger-attack state added by version 4. Versions 1-5
+retain bounded migration paths; an old unsupported map size is rejected with a clear setup error
+rather than allocated on Vita.
 
 Combat includes pursuit with collision-aware A* pathfinding, attack animations and
 acknowledgements, original projectile graphics and weapon sounds, researched accuracy with

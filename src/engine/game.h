@@ -8,6 +8,7 @@
 #include "skirmish.h"
 #include "../core/scenario.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <deque>
@@ -657,12 +658,39 @@ public:
     int difficultyForTesting() const {
         return difficulty_;
     }
+    int difficultyForPlayer(int player) const;
+    int activePlayerCountForTesting() const {
+        return (int)std::count_if(
+            players_.begin(), players_.end(),
+            [](const ScenarioPlayer &player) {
+                return player.active;
+            });
+    }
+    int localPlayerForTesting() const {
+        return localPlayer_;
+    }
+    const std::string &playerNameForTesting(
+        int player) const {
+        static const std::string empty;
+        return player > 0 &&
+                       (size_t)player <= players_.size()
+                   ? players_[(size_t)player - 1].name
+                   : empty;
+    }
+    uint32_t playerColorForTesting(
+        int player) const {
+        return player > 0 &&
+                       (size_t)player <= players_.size()
+                   ? players_[(size_t)player - 1].color
+                   : UINT32_MAX;
+    }
     SkirmishVictory victoryConditionForTesting() const {
         return victoryCondition_;
     }
     void setVictoryConditionForTesting(
         SkirmishVictory condition);
     uint64_t mapHashForTesting() const;
+    size_t allocationBytesForTesting() const;
     std::array<float, 2>
     playerBasePositionForTesting(int player) const;
     int reachableStartingResourceCountForTesting(
@@ -1623,8 +1651,7 @@ private:
     void generateTerrain(
         int size, SkirmishMapStyle style);
     void spawnStartingResources(
-        int player, float baseX, float baseY,
-        float inlandDirection);
+        int player, float baseX, float baseY);
     void spawnFishingResources();
     void spawnHolocrons();
     void buildTileElevation();
@@ -2184,6 +2211,12 @@ private:
     int difficulty_ = 2;
     SkirmishVictory victoryCondition_ =
         SkirmishVictory::Standard;
+    SkirmishReveal reveal_ =
+        SkirmishReveal::Normal;
+    SkirmishGameSpeed gameSpeed_ =
+        SkirmishGameSpeed::Normal;
+    bool cheatsEnabled_ = false;
+    bool teamsLocked_ = false;
     int victoryState_ = -1;
     bool conquestEnabled_ = false;
     float conquestCheckTime_ = 0.0f;

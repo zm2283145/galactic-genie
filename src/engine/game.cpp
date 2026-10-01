@@ -419,6 +419,10 @@ void Game::resetMatchState() {
     localPlayer_ = 0;
     victoryState_ = -1;
     conquestEnabled_ = false;
+    reveal_ = SkirmishReveal::Normal;
+    gameSpeed_ = SkirmishGameSpeed::Normal;
+    cheatsEnabled_ = false;
+    teamsLocked_ = false;
     conquestCheckTime_ = 0.0f;
     victoryCountdownPlayer_ = -1;
     victoryCountdownKind_ = 0;
@@ -507,34 +511,37 @@ bool Game::init(
     settings.startingResources = 0;
     settings.mapStyle =
         SkirmishMapStyle::LegacyRandom;
+    settings.cheatsEnabled = true;
+    settings.teamsLocked = false;
     return initGenerated(settings, false, err);
 }
 
 bool Game::initSkirmish(
     const SkirmishSettings &settings,
     std::string *err) {
-    if (settings.mapSize < 48 ||
-        settings.mapSize > 192) {
-        if (err)
-            *err = "skirmish map size must be between 48 and 192";
+    SkirmishSettings normalized = settings;
+    if (normalized.slots[0].civilization == 1 &&
+        normalized.playerCivilization != 1)
+        normalized.slots[0].civilization =
+            (uint8_t)normalized.playerCivilization;
+    if (normalized.slots[1].civilization == 3 &&
+        normalized.computerCivilization != 3)
+        normalized.slots[1].civilization =
+            (uint8_t)normalized.computerCivilization;
+    if (normalized.slots[1].difficulty == 2 &&
+        normalized.difficulty != 2)
+        normalized.slots[1].difficulty =
+            (uint8_t)normalized.difficulty;
+    if (normalized.slots[1].personality ==
+            AiPersonality::Expanded &&
+        normalized.personality !=
+            AiPersonality::Expanded)
+        normalized.slots[1].personality =
+            normalized.personality;
+    if (!validateSkirmishSettings(
+            normalized, err))
         return false;
-    }
-    if (settings.playerCivilization < 1 ||
-        settings.playerCivilization > 8 ||
-        settings.computerCivilization < 1 ||
-        settings.computerCivilization > 8) {
-        if (err)
-            *err = "skirmish civilization must be between 1 and 8";
-        return false;
-    }
-    if (settings.populationCap < 25 ||
-        settings.populationCap > 250 ||
-        settings.startingResources < 0) {
-        if (err)
-            *err = "invalid skirmish economy settings";
-        return false;
-    }
-    return initGenerated(settings, true, err);
+    return initGenerated(normalized, true, err);
 }
 
 bool Game::initGenerated(
@@ -605,56 +612,110 @@ bool Game::initGenerated(
     victoryState_ = -1;
     conquestEnabled_ = true;
     conquestCheckTime_ = 3.0f;
-    difficulty_ = std::max(
-        0, std::min(4, settings.difficulty));
+    difficulty_ = 2;
+    for (const SkirmishSlot &slot : settings.slots)
+        if (slot.type ==
+            SkirmishSlotType::Computer) {
+            difficulty_ = slot.difficulty;
+            break;
+        }
     victoryCondition_ = settings.victory;
+    reveal_ = settings.reveal;
+    gameSpeed_ = settings.gameSpeed;
+    cheatsEnabled_ = settings.cheatsEnabled;
+    teamsLocked_ = settings.teamsLocked;
+    standardVictoryCountdown_ = 600.0f;
+    timeLimitSeconds_ =
+        settings.timeLimitMinutes * 60.0f;
+    scoreLimit_ = settings.scoreLimit;
     warnedEffects_.clear();
     warnedConditions_.clear();
-    for (size_t i = 0; i < players_.size(); i++) players_[i].color = (uint32_t)i;
-    players_[0].active = true;
-    players_[0].human = true;
-    players_[0].civilization =
-        (uint32_t)settings.playerCivilization;
-    players_[0].populationLimit =
-        (float)settings.populationCap;
-    players_[0].alliedVictory = settings.allied;
-    players_[0].diplomacy[2] =
-        settings.allied ? 0u : 3u;
-    players_[1].active = true;
-    players_[1].civilization =
-        (uint32_t)settings.computerCivilization;
-    players_[1].populationLimit =
-        (float)settings.populationCap;
-    players_[1].alliedVictory = settings.allied;
-    players_[1].diplomacy[1] =
-        settings.allied ? 0u : 3u;
-    localPlayer_ = 1;
+    localPlayer_ = 0;
+    std::vector<int> activeSlots;
+    for (int slotIndex = 0;
+         slotIndex < kMaxSkirmishSlots;
+         ++slotIndex) {
+        const SkirmishSlot &slot =
+            settings.slots[(size_t)slotIndex];
+        ScenarioPlayer &player =
+            players_[(size_t)slotIndex];
+        player.color = slot.color;
+        if (slot.type ==
+            SkirmishSlotType::Closed)
+            continue;
+        const int playerId = slotIndex + 1;
+        activeSlots.push_back(slotIndex);
+        player.active = true;
+        player.human =
+            slot.type ==
+            SkirmishSlotType::Human;
+        player.name =
+            !addStartingResources
+                ? std::string()
+            : slot.name.empty()
+                ? (player.human
+                       ? "Player " +
+                             std::to_string(playerId)
+                       : "Computer " +
+                             std::to_string(playerId))
+                : slot.name;
+        player.civilization = slot.civilization;
+        player.populationLimit =
+            (float)settings.populationCap;
+        player.alliedVictory =
+            slot.alliedVictory;
+        if (addStartingResources)
+            player.startingAge =
+                settings.startingTechLevel - 1;
+        if (!localPlayer_ && player.human)
+            localPlayer_ = playerId;
+    }
+    for (int sourceSlot : activeSlots) {
+        const SkirmishSlot &source =
+            settings.slots[(size_t)sourceSlot];
+        for (int targetSlot : activeSlots) {
+            const SkirmishSlot &target =
+                settings.slots[(size_t)targetSlot];
+            const bool allied =
+                sourceSlot == targetSlot ||
+                (source.team > 0 &&
+                 source.team == target.team);
+            players_[(size_t)sourceSlot]
+                .diplomacy[(size_t)targetSlot + 1] =
+                allied ? 0u : 3u;
+        }
+    }
     mapSize_ = mapSize;
     generateTerrain(mapSize, settings.mapStyle);
     resetVisibility();
-
-    const float playerX =
-        settings.mapStyle ==
-                SkirmishMapStyle::Archipelago
-            ? mapSize * 0.26f
-            : mapSize * 0.30f;
-    const float playerY = mapSize * 0.35f;
-    const float computerX =
-        settings.mapStyle ==
-                SkirmishMapStyle::Archipelago
-            ? mapSize * 0.66f
-            : mapSize * 0.62f;
-    const float computerY = mapSize * 0.60f;
-    spawnBase(
-        1, settings.playerCivilization,
-        factionAbbreviation(
-            settings.playerCivilization),
-        playerX, playerY);
-    spawnBase(
-        2, settings.computerCivilization,
-        factionAbbreviation(
-            settings.computerCivilization),
-        computerX, computerY);
+    std::array<std::array<float, 2>,
+               kMaxSkirmishSlots>
+        starts{};
+    for (int slotIndex : activeSlots) {
+        const SkirmishSlot &slot =
+            settings.slots[(size_t)slotIndex];
+        if (!addStartingResources &&
+            activeSlots.size() == 2)
+            starts[(size_t)slotIndex] =
+                slotIndex == activeSlots[0]
+                    ? std::array<float, 2>{
+                          mapSize * 0.30f,
+                          mapSize * 0.35f}
+                    : std::array<float, 2>{
+                          mapSize * 0.62f,
+                          mapSize * 0.60f};
+        else
+            starts[(size_t)slotIndex] =
+                skirmishStartPosition(
+                    settings, slotIndex);
+        spawnBase(
+            slotIndex + 1,
+            slot.civilization,
+            factionAbbreviation(
+                slot.civilization),
+            starts[(size_t)slotIndex][0],
+            starts[(size_t)slotIndex][1]);
+    }
     // Keep the generated sandbox quiet until its opposing bases are engaged.
     for (Object &object : objects_)
         if (canAttack(object))
@@ -662,11 +723,68 @@ bool Game::initGenerated(
 
     // Some wildlife for gaia.
     std::uniform_real_distribution<float> pos(4.0f, mapSize - 4.0f);
-    for (int i = 0; i < 8; i++) {
+    const int wildlifeCount =
+        std::max(
+            8,
+            (int)activeSlots.size() * 4);
+    for (int i = 0; i < wildlifeCount; i++) {
         float x = pos(rng_), y = pos(rng_);
-        if (terrainAt((int)x, (int)y) == T_WATER1 || terrainAt((int)x, (int)y) == T_WATER2) continue;
+        if (terrainAt((int)x, (int)y) == T_WATER1 ||
+            terrainAt((int)x, (int)y) == T_WATER2 ||
+            terrainAt((int)x, (int)y) == T_WATER3 ||
+            terrainAt((int)x, (int)y) == T_SHORE)
+            continue;
         if (!(i % 2)) continue; // (there is no ANIMAL-BANTHA; keep the layout)
         spawn(0, "ANIMAL-CAPTUREA1", 0, x, y, 0);
+    }
+    if (settings.mapStyle ==
+            SkirmishMapStyle::Forest ||
+        settings.mapStyle ==
+            SkirmishMapStyle::Swamp) {
+        const int targetTrees =
+            mapSize *
+            (settings.mapStyle ==
+                     SkirmishMapStyle::Forest
+                 ? 4
+                 : 2);
+        for (int attempt = 0, placed = 0;
+             attempt < targetTrees * 6 &&
+             placed < targetTrees;
+             ++attempt) {
+            const float x = pos(rng_);
+            const float y = pos(rng_);
+            const int terrain =
+                terrainAt((int)x, (int)y);
+            if (terrain == T_WATER1 ||
+                terrain == T_WATER2 ||
+                terrain == T_WATER3 ||
+                terrain == T_SHORE)
+                continue;
+            bool nearStart = false;
+            for (int slotIndex : activeSlots) {
+                const float dx =
+                    x - starts[(size_t)slotIndex][0];
+                const float dy =
+                    y - starts[(size_t)slotIndex][1];
+                if (dx * dx + dy * dy <
+                    22.0f * 22.0f) {
+                    nearStart = true;
+                    break;
+                }
+            }
+            if (nearStart) continue;
+            if (Object *tree =
+                    spawn(
+                        0, "OBJ-TIMBERA", 0,
+                        x, y, 0.0f)) {
+                tree->resourceType = 1;
+                tree->resourceAmount =
+                    std::max(
+                        500.0f,
+                        tree->resourceAmount);
+                ++placed;
+            }
+        }
     }
     if (settings.mapStyle ==
             SkirmishMapStyle::Archipelago ||
@@ -674,24 +792,18 @@ bool Game::initGenerated(
             SkirmishMapStyle::CompactIslands)
         spawnFishingResources();
     if (addStartingResources) {
-        for (int player = 1; player <= 2; ++player)
+        for (int slotIndex : activeSlots) {
+            const int player = slotIndex + 1;
             for (int resourceType = 0;
                  resourceType < 4; ++resourceType)
                 resources_[(size_t)player]
                           [resourceType] =
                     (float)settings.startingResources;
-        spawnStartingResources(
-            1, playerX, playerY,
-            settings.mapStyle ==
-                    SkirmishMapStyle::Archipelago
-                ? 1.0f
-                : -1.0f);
-        spawnStartingResources(
-            2, computerX, computerY,
-            settings.mapStyle ==
-                    SkirmishMapStyle::Archipelago
-                ? -1.0f
-                : 1.0f);
+            spawnStartingResources(
+                player,
+                starts[(size_t)slotIndex][0],
+                starts[(size_t)slotIndex][1]);
+        }
         spawnHolocrons();
     }
     if (objects_.empty()) {
@@ -699,10 +811,73 @@ bool Game::initGenerated(
         return false;
     }
     rebuildAdjacency();
+    if (addStartingResources &&
+        mapSize > 48)
+    for (int slotIndex : activeSlots) {
+        const int player = slotIndex + 1;
+        for (int resourceType = 0;
+             resourceType < 4;
+             ++resourceType)
+            if (reachableStartingResourceCountForTesting(
+                    player,
+                    resourceType) <= 0) {
+                if (err)
+                    *err =
+                        "random map generation failed: player " +
+                        std::to_string(player) +
+                        " has no reachable starting " +
+                        "resource " +
+                        std::to_string(resourceType);
+                return false;
+            }
+        if ((settings.mapStyle ==
+                 SkirmishMapStyle::Archipelago ||
+             settings.mapStyle ==
+                 SkirmishMapStyle::Coastal ||
+             settings.mapStyle ==
+                 SkirmishMapStyle::CompactIslands) &&
+            !shorelineShipyardSiteForTesting(
+                player)) {
+            if (err)
+                *err =
+                    "random map generation failed: player " +
+                    std::to_string(player) +
+                    " has no valid Shipyard shoreline";
+            return false;
+        }
+    }
     initializeCivilizationRestrictions();
+    for (int slotIndex : activeSlots) {
+        const int player = slotIndex + 1;
+        for (int level = 2;
+             level <= settings.startingTechLevel;
+             ++level)
+            researchTechnology(
+                player, level - 1);
+        for (int level =
+                 settings.endingTechLevel + 1;
+             level <= 4; ++level)
+            disabledTechs_[(size_t)player]
+                .insert(level - 1);
+    }
     refreshAllAutomaticTechnologies();
     updateVisibility();
-    lookAt(playerX + 2, playerY + 2);
+    if (settings.reveal !=
+        SkirmishReveal::Normal)
+        for (int slotIndex : activeSlots)
+            std::fill(
+                exploredTiles_[
+                    (size_t)slotIndex + 1]
+                    .begin(),
+                exploredTiles_[
+                    (size_t)slotIndex + 1]
+                    .end(),
+                1);
+    lookAt(
+        starts[(size_t)localPlayer_ - 1][0] +
+            2.0f,
+        starts[(size_t)localPlayer_ - 1][1] +
+            2.0f);
     return true;
 }
 
@@ -1530,14 +1705,7 @@ void Game::generateTerrain(
         for (int x = 0; x < size; x++) {
             float h = fbm(x / 9.0f, y / 9.0f, seed);
             float m = fbm(x / 6.0f + 100, y / 6.0f, seed + 99);
-            uint8_t t =
-                m > 0.68f
-                    ? T_DIRT1
-                : m > 0.60f
-                    ? T_DIRT2
-                : m < 0.30f
-                    ? T_GRASS2
-                    : T_GRASS1;
+            uint8_t t = T_GRASS1;
             if (style ==
                 SkirmishMapStyle::LegacyRandom) {
                 if (h < 0.28f)
@@ -1554,73 +1722,73 @@ void Game::generateTerrain(
                     t = T_GRASS2;
                 else
                     t = T_GRASS1;
-            } else if (style ==
-                SkirmishMapStyle::Archipelago) {
-                const float px = size * 0.26f;
-                const float py = size * 0.42f;
-                const float cx = size * 0.66f;
-                const float cy = size * 0.58f;
-                const float radiusX =
-                    size * 0.18f;
-                const float radiusY =
-                    size * 0.36f;
-                const float playerDistance =
-                    std::sqrt(
-                        ((x - px) / radiusX) *
-                            ((x - px) / radiusX) +
-                        ((y - py) / radiusY) *
-                            ((y - py) / radiusY));
-                const float computerDistance =
-                    std::sqrt(
-                        ((x - cx) / radiusX) *
-                            ((x - cx) / radiusX) +
-                        ((y - cy) / radiusY) *
-                            ((y - cy) / radiusY));
-                const float distance =
-                    std::min(
-                        playerDistance,
-                        computerDistance) +
-                    (h - 0.5f) * 0.08f;
-                if (distance > 1.12f)
-                    t = T_WATER2;
-                else if (distance > 1.03f)
-                    t = T_WATER1;
-                else if (distance > 0.94f)
+            } else if (style == SkirmishMapStyle::Desert)
+                t = m > 0.66f ? T_DIRT1 : T_SAND;
+            else if (style == SkirmishMapStyle::Ice)
+                t = m > 0.62f ? T_DIRT3 : T_GRASS2;
+            else if (style == SkirmishMapStyle::Swamp)
+                t = m > 0.58f ? T_DIRT2 : T_GRASS3;
+            else if (style == SkirmishMapStyle::Forest)
+                t = m > 0.63f ? T_GRASS3 : T_GRASS1;
+            else if (style == SkirmishMapStyle::LandMass)
+                t = m > 0.64f ? T_DIRT1 : T_GRASS2;
+            else
+                t = m > 0.68f
+                        ? T_DIRT1
+                    : m > 0.60f
+                        ? T_DIRT2
+                    : m < 0.30f
+                        ? T_GRASS2
+                        : T_GRASS1;
+            if (style !=
+                SkirmishMapStyle::LegacyRandom) {
+                const uint8_t terrainClass =
+                    skirmishTerrainClassAt(
+                        currentSkirmishSettings_,
+                        x, y);
+                if (terrainClass == 2)
+                    t = h < 0.45f
+                            ? T_WATER2
+                            : T_WATER1;
+                else if (terrainClass == 1)
                     t = T_SHORE;
             }
             terrain_[(size_t)y * size + x] = t;
         }
     }
-    if (style ==
-        SkirmishMapStyle::CompactIslands) {
-        const int shoreLeft = size / 2 - 6;
-        const int deepLeft = size / 2 - 1;
-        const int deepRight = size / 2;
-        const int shoreRight = size / 2 + 5;
-        for (int y = 0; y < size; ++y)
-            for (int x = shoreLeft;
-                 x <= shoreRight; ++x)
-                terrain_[(size_t)y * size + x] =
-                    x == shoreLeft ||
-                            x == shoreRight
-                        ? T_SHORE
-                    : x == deepLeft ||
-                            x == deepRight
-                        ? T_WATER2
-                        : T_WATER1;
-    }
 
-    // Keep elevation deterministic while leaving island shorelines flat.
-    const float hillX = size * 0.30f - 7.0f;
-    const float hillY = size * 0.35f - 7.0f;
+    // Keep elevation deterministic while leaving water and shorelines flat.
+    const float hillX =
+        style == SkirmishMapStyle::LegacyRandom
+            ? size * 0.30f - 7.0f
+            : size *
+                  (0.25f +
+                   hash2(2, 7, seed) * 0.5f);
+    const float hillY =
+        style == SkirmishMapStyle::LegacyRandom
+            ? size * 0.35f - 7.0f
+            : size *
+                  (0.25f +
+                   hash2(11, 3, seed) * 0.5f);
     for (int y = 0; y <= size; y++) {
         for (int x = 0; x <= size; x++) {
             const float dx = x - hillX, dy = y - hillY;
             const float distance = std::sqrt(dx * dx + dy * dy);
+            const int tx =
+                std::min(size - 1, std::max(0, x));
+            const int ty =
+                std::min(size - 1, std::max(0, y));
+            const uint8_t terrain =
+                terrain_[(size_t)ty * size + tx];
+            const bool flat =
+                style !=
+                    SkirmishMapStyle::LegacyRandom &&
+                (terrain == T_WATER1 ||
+                 terrain == T_WATER2 ||
+                 terrain == T_WATER3 ||
+                 terrain == T_SHORE);
             cornerElevation_[(size_t)y * (size + 1) + x] =
-                style ==
-                        SkirmishMapStyle::Archipelago
-                    ? 0
+                flat ? 0
                     : distance < 3.25f
                           ? 2
                       : distance < 5.75f
@@ -1632,8 +1800,7 @@ void Game::generateTerrain(
 }
 
 void Game::spawnStartingResources(
-    int player, float baseX, float baseY,
-    float inlandDirection) {
+    int player, float baseX, float baseY) {
     struct ResourcePatch {
         const char *unit;
         int resourceType;
@@ -1645,14 +1812,33 @@ void Game::spawnStartingResources(
     };
     static constexpr ResourcePatch patches[] = {
         {"OBJ-VEGETABLE", 0, 12, 4,
-         -10.0f, 12.0f, 750.0f},
+         -8.0f, 9.0f, 750.0f},
         {"OBJ-BULLION", 3, 8, 4,
-         10.0f, 17.0f, 1000.0f},
+         8.0f, 11.0f, 1000.0f},
         {"OBJ-MINERAL", 2, 8, 4,
-         2.0f, 18.0f, 1000.0f},
+         2.0f, 12.0f, 1000.0f},
         {"OBJ-TIMBERA", 1, 24, 6,
-         8.0f, 13.0f, 750.0f},
+         6.0f, 9.0f, 750.0f},
     };
+    float inwardX = mapSize_ * 0.5f - baseX;
+    float inwardY = mapSize_ * 0.5f - baseY;
+    const float inwardLength =
+        std::max(
+            0.001f,
+            std::sqrt(
+                inwardX * inwardX +
+                inwardY * inwardY));
+    inwardX /= inwardLength;
+    inwardY /= inwardLength;
+    const float sideX = -inwardY;
+    const float sideY = inwardX;
+    const float offsetScale =
+        currentSkirmishSettings_.mapStyle ==
+                SkirmishMapStyle::Archipelago
+            ? 0.65f
+        : mapSize_ <= 64
+            ? 0.75f
+            : 1.0f;
     for (const ResourcePatch &patch : patches) {
         const int rows =
             (patch.count + patch.columns - 1) /
@@ -1661,15 +1847,22 @@ void Game::spawnStartingResources(
              index < patch.count; ++index) {
             float x =
                 baseX +
-                inlandDirection * patch.offsetX +
+                sideX * patch.offsetX *
+                    offsetScale +
+                inwardX * patch.offsetY *
+                    offsetScale +
                 (index % patch.columns -
                  (patch.columns - 1) * 0.5f) *
-                    1.15f;
+                    sideX * 1.15f;
             float y =
-                baseY + patch.offsetY +
+                baseY +
+                sideY * patch.offsetX *
+                    offsetScale +
+                inwardY * patch.offsetY *
+                    offsetScale +
                 (index / patch.columns -
                  (rows - 1) * 0.5f) *
-                    1.15f;
+                    inwardY * 1.15f;
             x = std::max(
                 2.0f,
                 std::min((float)mapSize_ - 2.0f, x));
@@ -1857,6 +2050,37 @@ uint64_t Game::mapHashForTesting() const {
     return hash;
 }
 
+size_t Game::allocationBytesForTesting() const {
+    size_t bytes =
+        terrain_.capacity() * sizeof(uint8_t) +
+        cornerElevation_.capacity() * sizeof(uint8_t) +
+        tileElevation_.capacity() * sizeof(uint8_t) +
+        tileSlope_.capacity() * sizeof(uint8_t) +
+        objects_.capacity() * sizeof(Object) +
+        projectiles_.capacity() * sizeof(Projectile) +
+        remains_.capacity() * sizeof(Remains);
+    for (const auto &tiles : exploredTiles_)
+        bytes += tiles.capacity() * sizeof(uint8_t);
+    for (const auto &tiles : visibleTiles_)
+        bytes += tiles.capacity() * sizeof(uint8_t);
+    const auto nestedBytes =
+        [](const std::vector<
+               std::vector<uint32_t>> &grid) {
+            size_t total =
+                grid.capacity() *
+                sizeof(std::vector<uint32_t>);
+            for (const auto &cell : grid)
+                total +=
+                    cell.capacity() *
+                    sizeof(uint32_t);
+            return total;
+        };
+    bytes += nestedBytes(mobileObjectCells_);
+    bytes += nestedBytes(combatObjectCells_);
+    bytes += nestedBytes(staticObstructionCells_);
+    return bytes;
+}
+
 std::array<float, 2>
 Game::playerBasePositionForTesting(int player) const {
     for (const Object &object : objects_)
@@ -2012,10 +2236,22 @@ void Game::updateVisibility() {
             (radius + 0.5f) * (radius + 0.5f);
         for (int viewer = 1; viewer < 17;
              viewer++) {
-            if (viewer != source.player &&
-                !isFriendlyPlayer(
-                    viewer, source.player))
-                continue;
+            if (viewer != source.player) {
+                if ((size_t)viewer >
+                        players_.size() ||
+                    (size_t)source.player >
+                        players_.size() ||
+                    !players_[(size_t)viewer - 1]
+                         .active ||
+                    !players_[
+                         (size_t)source.player - 1]
+                         .active ||
+                    !isFriendlyPlayer(
+                        viewer, source.player) ||
+                    !isFriendlyPlayer(
+                        source.player, viewer))
+                    continue;
+            }
             std::vector<uint8_t> &visible =
                 visibleTiles_[(size_t)viewer];
             for (int y = minY; y <= maxY; y++)
@@ -2067,11 +2303,36 @@ bool Game::tileExplored(
         (forceExploreCheat_ ||
          forceSightCheat_))
         return true;
-    const std::vector<uint8_t> &tiles =
-        exploredTiles_[(size_t)player];
-    return tiles.size() ==
-               (size_t)mapSize_ * mapSize_ &&
-           tiles[(size_t)y * mapSize_ + x] != 0;
+    if (reveal_ != SkirmishReveal::Normal)
+        return true;
+    const size_t tile =
+        (size_t)y * mapSize_ + x;
+    for (int visionPlayer = 1;
+         visionPlayer < 17; ++visionPlayer) {
+        if (visionPlayer != player) {
+            if ((size_t)player >
+                    players_.size() ||
+                (size_t)visionPlayer >
+                    players_.size() ||
+                !players_[(size_t)player - 1]
+                     .active ||
+                !players_[
+                     (size_t)visionPlayer - 1]
+                     .active ||
+                !isFriendlyPlayer(
+                    player, visionPlayer) ||
+                !isFriendlyPlayer(
+                    visionPlayer, player))
+                continue;
+        }
+        const std::vector<uint8_t> &tiles =
+            exploredTiles_[(size_t)visionPlayer];
+        if (tiles.size() ==
+                (size_t)mapSize_ * mapSize_ &&
+            tiles[tile])
+            return true;
+    }
+    return false;
 }
 
 bool Game::tileVisible(
@@ -2083,11 +2344,36 @@ bool Game::tileVisible(
     if (player == localPlayer_ &&
         forceSightCheat_)
         return true;
-    const std::vector<uint8_t> &tiles =
-        visibleTiles_[(size_t)player];
-    return tiles.size() ==
-               (size_t)mapSize_ * mapSize_ &&
-           tiles[(size_t)y * mapSize_ + x] != 0;
+    if (reveal_ == SkirmishReveal::AllVisible)
+        return true;
+    const size_t tile =
+        (size_t)y * mapSize_ + x;
+    for (int visionPlayer = 1;
+         visionPlayer < 17; ++visionPlayer) {
+        if (visionPlayer != player) {
+            if ((size_t)player >
+                    players_.size() ||
+                (size_t)visionPlayer >
+                    players_.size() ||
+                !players_[(size_t)player - 1]
+                     .active ||
+                !players_[
+                     (size_t)visionPlayer - 1]
+                     .active ||
+                !isFriendlyPlayer(
+                    player, visionPlayer) ||
+                !isFriendlyPlayer(
+                    visionPlayer, player))
+                continue;
+        }
+        const std::vector<uint8_t> &tiles =
+            visibleTiles_[(size_t)visionPlayer];
+        if (tiles.size() ==
+                (size_t)mapSize_ * mapSize_ &&
+            tiles[tile])
+            return true;
+    }
+    return false;
 }
 
 bool Game::objectCurrentlyVisibleToPlayer(
@@ -2544,7 +2830,10 @@ void Game::spawnBase(int player, int civ, char L, float cx, float cy) {
         for (int x = (int)cx - 8; x <= (int)cx + 16; x++)
             if (x >= 0 && y >= 0 && x < mapSize_ && y < mapSize_) {
                 uint8_t &t = terrain_[(size_t)y * mapSize_ + x];
-                if (t == T_WATER1 || t == T_WATER2 || t == T_SAND) t = T_GRASS1;
+                if (t == T_WATER1 || t == T_WATER2 ||
+                    t == T_WATER3 || t == T_SHORE ||
+                    t == T_SAND)
+                    t = T_GRASS1;
             }
     const std::string sL(1, L);
     spawn(civ, "BLDG-MAIN1", player, cx + 2.0f, cy + 2.0f, 0);
@@ -14647,6 +14936,10 @@ void Game::executeEffect(const ScenarioEffect &effect) {
     switch (effect.type) {
     case 1: {
         const int stance = triggerField(effect.fields, 3);
+        if (generatedMatch_ && teamsLocked_) {
+            log("locked teams ignored diplomacy change");
+            break;
+        }
         if (sourcePlayer > 0 && (size_t)sourcePlayer <= players_.size() &&
             targetPlayer >= 0 && targetPlayer < 16)
             players_[(size_t)sourcePlayer - 1].diplomacy[(size_t)targetPlayer] = (uint32_t)stance;
@@ -16322,6 +16615,19 @@ int Game::resolveAiValue(
     return 0;
 }
 
+int Game::difficultyForPlayer(int player) const {
+    if (generatedMatch_ && player >= 1 &&
+        player <= kMaxSkirmishSlots) {
+        const SkirmishSlot &slot =
+            currentSkirmishSettings_
+                .slots[(size_t)player - 1];
+        if (slot.type ==
+            SkirmishSlotType::Computer)
+            return slot.difficulty;
+    }
+    return difficulty_;
+}
+
 bool Game::evaluateAiFactValue(
     int player, AiPlayerState &state,
     const AiNode &condition,
@@ -16344,7 +16650,7 @@ bool Game::evaluateAiFactValue(
         return true;
     }
     if (fact == "difficulty") {
-        value = difficulty_;
+        value = difficultyForPlayer(player);
         return true;
     }
     if (fact == "population") {
@@ -17518,6 +17824,8 @@ bool Game::executeAiAction(
             target < 1 || target > 16 ||
             stance < 0 || stance > 3)
             return false;
+        if (generatedMatch_ && teamsLocked_)
+            return true;
         players_[(size_t)player - 1]
             .diplomacy[(size_t)target] =
             (uint32_t)stance;
@@ -19949,6 +20257,11 @@ void Game::updateAi(float dt) {
 }
 
 void Game::update(float dt, const InputState &in) {
+    if (gameSpeed_ == SkirmishGameSpeed::Slow)
+        dt *= 0.75f;
+    else if (gameSpeed_ ==
+             SkirmishGameSpeed::Fast)
+        dt *= 1.5f;
     // Placement armed by the build menu last frame may now take clicks.
     placementJustBegun_ = false;
     gatherPointJustBegun_ = false;
@@ -19993,7 +20306,8 @@ void Game::update(float dt, const InputState &in) {
         minimapAlerts_.end());
     syncControlGroups();
 
-    if (in.toggleCheatMenu) {
+    if (in.toggleCheatMenu &&
+        (!generatedMatch_ || cheatsEnabled_)) {
         cheatMenuOpen_ = !cheatMenuOpen_;
         actionMenuOpen_ = false;
         actionMenuObjectId_ = 0;

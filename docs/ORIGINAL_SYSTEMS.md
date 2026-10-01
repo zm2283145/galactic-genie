@@ -33,12 +33,12 @@ build and test on Vita.
 | Civilization technology trees | Each DAT civilization's `techTreeId` effect; type-102 disabled-technology commands | Verified and covered |
 | Air/naval transports | DAT `AVAIL-*` technologies and Airbase/Shipyard train locations | Verified and covered |
 | Compact island map | Shipyard terrain `1/4`, side terrain `2/35`, and DAT movement restrictions | Covered |
-| Skirmish setup and random-map launch | Preset fields at `0x443440`; seeded generation at `0x4940f0`; AI defines at `0x57eff0` | Verified and covered |
+| Skirmish setup and random-map launch | Preset fields at `0x443440`; seeded generation at `0x4940f0`; stock RMS table `0x6963c0`; AI defines at `0x57eff0` | Verified names/contracts; native 2-8-slot generators covered |
 | Match-to-menu transition | Cleanup and `"Main Menu"` transition at `0x45f916` | Verified and covered |
 | Minimap and fog | `diam_map` draw dispatcher at `0x4560a0`; DAT `minimapMode`/`minimapColor` | Verified and covered |
 | Control groups | `groupnum.shp` string at `0x689920`, referenced at `0x42745d` | Verified and covered |
 | Pause/options/audio | Pause request path at `0x4359a9`; sound/music controls at `0x42701f`/`0x427247` | Verified and covered |
-| Save/load | `"Save Game Screen"` constructor at `0x5286f0` | Native generated-skirmish format covered |
+| Save/load | `"Save Game Screen"` constructor at `0x5286f0` | Native save-v6 plus v1-v5 migrations covered |
 | Jedi/Sith conversion | DAT action 104; strings 4125/4925 and 42027/43027; command constructor `0x50301d`; resources 27/35/77/87/178/179/193 | Implemented and covered; exact original probability formula unresolved |
 | Holocrons | unit 285, graphic 5200/SLP 2252; action 132 pickup/action 136 Temple delivery; resource 191; `puprelic.wav` xref `0x5e66db` | Implemented and covered |
 | Victory selection | setup field `+0x218`, switch `0x57f069`, strings 4327/4321/4329/4330/4331 | Standard/Conquest/Time/Score implemented; Custom remains scenario-defined |
@@ -47,7 +47,7 @@ build and test on Vita.
 | Startup and frontend routing | executable strings at `0x68e41c`, `0x68b26f`, `0x68e658`, `0x68e558`, `0x68e440`; language IDs 9201-9284/11241-11252 | Verified and covered |
 | Stock campaign catalog | six `XCAM*.CPX` archives, 43 SCX entries; localized IDs 35228-35445/36128-36438 | Verified and covered |
 | Campaign trigger/runtime conformance | all six XCAM archives; 43 SCX entries; 1,770 triggers, 1,752 conditions, and 5,854 effects | Every stock-used numeric condition/effect type supported; 79 bounded difficulty-relevant initialization/simulation runs covered |
-| Campaign progression and saves | campaign-menu strings, ordered CPX entries, original save-screen path `0x5286f0` | Native bounded profile and save-v5 trigger/dialogue/shield-timer continuation covered |
+| Campaign progression and saves | campaign-menu strings, ordered CPX entries, original save-screen path `0x5286f0` | Native bounded profile and save-v6 continuation covered |
 
 ## Startup, frontend, and campaign contracts
 
@@ -117,15 +117,15 @@ Development access is an explicit profile option rather than fabricated
 completion. Difficulty is profile-persisted for scenario conditions.
 
 Campaign progress uses a 64 KiB maximum, versioned checksummed atomic profile.
-Match save version 5 retains the bounded archive-name and entry metadata and
+Match save version 6 retains the bounded archive-name and entry metadata and
 adds per-trigger enabled/fired/delay state, current and queued instruction
 state, scripted names, freeze state, trigger attack overrides, and deterministic
-AI random values. Version 5 additionally preserves the independent shield
-regeneration and drain timer phases. Loading first validates the checksum/version,
+AI random values. It preserves version 5's independent shield regeneration and
+drain timer phases, then adds expanded skirmish slots/setup state. Loading first validates the checksum/version,
 reopens the exact discovered mission, and then restores state only when the
 initialized campaign context matches. The active instruction resumes without
 replaying its already-started one-shot sound; queued dialogue resumes normally.
-Version-1 through version-4 saves retain their documented migration paths.
+Version-1 through version-5 saves retain their documented migration paths.
 
 ### Stock campaign runtime and AI contract
 
@@ -518,6 +518,48 @@ and `genie_x1.dat` (SHA-256
 Addresses below are image virtual addresses for the executable's preferred
 `0x400000` base.
 
+The stock x1 executable contains a contiguous random-map filename table in
+`.data` beginning at raw offset/RVA `0x2963c0` (preferred VA `0x6963c0`).
+Verified entries, in table order, are:
+
+`Hoth`, `Yavin`, `EndorMoon`, `Kashyyyk`, `TeamSpaceSatellites`, `Raiders`,
+`IceLake`, `Motherlode`, `Arena`, `Savannah`, `Swamp`, `Flats`, `Tundra`,
+`TeamLandSatellites`, `Rivers`, `SearchAndDestroy`, `PlanetsAndMoons`,
+`LargeSea`, `SpaceSatellites`, `LandSatellites`, `Precipice`, `NovaAssault`,
+`Fortress`, `NovaLake`, `SpaceMass`, `LandMass`, `Shoreline`, `Forest`, `Sea`,
+`WaterMass`, `Desert`, and `BlindRandom` (each stored as an `.rms` filename).
+Representative exact entries are `Arena.rms` at `0x296450`/`0x696450`,
+`Fortress.rms` at `0x2964a8`/`0x6964a8`, `Forest.rms` at
+`0x2964f8`/`0x6964f8`, and `BlindRandom.rms` at
+`0x29652d`/`0x69652d`. The native generator uses the exact evidenced names
+Savannah, Forest, Desert, Tundra, Swamp, Rivers, Shoreline, Sea, and Land Mass
+for its corresponding biome/topology families. It does not claim to execute
+the unavailable stock RMS scripts or reproduce unevidenced per-script tables.
+
+Stock setup/debug strings in the same image verify `Game Speed` at
+`0x289704`/`0x689704` and a field group near
+`0x29a8b8`/`0x69a8b8` containing `Map Type:`, `Map Size:`, `Scenario:`, and
+`Number Players:`. The x1 language resource verifies ID 30163's Blind Random
+description, ID 30172's Death Match starting-stockpile description, ID 30211's
+same-team/allied-victory tooltip, ID 30551's per-player population-limit
+tooltip, ID 31031's standard-game/custom-scenario description, and ID 26339's
+Standard Monument victory description. These establish the existence of those
+setup concepts. They do **not** establish numeric map dimensions, player
+maximum, resource values, age bounds, speed multipliers, or reveal defaults.
+The exposed 2-8 slots, 64/96/128/160 presets, resource/population ranges, and
+speed multipliers are therefore documented native Vita-safe limits rather than
+misrepresented as recovered stock constants. Death Match, Regicide, Scenario,
+and Blind Random are not advertised as implemented modes until their complete
+setup and outcome contracts are recovered.
+
+The installed `Game\Random` directory contains only `[EF]` scripts and an
+Expanding Fronts README. Those scripts verify RMS grammar such as
+`<PLAYER_SETUP>`, `random_placement`, `create_player_lands`, map-size symbols
+through `GIGANTIC_MAP`, player-distance constraints, terrain restrictions,
+Gaia-only objects, and player-relative food/carbon/nova/ore/fish placement.
+They are useful format evidence but are explicitly excluded from stock x1 name
+or rule claims.
+
 The preset serializer at `0x443440` reads separate fields from the setup
 object and emits `m_bDifficulty`, `m_bResources`, and `m_dPopulation` at
 `0x443487`, `0x4434bf`, and `0x4434f2`. Their lock flags are adjacent but
@@ -559,20 +601,56 @@ session audio before creating the next match.
 
 Generated-map contract:
 
-- `Grasslands` is connected land with deterministic DAT terrain variation.
-- `Archipelago` creates separated land masses, shallow/deep ocean, and shore
-  rings. Both starts have a DAT-valid Shipyard site: the complete footprint is
-  water terrain `1/4` with adjacent shore terrain `2/35`.
+- `Savannah`, `Forest`, `Desert`, `Tundra`, `Swamp`, `Rivers`, `Shoreline`,
+  `Sea`, and `Land Mass` are distinct seeded families named from the recovered
+  stock filename table. Forest/Swamp add bounded carbon density away from
+  starts; Rivers/Swamp preserve inland water; Shoreline has a variable coast;
+  Sea creates a separate island around every active start; the remaining
+  families retain connected land with distinct terrain/elevation mixes.
 - `Compact Two Islands` retains the existing full-height channel, deep center,
   and shore columns as a selectable regression map.
-- Both players receive equal food, carbon, ore, and nova patches. Host
-  validation checks that ordinary workers have a route to every resource
-  class and that both island starts have a valid Shipyard footprint.
+- Two through eight deterministic slot IDs map directly to simulation players.
+  Every active slot has Closed/Human/Computer state, name, unique color,
+  civilization, personality, difficulty, team, and allied-victory state.
+  A match requires exactly one local human and a hostile computer. Same nonzero team
+  produces mutual alliance; team zero remains free-for-all. Locked generated
+  teams reject trigger diplomacy changes, while unlocked matches use the
+  ordinary authoritative diplomacy paths.
+- Every active player receives equal food, carbon, ore, and nova patches.
+  Host validation checks that ordinary workers have a route to every resource
+  class and that Sea/Shoreline/Compact starts have a DAT-valid Shipyard
+  footprint: water terrain `1/4` with adjacent shore terrain `2/35`.
+- Generation is bounded and fails explicitly if slot density, a starting
+  economy, or required shoreline cannot be validated. The lobby preview uses
+  the same deterministic terrain classifier and start-position contract as the
+  full generator, and invalid settings produce an error rather than a malformed
+  map.
+- Exposed Vita presets are 64, 96, 128, and 160 tiles. The internal 48-tile
+  size remains only for historical regression/save coverage. More than four
+  players requires at least 96 tiles and more than six requires 128. The
+  `test-maps-modes` gate records actual capacities for terrain, elevation,
+  17-player explored/visible arrays, objects, projectiles/remains, and spatial
+  grids; the 160-tile preset is accepted only under a 64 MiB native-map
+  allocation gate. Larger original size symbols remain unsupported instead of
+  risking the Vita heap.
+- Starting resources/population/Tech Level bounds, ending Tech Level, reveal,
+  locked teams, allied victory, cheats, game speed, Time target, and Score
+  target are authoritative settings. Normal/Explored/All Visible feed the
+  shared-vision tile queries; speed scales simulation time; cheats gate the
+  generated-match menu; starting/ending Tech Level researches and disables the
+  corresponding age technologies; every field is retained by save/restart.
 - Command Center victory uses the selected compatibility condition directly;
   Conquest keeps the existing last-hostile-assets contract. Standard combines
   Conquest, Monument, and Holocron control; Time Limit and Score are separate
   working choices. Original Custom remains trigger/scenario-defined and is
   not presented as a working generated-skirmish alias.
+
+Native save version 6 appends all eight bounded slot records and expanded
+setup fields to the version-1-through-version-5 settings prefix, and preserves
+reveal, speed, cheats, and team-lock runtime state. Versions 1-5 are decoded
+with their original enum values and migrated to the equivalent two-slot
+layout. Unsupported historical dimensions produce a clear setup error instead
+of an unsafe allocation.
 
 ## Compact island match
 

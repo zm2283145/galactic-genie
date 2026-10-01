@@ -12,8 +12,8 @@ namespace {
 
 constexpr float kMenuTop = 154.0f;
 constexpr float kMenuRow = 46.0f;
-constexpr float kLobbyTop = 90.0f;
-constexpr float kLobbyRow = 33.0f;
+constexpr float kLobbyTop = 91.0f;
+constexpr float kLobbyRow = 28.0f;
 
 void centeredText(
     Renderer &renderer, const std::string &value,
@@ -92,43 +92,113 @@ const char *optionLabel(size_t row) {
 }
 
 std::string lobbyValue(
-    const SkirmishSettings &settings, size_t row) {
+    const SkirmishSettings &settings,
+    size_t page, size_t selectedSlot,
+    size_t row) {
+    if (page == 0) {
+        const SkirmishSlot &slot =
+            settings.slots[selectedSlot];
+        switch (row) {
+        case 0:
+            return "SLOT " +
+                   std::to_string(selectedSlot + 1);
+        case 1: return slotTypeName(slot.type);
+        case 2: return slot.name;
+        case 3:
+            return std::to_string(slot.color + 1);
+        case 4:
+            return civilizationName(
+                slot.civilization);
+        case 5:
+            return slot.type ==
+                           SkirmishSlotType::Computer
+                       ? difficultyName(
+                             slot.difficulty)
+                       : "N/A";
+        case 6:
+            return slot.type ==
+                           SkirmishSlotType::Computer
+                       ? personalityName(
+                             slot.personality)
+                       : "N/A";
+        case 7:
+            return slot.team
+                       ? std::to_string(slot.team)
+                       : "NO TEAM";
+        case 8:
+            return slot.alliedVictory
+                       ? "ENABLED"
+                       : "DISABLED";
+        case 9: return "MATCH SETTINGS";
+        case 10: return "START MATCH";
+        case 11: return "BACK";
+        default: return {};
+        }
+    }
     switch (row) {
-    case 0: return civilizationName(settings.playerCivilization);
-    case 1: return civilizationName(settings.computerCivilization);
-    case 2: return difficultyName(settings.difficulty);
-    case 3: return personalityName(settings.personality);
-    case 4:
-        return settings.allied ? "ALLIED" : "ENEMY";
-    case 5: return mapStyleName(settings.mapStyle);
-    case 6:
+    case 0: return mapStyleName(settings.mapStyle);
+    case 1:
         return std::to_string(settings.mapSize) + " x " +
                std::to_string(settings.mapSize);
-    case 7: return std::to_string(settings.startingResources);
-    case 8: return std::to_string(settings.populationCap);
-    case 9: return victoryName(settings.victory);
-    case 10: {
+    case 2: return std::to_string(settings.startingResources);
+    case 3: return std::to_string(settings.populationCap);
+    case 4:
+        return "TECH LEVEL " +
+               std::to_string(settings.startingTechLevel);
+    case 5:
+        return "TECH LEVEL " +
+               std::to_string(settings.endingTechLevel);
+    case 6: return revealName(settings.reveal);
+    case 7:
+        return settings.teamsLocked ? "LOCKED" : "UNLOCKED";
+    case 8:
+        return settings.cheatsEnabled ? "ENABLED" : "DISABLED";
+    case 9: return gameSpeedName(settings.gameSpeed);
+    case 10: return victoryName(settings.victory);
+    case 11:
+        if (settings.victory ==
+            SkirmishVictory::TimeLimit)
+            return std::to_string(
+                       settings.timeLimitMinutes) +
+                   " MINUTES";
+        if (settings.victory ==
+            SkirmishVictory::Score)
+            return std::to_string(
+                settings.scoreLimit);
+        return "AUTOMATIC";
+    case 12: {
         char value[16];
         std::snprintf(
             value, sizeof value, "0x%08X",
             settings.seed);
         return value;
     }
-    case 11: return "START MATCH";
-    case 12: return "BACK";
+    case 13: return "PLAYER SLOTS";
+    case 14: return "START MATCH";
+    case 15: return "BACK";
     default: return {};
     }
 }
 
-const char *lobbyLabel(size_t row) {
-    static constexpr std::array<const char *, 13> labels{{
-        "Civilization", "Computer Civilization",
-        "AI Difficulty", "AI Personality",
-        "Teams / Diplomacy", "Map", "Map Size",
-        "Starting Resources", "Population Cap",
-        "Victory Condition", "Random Map Seed", "", "",
+const char *lobbyLabel(size_t page, size_t row) {
+    static constexpr std::array<const char *, 12> slotLabels{{
+        "Edit", "State", "Name", "Color",
+        "Civilization", "Difficulty", "Personality",
+        "Team", "Allied Victory", "", "", "",
     }};
-    return row < labels.size() ? labels[row] : "";
+    static constexpr std::array<const char *, 16> matchLabels{{
+        "Random Map", "Map Size", "Starting Resources",
+        "Population", "Starting Age", "Ending Age",
+        "Reveal Map", "Teams", "Cheats", "Game Speed",
+        "Victory", "Victory Target", "Seed", "", "", "",
+    }};
+    return page == 0
+               ? (row < slotLabels.size()
+                      ? slotLabels[row]
+                      : "")
+               : (row < matchLabels.size()
+                      ? matchLabels[row]
+                      : "");
 }
 
 } // namespace
@@ -173,8 +243,8 @@ size_t Frontend::rowFromPointer(
 }
 
 void Frontend::adjustLobbyValue(int direction) {
-    static constexpr std::array<int, 3> mapSizes{{64, 96, 128}};
-    static constexpr std::array<int, 3> resources{{200, 500, 1000}};
+    static constexpr std::array<int, 4> mapSizes{{64, 96, 128, 160}};
+    static constexpr std::array<int, 4> resources{{200, 500, 1000, 20000}};
     static constexpr std::array<int, 5> populations{{50, 100, 150, 200, 250}};
     const auto cycle = [direction](int current, const auto &values) {
         auto found = std::find(values.begin(), values.end(), current);
@@ -186,66 +256,195 @@ void Frontend::adjustLobbyValue(int direction) {
                 values.size();
         return values[index];
     };
+    if (lobbyPage_ == 0) {
+        SkirmishSlot &slot =
+            settings_.slots[lobbySlot_];
+        switch (selection_) {
+        case 0:
+            lobbySlot_ =
+                (lobbySlot_ +
+                 kMaxSkirmishSlots +
+                 (direction < 0 ? -1 : 1)) %
+                kMaxSkirmishSlots;
+            break;
+        case 1:
+            slot.type =
+                (SkirmishSlotType)(
+                    ((int)slot.type + 3 +
+                     (direction < 0 ? -1 : 1)) %
+                    3);
+            break;
+        case 2:
+            slot.name =
+                slot.type ==
+                        SkirmishSlotType::Human
+                    ? "Player " +
+                          std::to_string(
+                              lobbySlot_ + 1)
+                    : "Computer " +
+                          std::to_string(
+                              lobbySlot_ + 1);
+            break;
+        case 3: {
+            const uint8_t old = slot.color;
+            const uint8_t next =
+                (uint8_t)((slot.color +
+                           kMaxSkirmishSlots +
+                           (direction < 0 ? -1
+                                          : 1)) %
+                          kMaxSkirmishSlots);
+            for (SkirmishSlot &other :
+                 settings_.slots)
+                if (&other != &slot &&
+                    other.color == next) {
+                    other.color = old;
+                    break;
+                }
+            slot.color = next;
+            break;
+        }
+        case 4:
+            slot.civilization =
+                (uint8_t)(1 +
+                    (slot.civilization - 1 + 8 +
+                     (direction < 0 ? -1 : 1)) %
+                        8);
+            break;
+        case 5:
+            slot.difficulty =
+                (uint8_t)((slot.difficulty + 5 +
+                           (direction < 0 ? -1 : 1)) %
+                          5);
+            break;
+        case 6:
+            slot.personality =
+                (AiPersonality)(
+                    ((int)slot.personality + 2 +
+                     (direction < 0 ? -1 : 1)) %
+                    2);
+            break;
+        case 7:
+            slot.team =
+                (uint8_t)((slot.team +
+                           kMaxSkirmishSlots + 1 +
+                           (direction < 0 ? -1 : 1)) %
+                          (kMaxSkirmishSlots + 1));
+            break;
+        case 8:
+            slot.alliedVictory =
+                !slot.alliedVictory;
+            break;
+        default: break;
+        }
+        settings_.playerCivilization =
+            settings_.slots[0].civilization;
+        settings_.computerCivilization =
+            settings_.slots[1].civilization;
+        settings_.difficulty =
+            settings_.slots[1].difficulty;
+        settings_.personality =
+            settings_.slots[1].personality;
+        refreshLobbyPreview();
+        return;
+    }
     switch (selection_) {
     case 0:
-        settings_.playerCivilization =
-            1 + (settings_.playerCivilization - 1 + 8 +
-                 (direction < 0 ? -1 : 1)) %
-                    8;
-        break;
-    case 1:
-        settings_.computerCivilization =
-            1 + (settings_.computerCivilization - 1 + 8 +
-                 (direction < 0 ? -1 : 1)) %
-                    8;
-        break;
-    case 2:
-        settings_.difficulty =
-            (settings_.difficulty + 5 +
-             (direction < 0 ? -1 : 1)) %
-            5;
-        break;
-    case 3:
-        settings_.personality =
-            (AiPersonality)(((int)settings_.personality + 2 +
-                             (direction < 0 ? -1 : 1)) %
-                            2);
-        break;
-    case 4: settings_.allied = !settings_.allied; break;
-    case 5:
         settings_.mapStyle =
-            (SkirmishMapStyle)(((int)settings_.mapStyle + 3 +
+            (SkirmishMapStyle)(((int)settings_.mapStyle + 10 +
                                 (direction < 0 ? -1 : 1)) %
-                               3);
+                               10);
         if (settings_.mapStyle ==
             SkirmishMapStyle::CompactIslands)
             settings_.mapSize = 96;
         break;
-    case 6:
+    case 1:
         if (settings_.mapStyle !=
             SkirmishMapStyle::CompactIslands)
             settings_.mapSize =
                 cycle(settings_.mapSize, mapSizes);
         break;
-    case 7:
+    case 2:
         settings_.startingResources =
             cycle(settings_.startingResources, resources);
         break;
-    case 8:
+    case 3:
         settings_.populationCap =
             cycle(settings_.populationCap, populations);
         break;
+    case 4:
+        settings_.startingTechLevel =
+            1 + (settings_.startingTechLevel - 1 + 4 +
+                 (direction < 0 ? -1 : 1)) %
+                    4;
+        settings_.endingTechLevel =
+            std::max(
+                settings_.endingTechLevel,
+                settings_.startingTechLevel);
+        break;
+    case 5:
+        settings_.endingTechLevel =
+            settings_.startingTechLevel +
+            (settings_.endingTechLevel -
+                 settings_.startingTechLevel +
+             5 +
+             (direction < 0 ? -1 : 1)) %
+                (5 - settings_.startingTechLevel);
+        break;
+    case 6:
+        settings_.reveal =
+            (SkirmishReveal)(
+                ((int)settings_.reveal + 3 +
+                 (direction < 0 ? -1 : 1)) %
+                3);
+        break;
+    case 7:
+        settings_.teamsLocked =
+            !settings_.teamsLocked;
+        break;
+    case 8:
+        settings_.cheatsEnabled =
+            !settings_.cheatsEnabled;
+        break;
     case 9:
+        settings_.gameSpeed =
+            (SkirmishGameSpeed)(
+                ((int)settings_.gameSpeed + 3 +
+                 (direction < 0 ? -1 : 1)) %
+                3);
+        break;
+    case 10:
         settings_.victory =
             (SkirmishVictory)(((int)settings_.victory + 5 +
                                (direction < 0 ? -1 : 1)) %
                               5);
         break;
-    case 10:
+    case 11:
+        if (settings_.victory ==
+            SkirmishVictory::TimeLimit)
+            settings_.timeLimitMinutes =
+                std::clamp(
+                    settings_.timeLimitMinutes +
+                        (direction < 0 ? -5 : 5),
+                    5, 240);
+        else if (settings_.victory ==
+                 SkirmishVictory::Score)
+            settings_.scoreLimit =
+                std::clamp(
+                    settings_.scoreLimit +
+                        (direction < 0 ? -500 : 500),
+                    500, 20000);
+        break;
+    case 12:
         settings_.seed += direction < 0 ? UINT32_MAX : 1u;
         break;
     default: break;
     }
+    refreshLobbyPreview();
+}
+
+void Frontend::refreshLobbyPreview() {
+    lobbyPreview_ =
+        generateSkirmishPreview(settings_);
 }
 
 void Frontend::adjustOptionValue(int direction) {
@@ -369,6 +568,8 @@ FrontendAction Frontend::update(
             } else if (selection_ == 1) {
                 screen_ = FrontendScreen::SkirmishLobby;
                 selection_ = 0;
+                lobbyPage_ = 0;
+                refreshLobbyPreview();
             } else if (selection_ == 2) {
                 if (!continueAvailable_) {
                     message_ = "NO VALID SAVE IS AVAILABLE";
@@ -486,27 +687,60 @@ FrontendAction Frontend::update(
     }
 
     if (screen_ == FrontendScreen::SkirmishLobby) {
-        constexpr size_t count = 13;
+        const size_t count =
+            lobbyPage_ == 0 ? 12u : 16u;
         const size_t touched =
             rowFromPointer(input, kLobbyTop, kLobbyRow, count);
         if (touched < count) selection_ = touched;
+        if (input.actionTabLeft ||
+            input.actionTabRight) {
+            lobbyPage_ = 1 - lobbyPage_;
+            selection_ = 0;
+        }
         if (input.menuUp) moveSelection(-1, count);
         if (input.menuDown) moveSelection(1, count);
         if (input.menuLeft) adjustLobbyValue(-1);
         if (input.menuRight) adjustLobbyValue(1);
-        if ((input.menuActivate || touched < count) &&
-            selection_ < 11)
-            adjustLobbyValue(1);
-        if ((input.menuActivate || touched < count) &&
-            selection_ == 11) {
-            campaignMatch_ = false;
-            screen_ = FrontendScreen::Loading;
-            message_ = "GENERATING RANDOM MAP...";
-            return FrontendAction::StartSkirmish;
+        const bool activated =
+            input.menuActivate || touched < count;
+        const size_t switchRow =
+            lobbyPage_ == 0 ? 9u : 13u;
+        const size_t startRow =
+            lobbyPage_ == 0 ? 10u : 14u;
+        const size_t backRow =
+            lobbyPage_ == 0 ? 11u : 15u;
+        if (activated &&
+            selection_ < switchRow) {
+            if (lobbyPage_ == 1 &&
+                selection_ == 12) {
+                settings_.seed =
+                    settings_.seed * 1664525u +
+                    1013904223u;
+                refreshLobbyPreview();
+            } else {
+                adjustLobbyValue(1);
+            }
         }
-        if (input.menuBack ||
-            ((input.menuActivate || touched < count) &&
-             selection_ == 12)) {
+        if (activated &&
+            selection_ == switchRow) {
+            lobbyPage_ = 1 - lobbyPage_;
+            selection_ = 0;
+        } else if (activated &&
+                   selection_ == startRow) {
+            std::string validationError;
+            if (!validateSkirmishSettings(
+                    settings_,
+                    &validationError)) {
+                message_ = validationError;
+            } else {
+                campaignMatch_ = false;
+                screen_ = FrontendScreen::Loading;
+                message_ = "GENERATING RANDOM MAP...";
+                return FrontendAction::StartSkirmish;
+            }
+        } else if (input.menuBack ||
+                   (activated &&
+                    selection_ == backRow)) {
             screen_ = FrontendScreen::SinglePlayer;
             selection_ = 1;
         }
@@ -944,26 +1178,158 @@ void Frontend::render(
         }
     } else if (screen_ == FrontendScreen::SkirmishLobby) {
         centeredText(
-            renderer, "SKIRMISH SETUP", 25, 2.5f,
+            renderer,
+            lobbyPage_ == 0
+                ? "SKIRMISH PLAYERS"
+                : "RANDOM MAP SETTINGS",
+            25, 2.35f,
             screenW, 235, 213, 145);
-        panel(renderer, 118, 73, 724, 455);
-        for (size_t row = 0; row < 13; ++row) {
+        panel(renderer, 48, 73, 864, 455);
+        const size_t count =
+            lobbyPage_ == 0 ? 12u : 16u;
+        for (size_t row = 0; row < count; ++row) {
             const float y = kLobbyTop + row * kLobbyRow;
             if (row == selection_)
                 renderer.fillRect(
-                    132, y - 5, 696, kLobbyRow - 2,
+                    64, y - 4, 536, kLobbyRow - 1,
                     30, 72, 102, 255);
-            if (*lobbyLabel(row))
+            if (*lobbyLabel(lobbyPage_, row))
                 drawUiText(
-                    renderer, {lobbyLabel(row)}, 152, y,
-                    1.14f, 196, 211, 225);
+                    renderer,
+                    {lobbyLabel(lobbyPage_, row)},
+                    80, y, 0.92f,
+                    196, 211, 225);
             drawUiText(
-                renderer, {lobbyValue(settings_, row)},
-                row < 11 ? 486.0f : 378.0f, y,
-                row < 11 ? 1.14f : 1.28f,
+                renderer,
+                {lobbyValue(
+                    settings_, lobbyPage_,
+                    lobbySlot_, row)},
+                324.0f, y, 0.92f,
                 row == selection_ ? 255 : 220,
                 row == selection_ ? 231 : 226,
                 row == selection_ ? 159 : 232);
+        }
+        if (lobbyPage_ == 0) {
+            drawUiText(
+                renderer,
+                {"ACTIVE SLOTS"}, 638, 96,
+                1.0f, 235, 213, 145);
+            float y = 129.0f;
+            for (int slot = 0;
+                 slot < kMaxSkirmishSlots;
+                 ++slot) {
+                const SkirmishSlot &player =
+                    settings_.slots[(size_t)slot];
+                const std::string summary =
+                    std::to_string(slot + 1) +
+                    "  " +
+                    slotTypeName(player.type) +
+                    "  C" +
+                    std::to_string(
+                        player.color + 1) +
+                    "  T" +
+                    (player.team
+                         ? std::to_string(
+                               player.team)
+                         : "-");
+                drawUiText(
+                    renderer, {summary},
+                    638, y, 0.78f,
+                    (size_t)slot == lobbySlot_
+                        ? 255
+                        : 175,
+                    (size_t)slot == lobbySlot_
+                        ? 226
+                        : 196,
+                    (size_t)slot == lobbySlot_
+                        ? 139
+                        : 210);
+                y += 34.0f;
+            }
+            drawUiText(
+                renderer,
+                {"L/R CHANGE  L/R TRIGGER PAGE"},
+                638, 426, 0.66f,
+                143, 172, 194);
+        } else {
+            constexpr float previewX = 664.0f;
+            constexpr float previewY = 110.0f;
+            constexpr float pixel = 4.0f;
+            renderer.fillRect(
+                previewX - 4, previewY - 4,
+                SkirmishPreview::kWidth * pixel + 8,
+                SkirmishPreview::kHeight * pixel + 8,
+                12, 26, 38, 255);
+            for (int y = 0;
+                 y < SkirmishPreview::kHeight;
+                 ++y)
+                for (int x = 0;
+                     x < SkirmishPreview::kWidth;
+                     ++x) {
+                    const uint8_t terrain =
+                        lobbyPreview_.terrain[
+                            (size_t)y *
+                                SkirmishPreview::kWidth +
+                            x];
+                    const uint8_t r =
+                        terrain == 2
+                            ? 20
+                        : terrain == 1
+                            ? 175
+                            : 53;
+                    const uint8_t g =
+                        terrain == 2
+                            ? 72
+                        : terrain == 1
+                            ? 157
+                            : 112;
+                    const uint8_t b =
+                        terrain == 2
+                            ? 135
+                        : terrain == 1
+                            ? 90
+                            : 58;
+                    renderer.fillRect(
+                        previewX + x * pixel,
+                        previewY + y * pixel,
+                        pixel, pixel, r, g, b, 255);
+                }
+            for (int slot = 0;
+                 slot < kMaxSkirmishSlots;
+                 ++slot) {
+                if (settings_.slots[(size_t)slot].type ==
+                    SkirmishSlotType::Closed)
+                    continue;
+                const auto &start =
+                    lobbyPreview_.starts[
+                        (size_t)slot];
+                const float x =
+                    previewX +
+                    start[0] / settings_.mapSize *
+                        SkirmishPreview::kWidth *
+                        pixel;
+                const float y =
+                    previewY +
+                    start[1] / settings_.mapSize *
+                        SkirmishPreview::kHeight *
+                        pixel;
+                renderer.fillRect(
+                    x - 3, y - 3, 7, 7,
+                    255, 220, 92, 255);
+            }
+            drawUiText(
+                renderer,
+                {"MINIMAP PREVIEW",
+                 "HASH " +
+                     std::to_string(
+                         lobbyPreview_.hash),
+                 "",
+                 "VITA SAFE CAP: 160 x 160",
+                 "L/R CHANGE",
+                 "X ON SEED: RANDOMIZE",
+                 "L/R TRIGGER: PLAYER SLOTS"},
+                652, 264, 0.68f,
+                163, 190, 208);
         }
     } else if (screen_ == FrontendScreen::Pause) {
         std::vector<std::string> entries{

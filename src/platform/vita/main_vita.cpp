@@ -347,14 +347,6 @@ int main() {
                 frontend.settings();
             if (!game.initSkirmish(settings, &err))
                 return false;
-            const char *personality =
-                settings.personality ==
-                        swgb::AiPersonality::Classic
-                    ? "Computer Classic.per"
-                    : "Computer Expanded.per";
-            const std::string aiPath =
-                std::string("ux0:data/swgb/AI/") +
-                personality;
             static constexpr const char *difficulties[] = {
                 "DIFFICULTY-HARDEST",
                 "DIFFICULTY-HARD",
@@ -362,33 +354,60 @@ int main() {
                 "DIFFICULTY-EASY",
                 "DIFFICULTY-EASIEST",
             };
-            std::unordered_set<std::string> defines{
-                difficulties[std::max(
-                    0, std::min(4, settings.difficulty))],
-                "POPULATION-CAP-" +
-                    std::to_string(settings.populationCap),
-            };
-            if (settings.victory ==
-                swgb::SkirmishVictory::Standard)
-                defines.insert("VICTORY-STANDARD");
-            else if (settings.victory ==
-                     swgb::SkirmishVictory::Conquest)
-                defines.insert("VICTORY-CONQUEST");
-            if (settings.mapStyle ==
-                    swgb::SkirmishMapStyle::Archipelago ||
-                settings.mapStyle ==
-                    swgb::SkirmishMapStyle::CompactIslands)
-                defines.insert(
-                    settings.allied
-                        ? "TEAM-LAND-SATELLITES-MAP"
-                        : "LAND-SATELLITES-MAP");
-            if (!game.loadAiScript(
-                    2, aiPath, defines, &err)) {
-                err =
-                    "AI personality could not be loaded: " +
-                    err +
-                    " (copy the original AI folder)";
-                return false;
+            for (int slot = 0;
+                 slot < swgb::kMaxSkirmishSlots;
+                 ++slot) {
+                const swgb::SkirmishSlot &player =
+                    settings.slots[(size_t)slot];
+                if (player.type !=
+                    swgb::SkirmishSlotType::Computer)
+                    continue;
+                const char *personality =
+                    player.personality ==
+                            swgb::AiPersonality::Classic
+                        ? "Computer Classic.per"
+                        : "Computer Expanded.per";
+                const std::string aiPath =
+                    std::string(
+                        "ux0:data/swgb/AI/") +
+                    personality;
+                std::unordered_set<std::string> defines{
+                    difficulties[std::max(
+                        0, std::min(
+                               4,
+                               (int)player
+                                   .difficulty))],
+                    "POPULATION-CAP-" +
+                        std::to_string(
+                            settings.populationCap),
+                };
+                if (settings.victory ==
+                    swgb::SkirmishVictory::Standard)
+                    defines.insert(
+                        "VICTORY-STANDARD");
+                else if (settings.victory ==
+                         swgb::SkirmishVictory::Conquest)
+                    defines.insert(
+                        "VICTORY-CONQUEST");
+                if (settings.mapStyle ==
+                        swgb::SkirmishMapStyle::Archipelago ||
+                    settings.mapStyle ==
+                        swgb::SkirmishMapStyle::CompactIslands)
+                    defines.insert(
+                        player.team > 0
+                            ? "TEAM-LAND-SATELLITES-MAP"
+                            : "LAND-SATELLITES-MAP");
+                if (!game.loadAiScript(
+                        slot + 1, aiPath,
+                        defines, &err)) {
+                    err =
+                        "AI personality for slot " +
+                        std::to_string(slot + 1) +
+                        " could not be loaded: " +
+                        err +
+                        " (copy the original AI folder)";
+                    return false;
+                }
             }
             campaignMatch = false;
             frontend.setCampaignMatch(false);

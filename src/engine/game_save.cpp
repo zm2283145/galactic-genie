@@ -14,7 +14,7 @@ namespace {
 
 constexpr char kSaveMagic[8] = {
     'S', 'W', 'G', 'B', 'S', 'A', 'V', 'E'};
-constexpr uint32_t kSaveVersion = 5;
+constexpr uint32_t kSaveVersion = 6;
 constexpr uint32_t kOldestSaveVersion = 1;
 constexpr size_t kMaxSaveBytes = 32u * 1024u * 1024u;
 constexpr uint32_t kMaxObjects = 20000;
@@ -150,12 +150,32 @@ void writeSettings(
     writer.scalar(settings.startingResources);
     writer.scalar(settings.populationCap);
     writer.scalar(settings.victory);
+    for (const SkirmishSlot &slot :
+         settings.slots) {
+        writer.scalar(slot.type);
+        writer.string(slot.name);
+        writer.scalar(slot.color);
+        writer.scalar(slot.civilization);
+        writer.scalar(slot.personality);
+        writer.scalar(slot.difficulty);
+        writer.scalar(slot.team);
+        writer.scalar(slot.alliedVictory);
+    }
+    writer.scalar(settings.startingTechLevel);
+    writer.scalar(settings.endingTechLevel);
+    writer.scalar(settings.reveal);
+    writer.scalar(settings.teamsLocked);
+    writer.scalar(settings.cheatsEnabled);
+    writer.scalar(settings.gameSpeed);
+    writer.scalar(settings.timeLimitMinutes);
+    writer.scalar(settings.scoreLimit);
 }
 
 bool readSettings(
     Reader &reader,
     SkirmishSettings &settings,
     uint32_t version) {
+    uint8_t encodedMapStyle = 0;
     if (!(reader.scalar(settings.seed) &&
            reader.scalar(settings.mapSize) &&
            reader.scalar(
@@ -165,12 +185,86 @@ bool readSettings(
            reader.scalar(settings.difficulty) &&
            reader.scalar(settings.personality) &&
            reader.scalar(settings.allied) &&
-           reader.scalar(settings.mapStyle) &&
+           reader.scalar(encodedMapStyle) &&
            reader.scalar(
                settings.startingResources) &&
            reader.scalar(settings.populationCap) &&
            reader.scalar(settings.victory)))
         return false;
+    if (version <= 5) {
+        switch (encodedMapStyle) {
+        case 0:
+            settings.mapStyle =
+                SkirmishMapStyle::Grasslands;
+            break;
+        case 1:
+            settings.mapStyle =
+                SkirmishMapStyle::Archipelago;
+            break;
+        case 2:
+            settings.mapStyle =
+                SkirmishMapStyle::CompactIslands;
+            break;
+        case 3:
+            settings.mapStyle =
+                SkirmishMapStyle::LegacyRandom;
+            break;
+        default:
+            return reader.fail(
+                "save contains invalid legacy map style");
+        }
+        settings.slots = SkirmishSettings().slots;
+        settings.slots[0].civilization =
+            (uint8_t)settings.playerCivilization;
+        settings.slots[1].civilization =
+            (uint8_t)settings.computerCivilization;
+        settings.slots[1].difficulty =
+            (uint8_t)settings.difficulty;
+        settings.slots[1].personality =
+            settings.personality;
+        settings.slots[0].team =
+            settings.allied ? 1 : 1;
+        settings.slots[1].team =
+            settings.allied ? 1 : 2;
+        settings.slots[0].alliedVictory =
+            settings.allied;
+        settings.slots[1].alliedVictory =
+            settings.allied;
+        // These options were not serialized before v6. Match the
+        // historical unrestricted generated-match behavior so a
+        // migrated save compares against its legacy initialization.
+        settings.teamsLocked = false;
+        settings.cheatsEnabled = true;
+    } else {
+        settings.mapStyle =
+            (SkirmishMapStyle)encodedMapStyle;
+        for (SkirmishSlot &slot :
+             settings.slots) {
+            if (!reader.scalar(slot.type) ||
+                !reader.string(slot.name, 64) ||
+                !reader.scalar(slot.color) ||
+                !reader.scalar(slot.civilization) ||
+                !reader.scalar(slot.personality) ||
+                !reader.scalar(slot.difficulty) ||
+                !reader.scalar(slot.team) ||
+                !reader.scalar(
+                    slot.alliedVictory))
+                return false;
+        }
+        if (!reader.scalar(
+                settings.startingTechLevel) ||
+            !reader.scalar(
+                settings.endingTechLevel) ||
+            !reader.scalar(settings.reveal) ||
+            !reader.scalar(settings.teamsLocked) ||
+            !reader.scalar(
+                settings.cheatsEnabled) ||
+            !reader.scalar(settings.gameSpeed) ||
+            !reader.scalar(
+                settings.timeLimitMinutes) ||
+            !reader.scalar(settings.scoreLimit))
+            return false;
+    }
     if (version == 1) {
         const uint8_t old =
             (uint8_t)settings.victory;
@@ -204,7 +298,40 @@ bool sameSettings(
                right.startingResources &&
            left.populationCap ==
                right.populationCap &&
-           left.victory == right.victory;
+           left.victory == right.victory &&
+           left.startingTechLevel ==
+               right.startingTechLevel &&
+           left.endingTechLevel ==
+               right.endingTechLevel &&
+           left.reveal == right.reveal &&
+           left.teamsLocked ==
+               right.teamsLocked &&
+           left.cheatsEnabled ==
+               right.cheatsEnabled &&
+           left.gameSpeed == right.gameSpeed &&
+           left.timeLimitMinutes ==
+               right.timeLimitMinutes &&
+           left.scoreLimit ==
+               right.scoreLimit &&
+           std::equal(
+               left.slots.begin(),
+               left.slots.end(),
+               right.slots.begin(),
+               [](const SkirmishSlot &a,
+                  const SkirmishSlot &b) {
+                   return a.type == b.type &&
+                          a.name == b.name &&
+                          a.color == b.color &&
+                          a.civilization ==
+                              b.civilization &&
+                          a.personality ==
+                              b.personality &&
+                          a.difficulty ==
+                              b.difficulty &&
+                          a.team == b.team &&
+                          a.alliedVictory ==
+                              b.alliedVictory;
+               });
 }
 
 bool readFile(
@@ -461,8 +588,12 @@ bool Game::readSaveMetadata(
     const SkirmishSettings &settings =
         loaded.skirmish;
     if (loaded.kind == MatchSaveKind::Skirmish &&
-        (settings.mapSize < 48 ||
-         settings.mapSize > 192 ||
+        ((version >= 6 &&
+          !validateSkirmishSettings(
+              settings, err)) ||
+         (version < 6 &&
+          (settings.mapSize < 48 ||
+           settings.mapSize > 192)) ||
          settings.playerCivilization < 1 ||
          settings.playerCivilization > 8 ||
          settings.computerCivilization < 1 ||
@@ -474,7 +605,8 @@ bool Game::readSaveMetadata(
              SkirmishVictory::Standard ||
          settings.victory >
              SkirmishVictory::CommandCenter)) {
-        if (err) *err = "save contains invalid match settings";
+        if (err && err->empty())
+            *err = "save contains invalid match settings";
         return false;
     }
     if (loaded.kind == MatchSaveKind::Campaign &&
@@ -509,6 +641,10 @@ bool Game::saveMatch(
     writer.scalar(victoryCondition_);
     writer.scalar(victoryState_);
     writer.scalar(conquestEnabled_);
+    writer.scalar(reveal_);
+    writer.scalar(gameSpeed_);
+    writer.scalar(cheatsEnabled_);
+    writer.scalar(teamsLocked_);
     writer.scalar(conquestCheckTime_);
     writer.scalar(victoryCountdownPlayer_);
     writer.scalar(victoryCountdownKind_);
@@ -1011,6 +1147,12 @@ bool Game::loadMatch(
         SkirmishVictory::Conquest;
     int victoryState = -1;
     bool conquestEnabled = false;
+    SkirmishReveal reveal =
+        SkirmishReveal::Normal;
+    SkirmishGameSpeed gameSpeed =
+        SkirmishGameSpeed::Normal;
+    bool cheatsEnabled = false;
+    bool teamsLocked = false;
     float conquestCheckTime = 0;
     int victoryCountdownPlayer = -1;
     int victoryCountdownKind = 0;
@@ -1040,6 +1182,11 @@ bool Game::loadMatch(
         !reader.scalar(victoryCondition) ||
         !reader.scalar(victoryState) ||
         !reader.scalar(conquestEnabled) ||
+        (version >= 6 &&
+         (!reader.scalar(reveal) ||
+          !reader.scalar(gameSpeed) ||
+          !reader.scalar(cheatsEnabled) ||
+          !reader.scalar(teamsLocked))) ||
         !reader.scalar(conquestCheckTime) ||
         (version >= 2 &&
          (!reader.scalar(
@@ -1084,7 +1231,11 @@ bool Game::loadMatch(
         victoryCountdownRemaining < 0.0f ||
         standardVictoryCountdown <= 0.0f ||
         timeLimitSeconds <= 0.0f ||
-        scoreLimit <= 0) {
+        scoreLimit <= 0 ||
+        reveal < SkirmishReveal::Normal ||
+        reveal > SkirmishReveal::AllVisible ||
+        gameSpeed < SkirmishGameSpeed::Slow ||
+        gameSpeed > SkirmishGameSpeed::Fast) {
         if (err)
             *err = reader.ok()
                        ? "save contains invalid global state"
@@ -2131,6 +2282,10 @@ bool Game::loadMatch(
     victoryCondition_ = victoryCondition;
     victoryState_ = victoryState;
     conquestEnabled_ = conquestEnabled;
+    reveal_ = reveal;
+    gameSpeed_ = gameSpeed;
+    cheatsEnabled_ = cheatsEnabled;
+    teamsLocked_ = teamsLocked;
     conquestCheckTime_ = conquestCheckTime;
     victoryCountdownPlayer_ =
         victoryCountdownPlayer;
