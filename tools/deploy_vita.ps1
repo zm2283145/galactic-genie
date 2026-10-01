@@ -11,6 +11,8 @@
 #   tools\deploy_vita.ps1 -TerrainSoundData # copies camera-relative terrain ambience
 #   tools\deploy_vita.ps1 -LanguageData  # copies localized interface strings
 #   tools\deploy_vita.ps1 -AiData        # copies the original .per AI personalities
+#   tools\deploy_vita.ps1 -AllCampaignSoundData # copies dialogue used by all 43 stock missions
+#   tools\deploy_vita.ps1 -AllRequiredData # uploads and size-verifies the complete required installation
 #   tools\deploy_vita.ps1 -ScenarioImport -ScenarioFile <file.scx> # stages an editor import
 #   tools\deploy_vita.ps1 -PullLog      # downloads ux0:data/swgb/swgb.log to build-vita\swgb.log
 param(
@@ -36,12 +38,30 @@ param(
     [switch]$TerrainSoundData,
     [switch]$LanguageData,
     [switch]$AiData,
+    [switch]$AllCampaignSoundData,
+    [switch]$AllRequiredData,
+    [switch]$Verify,
     [switch]$ScenarioImport,
     [switch]$PullLog
 )
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 $base = "ftp://$Vita`:$Port"
+$campaignArchives = "XCAM1.CPX", "XCAM2.CPX", "XCAM3.CPX", "XCAM4.CPX", "Xcam5.cpx", "XCAM8.CPX"
+
+if ($AllRequiredData) {
+    $Vpk = $true
+    $GameData = $true
+    $CampaignData = $true
+    $OutcomeSoundData = $true
+    $UnitSoundData = $true
+    $MusicData = $true
+    $TerrainSoundData = $true
+    $LanguageData = $true
+    $AiData = $true
+    $AllCampaignSoundData = $true
+    $Verify = $true
+}
 
 function Ftp-MkDir($path) {
     try {
@@ -54,15 +74,40 @@ function Ftp-MkDir($path) {
 
 function Ftp-Put($local, $remote) {
     $len = (Get-Item $local).Length
+    $remoteUrl = ([Uri]"$base/$remote").AbsoluteUri
     Write-Host ("  {0} -> {1} ({2:N1} MB)" -f (Split-Path $local -Leaf), $remote, ($len / 1MB))
-    $r = [Net.FtpWebRequest]::Create("$base/$remote")
-    $r.Method = [Net.WebRequestMethods+Ftp]::UploadFile
-    $r.UseBinary = $true
-    $r.UsePassive = $true
-    $s = $r.GetRequestStream()
-    $f = [IO.File]::OpenRead($local)
-    try { $f.CopyTo($s, 1MB) } finally { $f.Close(); $s.Close() }
-    $r.GetResponse().Close()
+    if ($AllRequiredData) {
+        try {
+            $existingLen = Ftp-Size $remote
+            if ($existingLen -eq $len) {
+                Write-Host ("    already verified {0:N1} MB" -f ($existingLen / 1MB))
+                return
+            }
+        } catch {
+            # Missing and partially uploaded files continue through the normal upload.
+        }
+    }
+    $uploaded = $false
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        $result = (& curl.exe --silent --show-error --fail --ftp-create-dirs `
+            --connect-timeout 20 --max-time 0 --upload-file $local $remoteUrl 2>&1) -join "`n"
+        if ($LASTEXITCODE -eq 0) {
+            $uploaded = $true
+            break
+        }
+        Write-Warning "upload attempt $attempt failed for $remote`: $result"
+        Start-Sleep -Seconds 2
+    }
+    if (-not $uploaded) {
+        throw "could not upload $local to $remote after 5 attempts"
+    }
+    if ($Verify) {
+        $remoteLen = Ftp-Size $remote
+        if ($remoteLen -ne $len) {
+            throw "remote size mismatch for $remote (local $len, remote $remoteLen)"
+        }
+        Write-Host ("    verified {0:N1} MB" -f ($remoteLen / 1MB))
+    }
 }
 
 function Ftp-Get($remote, $local) {
@@ -73,6 +118,31 @@ function Ftp-Get($remote, $local) {
     $resp = $r.GetResponse()
     $f = [IO.File]::Create($local)
     try { $resp.GetResponseStream().CopyTo($f) } finally { $f.Close(); $resp.Close() }
+}
+
+function Ftp-Size($remote) {
+    # VitaShell's response to the FTP SIZE command is unreliable through
+    # FtpWebRequest, while its RETR metadata reports the exact byte count.
+    $remoteUrl = ([Uri]"$base/$remote").AbsoluteUri
+    $headers = (& curl.exe --silent --show-error --head $remoteUrl 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0) {
+        throw "could not inspect remote file $remote`: $headers"
+    }
+    $match = [regex]::Match($headers, "(?im)^Content-Length:\s*(\d+)")
+    if (-not $match.Success) {
+        throw "remote file size missing for $remote`: $headers"
+    }
+    return [int64]$match.Groups[1].Value
+}
+
+function Campaign-SoundNames($archive, $entry) {
+    $scenario = (& $tool scenario $archive $entry 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0) {
+        throw "could not inspect campaign sounds: $scenario"
+    }
+    [regex]::Matches($scenario, "sound '([^']+)'") |
+        ForEach-Object { $_.Groups[1].Value } |
+        Where-Object { $_ }
 }
 
 Ftp-MkDir "ux0:/data/swgb"
@@ -90,7 +160,7 @@ if ($GameData) {
 }
 if ($CampaignData) {
     Ftp-MkDir "ux0:/data/swgb/Campaign"
-    foreach ($f in "XCAM1.CPX", "XCAM2.CPX", "XCAM3.CPX", "XCAM4.CPX", "Xcam5.cpx", "XCAM8.CPX") {
+    foreach ($f in $campaignArchives) {
         Ftp-Put (Join-Path $CampaignDir $f) "ux0:/data/swgb/Campaign/$($f.ToLower())"
     }
 }
@@ -100,25 +170,47 @@ if ($IntroMedia) {
         Ftp-Put (Join-Path $gameRoot $f) "ux0:/data/swgb/$f"
     }
 }
-if ($SoundData) {
+if ($SoundData -or $AllCampaignSoundData) {
     $tool = Join-Path $repo "build-pc\swgbtool.exe"
     if (-not (Test-Path $tool)) {
         throw "build-pc\swgbtool.exe is required; run tools\build_vita.ps1 -Pc first"
     }
     $env:Path = "C:\msys64\mingw64\bin;C:\msys64\usr\bin;" + $env:Path
-    $campaign = Join-Path $CampaignDir $CampaignArchive
-    $scenario = (& $tool scenario $campaign $CampaignEntry 2>&1) -join "`n"
-    if ($LASTEXITCODE -ne 0) { throw "could not inspect campaign sounds: $scenario" }
-    $names = [regex]::Matches($scenario, "sound '([^']+)'") |
-        ForEach-Object { $_.Groups[1].Value } |
-        Where-Object { $_ } |
-        Sort-Object -Unique
+    if ($AllCampaignSoundData) {
+        $names = foreach ($archiveName in $campaignArchives) {
+            $campaign = Join-Path $CampaignDir $archiveName
+            $listing = (& $tool campaign $campaign 2>&1) -join "`n"
+            if ($LASTEXITCODE -ne 0) {
+                throw "could not inspect campaign archive: $listing"
+            }
+            $entryMatch = [regex]::Match($listing, "(\d+) entries")
+            if (-not $entryMatch.Success) {
+                throw "could not determine entry count for $campaign"
+            }
+            $entryCount = [int]$entryMatch.Groups[1].Value
+            for ($entry = 1; $entry -le $entryCount; $entry++) {
+                Campaign-SoundNames $campaign $entry
+            }
+        }
+    } else {
+        $campaign = Join-Path $CampaignDir $CampaignArchive
+        $names = Campaign-SoundNames $campaign $CampaignEntry
+    }
+    $names = $names | Sort-Object -Unique
     Ftp-MkDir "ux0:/data/swgb/Sound"
     Ftp-MkDir "ux0:/data/swgb/Sound/Scenario"
+    $missingSounds = @()
     foreach ($name in $names) {
         $local = Join-Path $SoundDir "$name.mp3"
-        if (-not (Test-Path $local)) { throw "missing scenario sound $local" }
+        if (-not (Test-Path $local)) {
+            $missingSounds += $local
+            continue
+        }
         Ftp-Put $local "ux0:/data/swgb/Sound/Scenario/$($name.ToLower()).mp3"
+    }
+    if ($missingSounds.Count -gt 0) {
+        Write-Warning ("The original installation does not contain {0} referenced scenario sound(s):`n  {1}" -f
+            $missingSounds.Count, ($missingSounds -join "`n  "))
     }
 }
 if ($OutcomeSoundData) {

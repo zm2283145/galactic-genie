@@ -63,6 +63,7 @@ cmake -B build-pc && cmake --build build-pc
 3. Copy the MP3 dialogue referenced by the mission from `Game/Sound/Scenario` to
    `ux0:data/swgb/Sound/Scenario/`. `tools\deploy_vita.ps1 -SoundData` extracts the names from
    the archive/entry selected by `-CampaignArchive` and `-CampaignEntry` and copies only those files.
+   `-AllCampaignSoundData` copies the deduplicated dialogue set referenced by all 43 stock missions.
 4. Copy `Game/MUSIC/Track02.ogg` and `Track03.ogg` to `ux0:data/swgb/Music/`, and the WAV files
    from `Game/Sound/Terrain` to `ux0:data/swgb/Sound/Terrain/`. The deployment script options
    `-MusicData` and `-TerrainSoundData` copy these soundtrack and ambience files.
@@ -73,6 +74,12 @@ cmake -B build-pc && cmake --build build-pc
    remain native engine behavior and are not deployment files.
 6. Install `swgb.vpk` with VitaShell. `tools\deploy_vita.ps1 -Vpk` uploads it to `ux0:data/swgb/`.
 7. The app writes a log to `ux0:data/swgb/swgb.log`. `tools\deploy_vita.ps1 -PullLog` fetches it.
+
+For a complete installation, `tools\deploy_vita.ps1 -AllRequiredData` uploads the VPK, core data,
+all six campaign archives and available referenced dialogue, unit sounds, soundtrack, terrain
+ambience, language tables, outcome streams, and original AI personalities. Every uploaded file is
+then checked against its remote byte length. The legacy IV50 intro AVI files remain optional because
+the native skippable startup presentation does not require them.
 
 Frontend controls: d-pad or left-stick up/down selects an entry, left/right changes difficulty or
 a lobby value, X activates, and O returns. Touching an entry selects and activates it. In the
