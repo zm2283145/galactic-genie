@@ -634,6 +634,11 @@ bool Game::initGenerated(
         if (!(i % 2)) continue; // (there is no ANIMAL-BANTHA; keep the layout)
         spawn(0, "ANIMAL-CAPTUREA1", 0, x, y, 0);
     }
+    if (settings.mapStyle ==
+            SkirmishMapStyle::Archipelago ||
+        settings.mapStyle ==
+            SkirmishMapStyle::CompactIslands)
+        spawnFishingResources();
     if (addStartingResources) {
         for (int player = 1; player <= 2; ++player)
             for (int resourceType = 0;
@@ -877,6 +882,8 @@ bool Game::initCompactTestMap(
     }
     spawnResourcePatches(
         aiX, aiY, 1.0f);
+    if (mapSize >= 96)
+        spawnFishingResources();
     rebuildAdjacency();
     refreshAllAutomaticTechnologies();
     updateVisibility();
@@ -1252,6 +1259,29 @@ int Game::aiObjectCountForTesting(
                : 0;
 }
 
+int Game::aiObjectTotalForTesting(
+    int player,
+    const std::string &symbol) const {
+    const dat::Unit *unit =
+        aiUnit(player, symbol);
+    if (!unit)
+        return 0;
+    const dat::Unit *effective =
+        effectiveUnitForPlayer(
+            player, unit);
+    int count = 0;
+    for (const Object &object :
+         objects_)
+        if (object.player == player &&
+            object.unit &&
+            (object.unit->id == unit->id ||
+             (effective &&
+              object.unit->id ==
+                  effective->id)))
+            count++;
+    return count;
+}
+
 size_t Game::aiQueuedUnitCountForTesting(
     int player, int unitId) const {
     size_t count = 0;
@@ -1462,6 +1492,60 @@ void Game::spawnStartingResources(
             }
         }
     }
+}
+
+void Game::spawnFishingResources() {
+    if (assets_.dat().civs.empty())
+        return;
+    std::vector<const dat::Unit *> fish;
+    for (const dat::Unit &unit :
+         assets_.dat().civs[0].units) {
+        if (!unit.exists ||
+            (unit.cls != 23 &&
+             unit.cls != 24 &&
+             unit.cls != 25))
+            continue;
+        const bool storesFish =
+            std::any_of(
+                unit.resourceStorages.begin(),
+                unit.resourceStorages.end(),
+                [](const dat::ResourceStorage &storage) {
+                    return storage.type == 17 &&
+                           storage.amount > 0.0f;
+                });
+        if (storesFish)
+            fish.push_back(&unit);
+    }
+    if (fish.empty())
+        return;
+    int spawned = 0;
+    const int targetCount =
+        std::max(8, mapSize_ / 8);
+    for (int y = 3;
+         y < mapSize_ - 3 &&
+         spawned < targetCount; y += 4)
+        for (int x = 3;
+             x < mapSize_ - 3 &&
+             spawned < targetCount; x += 4) {
+            const int terrain =
+                terrainAt(x, y);
+            if (terrain != T_WATER1 &&
+                terrain != T_WATER2 &&
+                terrain != T_WATER3)
+                continue;
+            const dat::Unit *unit =
+                fish[(size_t)spawned %
+                     fish.size()];
+            Object *resource =
+                addObject(
+                    unit, 0,
+                    x + 0.5f, y + 0.5f,
+                    0.0f, nextSpawnId_++);
+            if (!resource)
+                continue;
+            resource->wander = false;
+            spawned++;
+        }
 }
 
 uint64_t Game::mapHashForTesting() const {
@@ -1817,7 +1901,9 @@ Game::Object *Game::addObject(const dat::Unit *unit, int player, float x, float 
                object, 0, unit->hitPoints)));
     for (const dat::ResourceStorage &storage :
          unit->resourceStorages)
-        if (storage.type >= 0 && storage.type <= 3 &&
+        if (((storage.type >= 0 &&
+              storage.type <= 3) ||
+             storage.type == 17) &&
             storage.amount > 0) {
             object.resourceType = storage.type;
             object.resourceAmount = storage.amount;
@@ -2381,6 +2467,50 @@ size_t Game::activeObjectCount() const {
                                  [](const Object &object) { return object.active; });
 }
 
+bool Game::invariantsForTesting() const {
+    for (const Object &object : objects_) {
+        if (!object.active)
+            continue;
+        if (!object.unit ||
+            !std::isfinite(object.x) ||
+            !std::isfinite(object.y) ||
+            !std::isfinite(object.hitPoints) ||
+            !std::isfinite(object.maxHitPoints) ||
+            !std::isfinite(object.shieldPoints) ||
+            !std::isfinite(object.resourceAmount) ||
+            !std::isfinite(object.carriedAmount) ||
+            object.x < 0.0f ||
+            object.y < 0.0f ||
+            object.x >= mapSize_ ||
+            object.y >= mapSize_ ||
+            object.hitPoints < 0.0f ||
+            object.maxHitPoints <= 0.0f ||
+            object.pathIndex >
+                object.path.size() ||
+            object.shieldPoints < 0.0f ||
+            object.resourceAmount < -0.001f ||
+            object.carriedAmount < -0.001f)
+            return false;
+    }
+    for (const Projectile &projectile :
+         projectiles_)
+        if (!projectile.unit ||
+            !std::isfinite(projectile.x) ||
+            !std::isfinite(projectile.y) ||
+            !std::isfinite(projectile.z) ||
+            !std::isfinite(projectile.aimX) ||
+            !std::isfinite(projectile.aimY))
+            return false;
+    for (const auto &playerResources :
+         resources_)
+        for (const auto &entry :
+             playerResources)
+            if (!std::isfinite(entry.second) ||
+                entry.second < -0.01f)
+                return false;
+    return true;
+}
+
 size_t Game::underConstructionObjectCount() const {
     return (size_t)std::count_if(
         objects_.begin(), objects_.end(),
@@ -2719,6 +2849,7 @@ bool Game::moveObjectForTesting(
     object->y = object->homeY =
         object->moveAnchorY = object->targetY = y;
     object->path.clear();
+    object->pathIndex = 0;
     object->state = State::Idle;
     object->moveGoalActive = false;
     rebuildMobileOccupancy();
@@ -3247,7 +3378,10 @@ int Game::modifiedAttackAmount(
 int Game::modifiedArmourAmount(const Object &target,
                                int armourClass,
                                bool &present) const {
-    float amount = target.unit->baseArmor;
+    float amount =
+        modifiedUnitAttribute(
+            target, 15,
+            target.unit->baseArmor);
     present = false;
     for (const dat::AttackOrArmor &armour :
          target.unit->armours)
@@ -3300,6 +3434,19 @@ int Game::modifiedArmourAmount(const Object &target,
     return (int)std::lround(amount);
 }
 
+int Game::effectiveGarrisonCapacity(
+    const Object &object) const {
+    if (!object.unit)
+        return 0;
+    return std::max(
+        0,
+        (int)std::lround(
+            modifiedUnitAttribute(
+                object, 2,
+                object.unit
+                    ->garrisonCapacity)));
+}
+
 int Game::attackDamage(const Object &source,
                        const Object &target) const {
     int damage = 0;
@@ -3313,8 +3460,7 @@ int Game::attackDamage(const Object &source,
             modifiedAttackAmount(source, attack);
         damage += std::max(
             attackAmount -
-                (armourPresent ? armour
-                               : target.unit->baseArmor),
+                armour,
             0);
     }
     return source.unit->attacks.empty()
@@ -3578,6 +3724,15 @@ bool Game::isLiveAnimal(const Object &object) const {
 
 bool Game::isFlatFootprint(const Object &object) const {
     return object.unit && object.unit->cls == 7 && object.unit->type == dat::UT_Building;
+}
+
+bool Game::isFarmUnit(
+    const dat::Unit &unit) const {
+    return unit.id == 50 ||
+           unit.name.rfind(
+               "BLDG-FARM", 0) == 0 ||
+           unit.name2.rfind(
+               "BLDG-FARM", 0) == 0;
 }
 
 bool Game::footprintContainsScreen(const Object &object, float screenX, float screenY,
@@ -4544,13 +4699,15 @@ bool Game::canSetGatherPoint(const Object &building) const {
            building.unit->type == dat::UT_Building && !building.underConstruction &&
            !building.gate &&
            (!productionOptions(building).empty() ||
-            (building.unit->garrisonCapacity > 0 && building.unit->garrisonType != 0));
+            (effectiveGarrisonCapacity(building) > 0 &&
+             building.unit->garrisonType != 0));
 }
 
 std::vector<Game::BuildingCommand> Game::buildingCommands(const Object &building) const {
     std::vector<BuildingCommand> commands;
     if (building.gate) commands.push_back(BuildingCommand::ToggleGate);
-    else if (building.unit->garrisonCapacity > 0) commands.push_back(BuildingCommand::Eject);
+    else if (effectiveGarrisonCapacity(building) > 0)
+        commands.push_back(BuildingCommand::Eject);
     if (canSetGatherPoint(building)) {
         commands.push_back(BuildingCommand::SetGatherPoint);
         if (building.rallyActive) commands.push_back(BuildingCommand::RemoveGatherPoint);
@@ -4975,7 +5132,9 @@ void Game::sendToGatherPoint(Object &building, Object &unit) {
     if (target && !target->active) target = nullptr;
     if (target && issueGarrisonOrder(unit, *target))
         return;
-    if (target && isWorker(unit) && isGatherable(*target) && issueGatherCommand(unit, *target))
+    if (target && isGatherer(unit) &&
+        isGatherable(*target) &&
+        issueGatherCommand(unit, *target))
         return;
     if (target && target->player != unit.player &&
         isEnemy(unit, *target) &&
@@ -5110,7 +5269,9 @@ bool Game::queueUnitForTesting(uint32_t buildingId, int unitId) {
                                       unitId)
                                 : nullptr;
     if (!building || !unit) return false;
-    if (unit->cls == 7) return queueFarmReseed(*building, *unit);
+    if (isFarmUnit(*unit))
+        return queueFarmReseed(
+            *building, *unit);
     ProductionItem item;
     item.unit = unit;
     item.duration = 0.1f;
@@ -5537,6 +5698,27 @@ bool Game::isWorker(const Object &object) const {
            object.unit->cls == 58;
 }
 
+bool Game::isGatherer(
+    const Object &object) const {
+    if (!object.active || object.hidden ||
+        !object.unit)
+        return false;
+    if (isWorker(object))
+        return true;
+    if (object.unit->id < 0 ||
+        (size_t)object.unit->id >=
+            assets_.dat().unitHeaders.size())
+        return false;
+    for (const dat::Task &task :
+         assets_.dat()
+             .unitHeaders[(size_t)object.unit->id]
+             .tasks)
+        if (task.actionType == 5 ||
+            task.actionType == 110)
+            return true;
+    return false;
+}
+
 bool Game::isBuilder(
     const Object &object) const {
     return object.active &&
@@ -5822,19 +6004,54 @@ bool Game::isGatherable(
     const Object &object) const {
     return object.active && !object.hidden &&
            !object.underConstruction &&
-           object.unit && object.resourceType >= 0 &&
-           object.resourceType <= 3 &&
+           object.unit &&
+           ((object.resourceType >= 0 &&
+             object.resourceType <= 3) ||
+            object.resourceType == 17) &&
            object.resourceAmount > 0.0f;
 }
 
 const dat::Unit *Game::gathererUnit(
     const Object &worker) const {
     if (!worker.unit) return nullptr;
-    int variant = -1;
     const Object *target =
         findObject(worker.gatherTargetId);
+    const int targetClass =
+        target && target->unit
+            ? gatherClass(*target)
+            : -1;
+    if (worker.unit->id >= 0 &&
+        (size_t)worker.unit->id <
+            assets_.dat().unitHeaders.size()) {
+        for (const dat::Task &task :
+             assets_.dat()
+                 .unitHeaders[
+                     (size_t)worker.unit->id]
+                 .tasks) {
+            if (task.actionType != 5 &&
+                task.actionType != 110)
+                continue;
+            if (targetClass >= 0 &&
+                task.classId >= 0 &&
+                task.classId != targetClass)
+                continue;
+            if (target && target->unit &&
+                task.unitId >= 0 &&
+                task.unitId !=
+                    target->unit->id)
+                continue;
+            if (targetClass < 0 &&
+                worker.carriedResourceType >= 0 &&
+                task.resourceIn >= 0 &&
+                task.resourceIn !=
+                    worker.carriedResourceType)
+                continue;
+            return worker.unit;
+        }
+    }
+    int variant = -1;
     if (target && target->unit) {
-        switch (gatherClass(*target)) {
+        switch (targetClass) {
         case 1: variant = 11; break;
         case 3:
         case 4:
@@ -5895,6 +6112,11 @@ const dat::Task *Game::gatherTask(
         if (targetClass >= 0 &&
             task.classId >= 0 &&
             task.classId != targetClass)
+            continue;
+        if (target && target->unit &&
+            task.unitId >= 0 &&
+            task.unitId !=
+                target->unit->id)
             continue;
         if (targetClass < 0 &&
             worker.carriedResourceType >= 0 &&
@@ -5963,13 +6185,12 @@ bool Game::buildingAcceptsResource(
 bool Game::assignAutomaticWorkerTask(
     Object &worker,
     const Object &completedBuilding) {
-    if (!isWorker(worker) ||
+    if (!isGatherer(worker) ||
         worker.player != completedBuilding.player)
         return false;
-    // A completed farm keeps its builder before any general nearby-job
-    // search, matching the farm activity transition.
-    if (completedBuilding.unit->cls == 7 &&
-        isGatherable(completedBuilding))
+    // A completed farm or Aqua Harvester keeps its builder before any
+    // general nearby-job search when the builder has a matching gather task.
+    if (isGatherable(completedBuilding))
         return issueGatherCommand(
             worker,
             const_cast<Object &>(
@@ -6034,7 +6255,7 @@ bool Game::assignAutomaticWorkerTask(
 
 bool Game::issueGatherCommand(
     Object &worker, Object &resource) {
-    if (!isWorker(worker) ||
+    if (!isGatherer(worker) ||
         !isGatherable(resource))
         return false;
     // Player-owned resources (farms) are worked by their owner only.
@@ -6058,11 +6279,14 @@ bool Game::issueGatherCommand(
     worker.dropOffTargetId = 0;
     worker.manualDropOff = false;
     worker.farmMoveTime =
-        resource.unit->cls == 7 ? 1.0f : 0.0f;
+        isFarmUnit(*resource.unit)
+            ? 1.0f
+            : 0.0f;
     worker.farmMoveActive = false;
     worker.wander = false;
     worker.moveGoalActive = false;
     worker.path.clear();
+    worker.pathIndex = 0;
     worker.state = State::Idle;
     worker.animTime = 0;
     return true;
@@ -6147,7 +6371,8 @@ bool Game::depositAt(Object &worker, const Object &building) {
 
 bool Game::issueDropOffCommand(
     Object &worker, Object &building) {
-    if (!isWorker(worker) || !hasCarry(worker) ||
+    if (!isGatherer(worker) ||
+        !hasCarry(worker) ||
         !building.active || building.hidden ||
         building.underConstruction ||
         building.player != worker.player ||
@@ -6176,6 +6401,7 @@ bool Game::issueDropOffCommand(
     worker.wander = false;
     worker.moveGoalActive = false;
     worker.path.clear();
+    worker.pathIndex = 0;
     worker.state = State::Idle;
     worker.animTime = 0;
     return true;
@@ -6279,6 +6505,7 @@ bool Game::issueRepairCommand(
     worker.wander = false;
     worker.moveGoalActive = false;
     worker.path.clear();
+    worker.pathIndex = 0;
     worker.state = State::Idle;
     worker.animTime = 0;
     return true;
@@ -6299,6 +6526,7 @@ void Game::updateRepairing(float dt) {
             worker.repairTargetId = 0;
             worker.moveGoalActive = false;
             worker.path.clear();
+            worker.pathIndex = 0;
             worker.state = State::Idle;
             worker.animTime = 0;
             continue;
@@ -6320,6 +6548,7 @@ void Game::updateRepairing(float dt) {
                 target->x - worker.x);
         worker.moveGoalActive = false;
         worker.path.clear();
+        worker.pathIndex = 0;
 
         const dat::Unit *repairer =
             repairerUnit(worker);
@@ -6331,7 +6560,9 @@ void Game::updateRepairing(float dt) {
                     std::max(
                         0.1f,
                         repairer
-                            ? repairer->workRate
+                            ? modifiedUnitAttribute(
+                                  worker, 13,
+                                  repairer->workRate)
                             : worker.unit
                                   ->workRate));
         for (const dat::ResourceCost &cost :
@@ -6475,7 +6706,10 @@ void Game::updateGathering(float dt) {
         const float capacity =
             std::max(
                 1.0f,
-                (float)gatherer->resourceCapacity);
+                modifiedUnitAttribute(
+                    worker, 14,
+                    (float)gatherer
+                        ->resourceCapacity));
         if (!worker.manualDropOff &&
             (!resource ||
              !isGatherable(*resource)) &&
@@ -6492,11 +6726,23 @@ void Game::updateGathering(float dt) {
                 continue;
             }
         }
+        const dat::Task *task =
+            gatherTask(worker, *gatherer);
+        const int gatheredResourceType =
+            task && task->resourceOut >= 0 &&
+                    task->resourceOut <= 3
+                ? task->resourceOut
+                : resource &&
+                          resource->resourceType >= 0 &&
+                          resource->resourceType <= 3
+                      ? resource->resourceType
+                      : -1;
         // Switching to another resource keeps the old load (stashed) instead
         // of throwing it away.
         if (!worker.manualDropOff && resource && isGatherable(*resource) &&
             worker.carriedAmount > 0.001f && worker.carriedResourceType >= 0 &&
-            worker.carriedResourceType != resource->resourceType) {
+            gatheredResourceType >= 0 &&
+            worker.carriedResourceType != gatheredResourceType) {
             worker.stash[(size_t)worker.carriedResourceType] += worker.carriedAmount;
             worker.carriedAmount = 0.0f;
             worker.carriedResourceType = -1;
@@ -6556,8 +6802,6 @@ void Game::updateGathering(float dt) {
         worker.lastGatherType = resource->resourceType;
         worker.lastGatherX = resource->x;
         worker.lastGatherY = resource->y;
-        const dat::Task *task =
-            gatherTask(worker, *gatherer);
         const float workRange =
             task ? std::max(
                        0.25f, task->workRange)
@@ -6568,7 +6812,7 @@ void Game::updateGathering(float dt) {
             continue;
         }
         const bool farming =
-            resource->unit->cls == 7;
+            isFarmUnit(*resource->unit);
         if (!farming) {
             worker.farmMoveActive = false;
             worker.farmMoveTime = 0.0f;
@@ -6603,6 +6847,7 @@ void Game::updateGathering(float dt) {
                     worker.state = State::Gather;
                     worker.moveGoalActive = false;
                     worker.path.clear();
+                    worker.pathIndex = 0;
                     continue;
                 }
                 worker.farmMoveActive = false;
@@ -6666,6 +6911,7 @@ void Game::updateGathering(float dt) {
                     worker.state = State::Gather;
                     worker.moveGoalActive = false;
                     worker.path.clear();
+                    worker.pathIndex = 0;
                     moving = true;
                     break;
                 }
@@ -6686,6 +6932,7 @@ void Game::updateGathering(float dt) {
         if (isLiveAnimal(*resource)) {
             worker.state = State::Gather;
             worker.path.clear();
+            worker.pathIndex = 0;
             worker.moveGoalActive = false;
             worker.facing = std::atan2(resource->y - worker.y, resource->x - worker.x);
             worker.huntTimer += dt;
@@ -6698,6 +6945,7 @@ void Game::updateGathering(float dt) {
         }
         worker.state = State::Gather;
         worker.path.clear();
+        worker.pathIndex = 0;
         worker.moveGoalActive = false;
         worker.facing = std::atan2(
             resource->y - worker.y,
@@ -6723,14 +6971,21 @@ void Game::updateGathering(float dt) {
         const float gathered = std::min(
             {resource->resourceAmount,
              capacity - worker.carriedAmount,
-             gatherer->workRate * dt});
+             std::max(
+                 0.0f,
+                 modifiedUnitAttribute(
+                     worker, 13,
+                     gatherer->workRate)) *
+                 dt});
         if (gathered <= 0) continue;
+        if (gatheredResourceType < 0)
+            continue;
         worker.carriedResourceType =
-            resource->resourceType;
+            gatheredResourceType;
         worker.carriedAmount += gathered;
         resource->resourceAmount -= gathered;
         if (resource->maxHitPoints > 0 && !resource->felled &&
-            resource->unit->cls != 7) {
+            !isFarmUnit(*resource->unit)) {
             float initialAmount = 0.0f;
             for (const dat::ResourceStorage &storage :
                  resource->unit->resourceStorages)
@@ -6747,7 +7002,8 @@ void Game::updateGathering(float dt) {
                         initialAmount);
         }
         if (resource->resourceAmount <= 0.001f) {
-            if (resource->unit->cls == 7 && resource->player > 0 &&
+            if (isFarmUnit(*resource->unit) &&
+                resource->player > 0 &&
                 reseedQueue_[(size_t)resource->player] > 0) {
                 // A queued (prepaid) farm: the field turns back into a
                 // foundation and its farmer rebuilds it, then farms again.
@@ -6821,7 +7077,8 @@ bool Game::hasGarrisonTask(const Object &unit, const Object &container) const {
 
 bool Game::isTransport(const Object &object) const {
     return object.unit && object.unit->type != dat::UT_Building &&
-           object.unit->speed > 0 && object.unit->garrisonCapacity > 0;
+           object.unit->speed > 0 &&
+           effectiveGarrisonCapacity(object) > 0;
 }
 
 bool Game::canGarrison(const Object &unit,
@@ -6831,7 +7088,8 @@ bool Game::canGarrison(const Object &unit,
     if (!unit.active || unit.hidden || !unit.unit || !building.active || !building.unit ||
         building.hidden || building.underConstruction || unit.player != building.player ||
         unit.spawnId == building.spawnId || unit.unit->speed <= 0 ||
-        unit.unit->type == dat::UT_Building || building.unit->garrisonCapacity <= 0 ||
+        unit.unit->type == dat::UT_Building ||
+        effectiveGarrisonCapacity(building) <= 0 ||
         unit.garrisonedInId >= 0 ||
         (building.unit->type ==
              dat::UT_Building &&
@@ -7030,7 +7288,8 @@ bool Game::issueGarrisonCommand(Object &building) {
             -1,
             "BUILDING TOO DAMAGED TO GARRISON");
     else if (reserved >=
-        building.unit->garrisonCapacity)
+        (size_t)effectiveGarrisonCapacity(
+            building))
         showCannotDo(
             isTransport(building)
                 ? 3066
@@ -7047,7 +7306,8 @@ bool Game::issueGarrisonOrder(
     Object &unit, Object &container) {
     if (!canGarrison(unit, container) ||
         garrisonedCount(container, true) >=
-            container.unit->garrisonCapacity)
+            (size_t)effectiveGarrisonCapacity(
+                container))
         return false;
     clearUnitCommandOrder(unit);
     if (isBuilder(unit))
@@ -7086,7 +7346,8 @@ void Game::updateGarrisoning() {
             !building.unit ||
             building.unit->type !=
                 dat::UT_Building ||
-            building.unit->garrisonCapacity <= 0)
+            effectiveGarrisonCapacity(
+                building) <= 0)
             continue;
         const bool critical =
             building.hitPoints <=
@@ -7115,7 +7376,8 @@ void Game::updateGarrisoning() {
             continue;
         }
         if (garrisonedCount(*building, false) >=
-            building->unit->garrisonCapacity) {
+            (size_t)effectiveGarrisonCapacity(
+                *building)) {
             unit.garrisonTargetId = 0;
             unit.moveGoalActive = false;
             unit.state = State::Idle;
@@ -7523,7 +7785,9 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
 
     if (actionMenuTab_ != ActionMenuTab::Research) {
         const std::vector<const dat::Unit *> options = productionOptions(*subject);
-        if (optionIndex < options.size() && options[optionIndex]->cls == 7) {
+        if (optionIndex < options.size() &&
+            isFarmUnit(
+                *options[optionIndex])) {
             queueFarmReseed(*subject, *options[optionIndex]);
             return true;
         }
@@ -7736,7 +8000,7 @@ Game::Object *Game::createFoundation(const dat::Unit &unit, int player, float x,
     // retain water beneath their footprint; ordinary foundations paint the
     // DAT foundation terrain as soon as the site is committed.
     if (unit.foundationTerrainId >= 0 &&
-        unit.cls != 7 &&
+        !isFarmUnit(unit) &&
         unit.placementTerrain[0] < 0 &&
         unit.placementTerrain[1] < 0) {
         int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
@@ -8204,6 +8468,7 @@ void Game::updateConstruction(float dt) {
             forceBuildCheat_ &&
             building.player == localPlayer_;
         size_t workingBuilders = 0;
+        float workRateFactor = 0.0f;
         for (Object &builder : objects_) {
             if (!builder.active ||
                 builder.constructionTargetId !=
@@ -8233,7 +8498,25 @@ void Game::updateConstruction(float dt) {
                                building.x - builder.x);
                 builder.moveGoalActive = false;
                 builder.path.clear();
+                builder.pathIndex = 0;
                 workingBuilders++;
+                const dat::Unit *builderMaster =
+                    builderUnit(builder);
+                const float baseWorkRate =
+                    builderMaster
+                        ? builderMaster->workRate
+                        : builder.unit->workRate;
+                const float modifiedWorkRate =
+                    modifiedUnitAttribute(
+                        builder, 13,
+                        baseWorkRate);
+                workRateFactor +=
+                    baseWorkRate > 0.0001f
+                        ? std::max(
+                              0.0f,
+                              modifiedWorkRate /
+                                  baseWorkRate)
+                        : 1.0f;
             } else if (builder.state == State::Build) {
                 builder.state = State::Idle;
                 builder.animTime = 0.0f;
@@ -8245,7 +8528,9 @@ void Game::updateConstruction(float dt) {
         else if (workingBuilders > 0) {
             const float buildRate =
                 3.0f * workingBuilders /
-                (workingBuilders + 2.0f);
+                (workingBuilders + 2.0f) *
+                (workRateFactor /
+                 workingBuilders);
             building.constructionRemaining =
                 std::max(
                     0.0f,
@@ -8276,7 +8561,8 @@ void Game::updateConstruction(float dt) {
                 configureGate(building);
             }
         building.hitPoints = building.maxHitPoints;
-        if (building.unit->cls == 7) syncFarmTerrain(building); // food + grown field
+        if (isFarmUnit(*building.unit))
+            syncFarmTerrain(building);
         // Building set_state 0 -> 2 (0x554710) plays master+0x1c8, the
         // construction sound, for the local player's buildings only.
         if (building.player == localPlayer_ &&
@@ -8429,7 +8715,7 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
     // garrisons it (workers only board transports this way; on buildings
     // their right-click means drop-off/repair).
     if (friendly && friendly->player == localPlayer_ &&
-        friendly->unit->garrisonCapacity > 0) {
+        effectiveGarrisonCapacity(*friendly) > 0) {
         bool eligible = false;
         for (Object *object : selected)
             if (canGarrison(*object, *friendly) &&
@@ -9584,11 +9870,14 @@ void Game::syncFarmTerrain(Object &farm, bool dying) {
 }
 
 void Game::killObject(Object &object, bool countKill) {
-    if (object.unit->cls == 7 && object.unit->type == dat::UT_Building)
+    if (object.unit->type ==
+            dat::UT_Building &&
+        isFarmUnit(*object.unit))
         syncFarmTerrain(object, true);
     // Occupants: a destroyed building lets them out; a destroyed transport
     // takes its passengers with it.
-    if (object.unit->garrisonCapacity > 0 && object.active) {
+    if (effectiveGarrisonCapacity(object) > 0 &&
+        object.active) {
         const bool transport = isTransport(object);
         if (!transport) ejectGarrisoned(object);
         for (Object &passenger : objects_)
@@ -9603,6 +9892,7 @@ void Game::killObject(Object &object, bool countKill) {
     object.selected = false;
     object.state = State::Idle;
     object.path.clear();
+    object.pathIndex = 0;
     object.attackTargetId = 0;
 
     // Annexes (gate end posts) share their parent's state in the original
@@ -9836,6 +10126,52 @@ void Game::launchProjectile(const Object &source, const Object &target, int dama
     projectile.targetId = target.spawnId;
     projectile.sourceId = source.spawnId;
     projectile.damage = damage;
+    const float accuracy =
+        std::clamp(
+            modifiedUnitAttribute(
+                source, 11,
+                (float)source.unit
+                    ->accuracyPercent),
+            0.0f, 100.0f);
+    std::uniform_real_distribution<float>
+        percent(0.0f, 100.0f);
+    const bool missed =
+        percent(rng_) >= accuracy;
+    if (missed ||
+        projectileUnit->smartMode == 0) {
+        projectile.groundAimed = true;
+        projectile.aimX = target.x;
+        projectile.aimY = target.y;
+    }
+    if (missed) {
+        const float dx =
+            target.x - source.x;
+        const float dy =
+            target.y - source.y;
+        const float distance =
+            std::sqrt(dx * dx + dy * dy);
+        const float targetReach =
+            collisionRadius(target) + 0.15f;
+        const float dispersion =
+            std::max(
+                targetReach + 0.25f,
+                source.unit
+                        ->accuracyDispersion *
+                    std::max(1.0f, distance));
+        std::uniform_real_distribution<float>
+            angle(0.0f, 2.0f * kPi);
+        std::uniform_real_distribution<float>
+            radius(targetReach + 0.15f,
+                   targetReach + dispersion);
+        const float missAngle =
+            angle(rng_);
+        const float missRadius =
+            radius(rng_);
+        projectile.aimX +=
+            std::cos(missAngle) * missRadius;
+        projectile.aimY +=
+            std::sin(missAngle) * missRadius;
+    }
     projectile.blastWidth = std::max(source.unit->blastWidth, projectileUnit->blastWidth);
     projectile.blastLevel = projectile.blastWidth > 0
                                 ? (source.unit->blastWidth > 0 ? source.unit->blastAttackLevel
@@ -10024,7 +10360,9 @@ void Game::launchVolleyBolt(Object &source, const Object &target) {
     for (const dat::AttackOrArmor &attack : projectileUnit->attacks) {
         bool armourPresent = false;
         const int armour = modifiedArmourAmount(target, attack.cls, armourPresent);
-        damage += std::max(attack.amount - (armourPresent ? armour : target.unit->baseArmor), 0);
+        damage +=
+            std::max(
+                attack.amount - armour, 0);
     }
     Projectile projectile;
     projectile.unit = projectileUnit;
@@ -11254,6 +11592,7 @@ bool Game::issueMove(Object &object, float targetX, float targetY,
     if (dx * dx + dy * dy < 0.01f ||
         (goalObject && withinInteractionRange(object, *goalObject, clearance))) {
         object.path.clear();
+        object.pathIndex = 0;
         object.state = State::Idle;
         if (!goalObject) object.moveGoalActive = false;
         return true;
@@ -11309,6 +11648,7 @@ bool Game::issueMove(Object &object, float targetX, float targetY,
     } else if (!findPath(object, targetX, targetY, object.path, goalObject,
                          clearance)) {
         object.path.clear();
+        object.pathIndex = 0;
         object.state = State::Idle;
         return false;
     }
@@ -11359,6 +11699,22 @@ float Game::marchShapeErrorForTesting() const {
         }
     }
     return count ? total / count : -1.0f;
+}
+
+size_t Game::formationMemberCountForTesting() const {
+    size_t count = 0;
+    for (const MarchGroup &group :
+         marchGroups_)
+        for (uint32_t member :
+             group.members) {
+            const Object *object =
+                findObject(member);
+            if (object &&
+                object->marchGroupId ==
+                    group.id)
+                count++;
+        }
+    return count;
 }
 
 void Game::updateMarchGroups(float dt) {
@@ -11978,6 +12334,7 @@ void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float ta
             object->targetX = slotX;
             object->targetY = slotY;
             object->path.clear();
+            object->pathIndex = 0;
             object->path.reserve(macroPath.size());
             for (size_t point = 0; point < macroPath.size();
                  point++) {
@@ -12065,6 +12422,7 @@ void Game::issueGroupMove(std::vector<Object *> targets, float targetX, float ta
             for (const auto &point : object->path) {
                 if (!segmentClear(*object, legX, legY, point[0], point[1])) {
                     object->path.clear();
+                    object->pathIndex = 0;
                     break;
                 }
                 legX = point[0];
@@ -13813,7 +14171,7 @@ bool Game::evaluateAiFactValue(
                     dat::UT_Building)
                 continue;
             const bool civilian =
-                isWorker(object);
+                isGatherer(object);
             if ((fact ==
                      "civilian-population" &&
                  civilian) ||
@@ -15400,8 +15758,8 @@ bool Game::aiAttackNow(
             capacity +=
                 std::max(
                     0,
-                    transport->unit
-                            ->garrisonCapacity -
+                    effectiveGarrisonCapacity(
+                        *transport) -
                         (int)garrisonedCount(
                             *transport, true));
             if (capacity >= crossing.size())
@@ -15418,8 +15776,8 @@ bool Game::aiAttackNow(
                 transport->spawnId] =
                 (size_t)std::max(
                     0,
-                    transport->unit
-                            ->garrisonCapacity -
+                    effectiveGarrisonCapacity(
+                        *transport) -
                         (int)garrisonedCount(
                             *transport, true));
         for (Object *member : crossing) {
@@ -15889,9 +16247,9 @@ void Game::updateAiMilitaryGroups(
                             *transport) &&
                         garrisonedCount(
                             *transport, true) <
-                            (size_t)transport
-                                ->unit
-                                ->garrisonCapacity &&
+                            (size_t)
+                                effectiveGarrisonCapacity(
+                                    *transport) &&
                         issueGarrisonOrder(
                             *member,
                             *transport))
@@ -16278,7 +16636,8 @@ void Game::updateAiWorkerShelter(
             building.unit->type !=
                 dat::UT_Building ||
             building.underConstruction ||
-            building.unit->garrisonCapacity <= 0 ||
+            effectiveGarrisonCapacity(
+                building) <= 0 ||
             building.garrisonDamageLocked)
             continue;
         const std::string name =
@@ -16382,8 +16741,9 @@ void Game::updateAiWorkerShelter(
                  workers) {
                 if (garrisonedCount(
                         *center, true) >=
-                    (size_t)center->unit
-                        ->garrisonCapacity)
+                    (size_t)
+                        effectiveGarrisonCapacity(
+                            *center))
                     break;
                 if (issueGarrisonOrder(
                         *entry.second,
@@ -16438,6 +16798,45 @@ void Game::updateAiWorkerShelter(
 
 void Game::updateAiGatherers(
     int player, AiPlayerState &state) {
+    for (Object &trawler : objects_) {
+        if (!trawler.active ||
+            trawler.hidden ||
+            trawler.player != player ||
+            !isGatherer(trawler) ||
+            isWorker(trawler) ||
+            trawler.garrisonedInId >= 0 ||
+            trawler.garrisonTargetId ||
+            trawler.constructionTargetId ||
+            trawler.repairTargetId ||
+            trawler.gatherTargetId ||
+            hasCarry(trawler))
+            continue;
+        Object *closest = nullptr;
+        float closestDistance =
+            std::numeric_limits<float>::max();
+        for (Object &resource : objects_) {
+            if (!isGatherable(resource) ||
+                resource.resourceType != 17 ||
+                !objectVisibleToPlayer(
+                    resource, player) ||
+                !canReachObject(
+                    trawler, resource, 0.25f))
+                continue;
+            const float dx =
+                resource.x - trawler.x;
+            const float dy =
+                resource.y - trawler.y;
+            const float distance =
+                dx * dx + dy * dy;
+            if (distance >= closestDistance)
+                continue;
+            closest = &resource;
+            closestDistance = distance;
+        }
+        if (closest)
+            issueGatherCommand(
+                trawler, *closest);
+    }
     static constexpr const char *names[4] = {
         "sn-food-gatherer-percentage",
         "sn-carbon-gatherer-percentage",
@@ -17285,7 +17684,8 @@ void Game::update(float dt, const InputState &in) {
     selectionClickAge_ += dt;
     animClock_ = std::fmod(animClock_ + dt, 3600.0f);
     for (Object &object : objects_)
-        if (object.active && object.unit && object.unit->cls == 7 &&
+        if (object.active && object.unit &&
+            isFarmUnit(*object.unit) &&
             object.unit->type == dat::UT_Building)
             syncFarmTerrain(object);
     for (Object &worker : objects_) {
@@ -17470,7 +17870,8 @@ void Game::update(float dt, const InputState &in) {
                            in.screenW, in.screenH);
         if (!building ||
             building->player != localPlayer_ ||
-            building->unit->garrisonCapacity == 0 ||
+            effectiveGarrisonCapacity(
+                *building) == 0 ||
             building->underConstruction) {
             statusMessage_ =
                 "CANNOT GARRISON IN THAT TARGET";
@@ -17787,7 +18188,7 @@ void Game::update(float dt, const InputState &in) {
             for (const Object &object : objects_) {
                 if (!object.selected)
                     continue;
-                if (isWorker(object))
+                if (isGatherer(object))
                     selectedWorker = true;
                 if (isBuilder(object))
                     selectedBuilder = true;
@@ -17865,7 +18266,7 @@ void Game::update(float dt, const InputState &in) {
         for (const Object &object : objects_) {
             if (!object.selected)
                 continue;
-            if (isWorker(object)) {
+            if (isGatherer(object)) {
                 selectedWorker = true;
                 cursorWorker = &object;
             }
@@ -17892,7 +18293,8 @@ void Game::update(float dt, const InputState &in) {
             }();
         bool garrisonable = false;
         if (hovered && hovered->player == localPlayer_ &&
-            hovered->unit->garrisonCapacity > 0 &&
+            effectiveGarrisonCapacity(
+                *hovered) > 0 &&
             (!selectedWorker || isTransport(*hovered)))
             for (const Object &object : objects_)
                 if (object.selected && isSelectable(object) && canGarrison(object, *hovered)) {
@@ -19686,7 +20088,8 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         }
         // Farms have no visible standing SLP: the finished field is terrain.
         // Keep their complete 1.5 x 1.5 placement footprint visible.
-        if (placementUnit_->cls == 7) {
+        if (isFarmUnit(
+                *placementUnit_)) {
             const float halfX = std::max(
                 0.5f,
                 placementUnit_->clearanceSize[0] > 0.0f
@@ -20403,7 +20806,10 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         else {
             static constexpr const char *jobNames[] = {
                 "Food Gatherer", "Carbon Collector", "Ore Miner", "Nova Collector"};
-            const int job = isWorker(*panelObject) ? panelObject->jobKind : 0;
+            const int job =
+                isGatherer(*panelObject)
+                    ? panelObject->jobKind
+                    : 0;
             title = panelObject->customKind ==
                             kCustomOiiaCat
                         ? "OIIA CAT"
@@ -20582,9 +20988,12 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             const float range = modifiedUnitAttribute(*panelObject, 12, unit.maxRange);
             if (canAttack(*panelObject) && std::max(baseRange, range) > 0.99f)
                 statRows.push_back({6, plus((int)baseRange, (int)std::lround(range)), 43026});
-            if (panelObject->player == localPlayer_ && unit.garrisonCapacity > 0)
+            if (panelObject->player ==
+                    localPlayer_ &&
+                effectiveGarrisonCapacity(
+                    *panelObject) > 0)
                 statRows.push_back({4, std::to_string(garrisonedCount(*panelObject, false)) + "/" +
-                                           std::to_string(unit.garrisonCapacity), 43028});
+                                           std::to_string(effectiveGarrisonCapacity(*panelObject)), 43028});
             const float nurseryRate =
                 animalNurseryFoodRate(
                     *panelObject);
@@ -20609,7 +21018,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             }
         }
         if (!panelMixedUnits &&
-            isWorker(*panelObject) &&
+            isGatherer(*panelObject) &&
             hasCarry(*panelObject)) {
             // Carried resources as item icons (itemicon 2 food, 0 carbon,
             // 1 ore, 3 nova) beside the stats; the current load shows its
@@ -20623,8 +21032,23 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 if (panelObject->carriedResourceType == type &&
                     panelObject->carriedAmount > 0.001f) {
                     amount += panelObject->carriedAmount;
-                    text = std::to_string((int)std::lround(amount)) + "/" +
-                           std::to_string(gatherer ? std::max<int16_t>(1, gatherer->resourceCapacity) : 0);
+                    const int capacity =
+                        gatherer
+                            ? (int)std::lround(
+                                  std::max(
+                                      1.0f,
+                                      modifiedUnitAttribute(
+                                          *panelObject,
+                                          14,
+                                          (float)gatherer
+                                              ->resourceCapacity)))
+                            : 0;
+                    text =
+                        std::to_string(
+                            (int)std::lround(
+                                amount)) +
+                        "/" +
+                        std::to_string(capacity);
                 } else if (amount > 0.001f) {
                     text = std::to_string((int)std::lround(amount));
                 } else {
@@ -20688,15 +21112,17 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         std::string status =
             ownershipLabel(panelObject->player);
         if (panelObject->player == localPlayer_ &&
-            panelObject->unit->garrisonCapacity > 0 && panelMixedUnits)
+            effectiveGarrisonCapacity(
+                *panelObject) > 0 &&
+            panelMixedUnits)
             status +=
                 "  GARRISON " +
                 std::to_string(garrisonedCount(
                     *panelObject, false)) +
                 "/" +
                 std::to_string(
-                    panelObject->unit
-                        ->garrisonCapacity);
+                    effectiveGarrisonCapacity(
+                        *panelObject));
         else if (panelObject->player == localPlayer_ &&
                  selectedAttacker)
             status +=

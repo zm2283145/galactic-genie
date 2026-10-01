@@ -65,7 +65,11 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   different final slots rather than deadlocking. Units sharing an attack, construction, gathering,
   repair, garrison, or formation destination cooperatively yield and displace one another instead of
   treating every nearby unit as a hard obstacle.
-  Accuracy, blast damage, and explicit guard/patrol commands remain.
+  Projectile accuracy now uses researched DAT accuracy, deterministic
+  hit/miss rolls, fixed plausible miss impacts, and the existing projectile,
+  shield, diplomacy, Attack Ground, and splash paths. Exact original
+  range/elevation accuracy modifiers and blast-level comparison remain open.
+  Explicit guard/patrol commands are implemented with saved-state restoration.
 - Economy: the four SWGB resources drive shared building queues for units and research. Original
   `tech-level-1`, `MADE-*`, and `AVAIL-*` technologies determine civilization-correct production
   choices, while researched replacement effects upgrade both available choices and existing units
@@ -99,13 +103,20 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   player units and provoke retaliation. Animal Nurseries produce food at their DAT work rate per
   garrisoned animal. Live-animal slaughter, farms,
   automatic adjacent-node retargeting, and DAT-driven population use/capacity are implemented.
-  Production waits at 100% when housing is full and resumes after capacity is added. Fishing
-  remains.
+  Production waits at 100% when housing is full and resumes after capacity is
+  added. Utility Trawlers now gather raw resource 17 from DAT fish and Aqua
+  Harvesters into food, carry/deposit/retarget after exhaustion, build and
+  repair the DAT-authorized naval set, expose original task presentation, and
+  participate in generated island-map AI economies.
 - Researched technology effects apply packed DAT attack/armor modifiers plus generic health, speed,
   and reload-time modifiers, along with chained unit/building upgrade and age effects. Civilization
   `techTreeId` effects now apply their disabled-research lists before menus and automatic technologies
-  are evaluated. Player resource attributes drive aircraft Shield Modifications consistently; remaining
-  attributes and resource-effect consumers still need to be applied.
+  are evaluated. Player resource attributes drive aircraft Shield
+  Modifications consistently. Researched garrison capacity, accuracy, work
+  rate, carrying capacity, and base armor now join the existing hit-point,
+  sight, movement, packed armor/attack, reload, range, projectile, and minimum
+  range consumers. Unproven player-resource counters and conversion/trickle
+  semantics remain explicitly unsupported rather than being blanket-applied.
 - SWGB-specific mechanics: power and shield coverage are implemented. A powered Shield Generator
   gives eligible units and buildings a gold shield bar equal to maximum HP, with original
   tiered regeneration, non-stacking coverage, overflow damage, and one-HP per-hit leakage for

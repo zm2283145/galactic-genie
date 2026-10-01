@@ -21,11 +21,13 @@ build and test on Vita.
 | Formations | Layout/update routines at `0x478e30`, `0x479760`, `0x47c280`, `0x47e780`, `0x480060` | Layout verified; automatic line/column switching remains open |
 | Pathfinding | Long-range routines at `0x4982f0`, `0x498820`, `0x4989f0`, `0x499010` | Partially verified and covered |
 | Unit information UI | Panel rows at `0x5d98a0`/`0x5db840`; resource rows at `0x5daf72` | Partially verified |
-| Workers and Utility Trawlers | DAT class 58 variants; unit 13 action-101/action-106 tasks and naval train locations | Partially verified and covered |
+| Workers, fishing, and Utility Trawlers | DAT class-58 workers; unit 13 action-5/action-101/action-106 tasks; resource 17; naval train locations | DAT contract verified and covered |
 | Combat target eligibility | Attack-task validation at `0x5b9930`; class filter at `0x41c530`; DAT effect 129 | Verified and covered |
 | Building attack approach | DAT rectangular collision footprints; attack action and path goal state | Covered; exact original slot ordering remains open |
 | Attack Ground | Command-panel construction at `0x503aca`; opcode `0x6b`; DAT blast/projectile fields | Verified and covered |
 | Firing presentation | DAT attack graphic, frame delay, projectile totals, spawning area, secondary projectile, and impact data | Partially verified and covered |
+| Accuracy and misses | DAT `accuracyPercent`, `accuracyDispersion`, projectile speed, and saved simulation RNG | Data contract covered; exact executable RNG/range/elevation formula remains open |
+| Researched unit attributes | DAT effect commands 0/4/5 and attributes 0/1/2/5/8/9/10/11/12/13/14/15/16/20 | Implemented consumers covered; unsupported attributes inventoried below |
 | AI scripts | Original Computer Expanded `.per` files and DAT `name2` aliases | Economy, advancement, balanced force replenishment, scouting, formations, escorted transport invasions, retreat, and worker shelter covered |
 | Civilization technology trees | Each DAT civilization's `techTreeId` effect; type-102 disabled-technology commands | Verified and covered |
 | Air/naval transports | DAT `AVAIL-*` technologies and Airbase/Shipyard train locations | Verified and covered |
@@ -238,6 +240,29 @@ Player-attribute technology commands are evaluated by `playerAttribute`.
 Shield Modifications sets attribute 38, and the original eligible aircraft
 classes use that value for self-shielding. Fighter and bomber coverage verifies
 that the effect applies consistently for a civilization that can research it.
+
+Unit-effect commands are applied only when their unit ID/class selector matches
+and their operation is set (type 0), add (type 4), or multiply (type 5). The
+simulation currently consumes attributes 0 (hit points), 1 (line of sight), 2
+(garrison capacity), 5 (movement speed), 8 (packed armor), 9 (packed attack),
+10 (reload), 11 (accuracy), 12 (range), 13 (work rate), 14 (resource carrying
+capacity), 15 (base armor), 16 (projectile substitution), and 20 (minimum
+range). Work rate affects gathering, construction, and repair; capacity affects
+both authoritative carrying limits and the carried-resource panel. Garrison
+capacity is used by boarding, reservations, production rally targets, and UI
+availability rather than only by display code. The Clone Campaigns technology
+set has no applicable attribute-15 command for an extant unit, but the consumer
+is retained for scenario/mod DAT compatibility.
+
+Player resource commands are not interchangeable with unit attributes. Known
+gameplay consumers include current stocks 0-3, population headroom 4,
+technology/attack eligibility such as Walker Research attribute 31, and
+aircraft shields attribute 38. Other parsed resource IDs include scenario
+counters, AI/internal state, and one-off mechanics; they remain unsupported
+until a DAT reference and executable behavior establish a safe semantic.
+Likewise, conversion resistance/range/recharge and generalized resource
+trickles are not claimed by this milestone. Unknown commands remain parsed and
+available for inspection rather than being blanket-applied as multipliers.
 
 ## AI scripts
 
@@ -599,6 +624,31 @@ Engine contract:
 - Projectile release occurs at the DAT frame delay for ordinary attacks and
   Attack Ground, and multi-projectile mobile units launch their DAT count.
 
+## Projectile accuracy, misses, and blast limits
+
+The original data disproves the earlier assumption that every normal attack
+hits its selected object. `accuracyPercent` varies materially (observed values
+include 45, 50, 75, 85, and 100), `accuracyDispersion` includes non-zero 0.10
+and 0.33 records, and projectile motion uses the projectile unit's ordinary
+DAT speed. Accuracy is evaluated when a shot is released, after researched
+attribute 11. The saved deterministic simulation RNG selects hit or miss.
+A miss receives a fixed point outside the target footprint, scaled by
+dispersion and range, and travels to that point; it does not silently damage
+the original target. Non-smart projectiles also snapshot a fixed aim point.
+The fixed point and RNG state already belong to save version 1, so active
+misses continue identically across save/load without a format migration.
+
+Direct-fire attacks retain their immediate damage path. Projectile attacks
+retain frame delay, spawn offsets, arc/velocity, secondary projectiles,
+minimum range, garrison volleys, Attack Ground, impact graphics/sounds,
+shield absorption, diplomacy checks, and the existing DAT blast-width/level
+path. Splash is evaluated only at the projectile's actual impact. Exact
+executable details for the random distribution, range/elevation/target
+modifiers, secondary-bolt accuracy, and `blastAttackLevel` versus
+`blastDefenseLevel` comparison have not yet been established by disassembly
+or a controlled original-runtime trace; these are explicitly not claimed as
+bit-exact.
+
 ## Garrison rally targets and interface feedback
 
 Action-3 tasks in the produced unit's own header determine compatible
@@ -738,9 +788,28 @@ Engine contract:
 - Clone Campaigns assault mechs (class 53) and air transports (class 59) are
   also repairable.
 - Utility Trawler 13 is class 14 rather than a land worker. Its own task header
-  supplies action 101 construction and action 106 repair, so build/repair UI,
-  placement assignment, work animation, and contextual commands are
-  capability-driven. Its build menu uses naval structures whose
+  supplies action 5 gathering, action 101 construction, and action 106 repair,
+  so fishing/build/repair UI, placement assignment, work animation, cursors,
+  sounds, and contextual commands are capability-driven. Unit 13 has terrain
+  restriction 13, search radius 5, capacity 15, work rate 0.430, speed 1.26,
+  and a 45-carbon cost. Its action-5 tasks target fish classes 23/24/25 and
+  Aqua Harvester units 199/278. They consume raw resource 17 and output
+  resource 0 (food), with observed task work values 1.750/1.000/1.750 for the
+  three fish classes. Its build menu uses naval structures whose
   `trainLocationId` is 13; after the Shipyard's automatic technology 27,
   Aqua Harvester 199 and Sensor Buoy 1576 are available. Utility Trawlers
-  repair owned or allied naval classes 13 through 17.
+  repair owned or allied naval classes 13 through 17 at the shared original
+  repair cost/rate path.
+- Aqua Harvester 199 is type 80, class 7, terrain restriction 13, creation
+  location 13, and stores 15 units of resource 17. It costs 90 carbon, takes
+  50 seconds to build, and depletes into unit 278. This corrects the prior
+  assumption that every class-7 object is a farm: farm reseeding, terrain
+  painting, in-footprint worker movement, and destruction now identify farms
+  by their unit identity/name, so Aqua Harvesters remain water resource
+  buildings.
+- Archipelago and Compact Islands generation discovers extant Gaia
+  class-23/24/25 resource-17 units from the loaded DAT and places deterministic
+  water resources. Idle AI task-capable water gatherers select only visible,
+  reachable resource-17 targets. Gather state, carried food, exhaustion and
+  nearby retargeting use the normal deterministic work state and persist in
+  save version 1.

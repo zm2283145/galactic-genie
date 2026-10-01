@@ -62,6 +62,7 @@ static int usage() {
             "  swgbtool test-ai <DataDir> <AiDir>\n"
             "  swgbtool test-skirmish <DataDir>\n"
             "  swgbtool test-interface <DataDir>\n"
+            "  swgbtool test-core-gameplay <DataDir>\n"
             "  swgbtool mp3 <file.mp3>\n");
     return 2;
 }
@@ -7151,6 +7152,9 @@ static int cmdTestAi(
     const int transports =
         openingGame.aiObjectCountForTesting(
             2, "BOAT-TRANSPORT");
+    const int transportHistory =
+        openingGame.aiObjectTotalForTesting(
+            2, "BOAT-TRANSPORT");
     const int landForces =
         openingGame.aiForceCountForTesting(
             2, 0);
@@ -7164,7 +7168,7 @@ static int cmdTestAi(
         openingAge >= 3 &&
         shipyards > 0 &&
         militaryUnits > 0 &&
-        transports > 0 &&
+        transportHistory > 0 &&
         landForces > 0 &&
         navalForces > 0 &&
         airForces > 0;
@@ -7180,7 +7184,7 @@ static int cmdTestAi(
         "carbon workers; age %d, workers %d, "
         "troop centers %d, shipyards %d, "
         "power cores %d, frigates %d, "
-        "transports %d, forces %d/%d/%d, "
+        "transports %d/%d, forces %d/%d/%d, "
         "explored +%zu, "
         "attacks %u, enemy sounds %d\n",
         original.files.size(),
@@ -7195,6 +7199,7 @@ static int cmdTestAi(
         powerCores,
         militaryUnits,
         transports,
+        transportHistory,
         landForces,
         navalForces,
         airForces,
@@ -7774,6 +7779,686 @@ static int cmdTestInterface(const char *dataDir) {
     return failures ? 1 : 0;
 }
 
+static int cmdTestCoreGameplay(
+    const char *dataDir) {
+    std::string err;
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n",
+                err.c_str());
+        return 1;
+    }
+    int failures = 0;
+    auto report =
+        [&](const char *name, bool ok,
+            const std::string &detail) {
+            printf(
+                "%s %s %s\n",
+                ok ? "PASS" : "FAIL",
+                name, detail.c_str());
+            if (!ok)
+                failures++;
+        };
+    auto step = [](Game &game,
+                   float seconds) {
+        for (float elapsed = 0.0f;
+             elapsed < seconds;
+             elapsed += 1.0f / 30.0f)
+            game.update(
+                1.0f / 30.0f, {});
+    };
+
+    int fishId = -1;
+    for (const dat::Unit &unit :
+         assets.dat().civs[0].units) {
+        if (!unit.exists ||
+            (unit.cls != 23 &&
+             unit.cls != 24 &&
+             unit.cls != 25))
+            continue;
+        const bool storesFish =
+            std::any_of(
+                unit.resourceStorages.begin(),
+                unit.resourceStorages.end(),
+                [](const dat::ResourceStorage
+                       &storage) {
+                    return storage.type == 17 &&
+                           storage.amount > 0.0f;
+                });
+        if (storesFish) {
+            fishId = unit.id;
+            break;
+        }
+    }
+
+    {
+        Game game(assets);
+        if (!game.initCompactTestMap(
+                0xF157u, 96, &err)) {
+            fprintf(stderr, "error: %s\n",
+                    err.c_str());
+            return 1;
+        }
+        game.setLocalPlayerForTesting(1);
+        const int civilization =
+            game.civilizationForPlayerForTesting(
+                1);
+        const uint32_t trawler =
+            game.spawnObjectForTesting(
+                civilization, 13, 1,
+                46.5f, 40.5f);
+        const uint32_t fish =
+            fishId >= 0
+                ? game.spawnObjectForTesting(
+                      0, fishId, 0,
+                      47.5f, 40.5f)
+                : 0;
+        const size_t generatedFish =
+            fishId >= 0
+                ? game.objectCountForTesting(
+                      0, fishId)
+                : 0;
+        const bool ordered =
+            trawler && fish &&
+            game.issueGatherForTesting(
+                trawler, fish);
+        step(game, 5.0f);
+        const float carried =
+            game.objectCarriedAmount(
+                trawler);
+        const bool fishing =
+            ordered && carried > 0.01f &&
+            game.objectGatheringTarget(
+                trawler, fish);
+        const uint32_t shipyard =
+            game.spawnObjectForTesting(
+                civilization, 45, 1,
+                43.5f, 40.5f);
+        const float foodBefore =
+            game.resource(
+                1, 0);
+        step(game, 45.0f);
+        const float foodAfter =
+            game.resource(
+                1, 0);
+        const bool deposited =
+            shipyard &&
+            foodAfter > foodBefore + 0.01f;
+
+        game.researchTechnologyForTesting(
+            1, 27);
+        const std::vector<int> options =
+            game.buildingOptionIds(
+                trawler);
+        const bool harvesterMenu =
+            std::find(
+                options.begin(),
+                options.end(), 199) !=
+            options.end();
+        const bool buoyMenu =
+            std::find(
+                options.begin(),
+                options.end(), 1576) !=
+            options.end();
+
+        const uint32_t aqua =
+            game.spawnObjectForTesting(
+                civilization, 199, 1,
+                45.5f, 44.5f);
+        const uint32_t aquaTrawler =
+            game.spawnObjectForTesting(
+                civilization, 13, 1,
+                45.5f, 43.5f);
+        const bool aquaOrdered =
+            aqua && aquaTrawler &&
+            game.issueGatherForTesting(
+                aquaTrawler, aqua);
+        step(game, 3.0f);
+        const bool aquaWorked =
+            aquaOrdered &&
+            game.objectCarriedAmount(
+                aquaTrawler) > 0.01f;
+
+        const uint32_t damaged =
+            game.spawnObjectForTesting(
+                civilization, 13, 1,
+                46.5f, 43.5f);
+        game.setResourceForTesting(
+            1, 1, 1000.0f);
+        const int fullHealth =
+            game.objectHealthForTesting(
+                damaged);
+        game.damageObjectForTesting(
+            damaged, 20);
+        const int damagedHealth =
+            game.objectHealthForTesting(
+                damaged);
+        const bool repairOrdered =
+            game.issueRepairForTesting(
+                aquaTrawler, damaged);
+        step(game, 4.0f);
+        const int repairedHealth =
+            game.objectHealthForTesting(
+                damaged);
+
+        const char *savePath =
+            "swgb-core-fishing.tmp";
+        std::remove(savePath);
+        const bool saved =
+            game.saveMatch(
+                savePath, &err);
+        const float savedCarry =
+            game.objectCarriedAmount(
+                trawler);
+        const bool loaded =
+            saved &&
+            game.loadMatch(
+                savePath, &err);
+        const bool continuity =
+            loaded &&
+            std::abs(
+                game.objectCarriedAmount(
+                    trawler) -
+                savedCarry) < 0.001f &&
+            game.invariantsForTesting();
+        const float loadedCarry =
+            game.objectCarriedAmount(
+                trawler);
+        const bool validAfterLoad =
+            game.invariantsForTesting();
+        std::remove(savePath);
+
+        report(
+            "fishing-task-carry",
+            fishId >= 0 &&
+                generatedFish >= 3 &&
+                fishing && deposited,
+            "fish=" +
+                std::to_string(fishId) +
+                " generated=" +
+                std::to_string(
+                    generatedFish) +
+                " carried=" +
+                std::to_string(carried) +
+                " food=" +
+                std::to_string(
+                    foodBefore) +
+                "->" +
+                std::to_string(
+                    foodAfter));
+        report(
+            "trawler-menu-aqua",
+            harvesterMenu && buoyMenu &&
+                aquaWorked,
+            "199=" +
+                std::to_string(
+                    (int)harvesterMenu) +
+                " 1576=" +
+                std::to_string(
+                    (int)buoyMenu) +
+                " aqua-carry=" +
+                std::to_string(
+                    game.objectCarriedAmount(
+                        aquaTrawler)));
+        report(
+            "trawler-repair-save",
+            repairOrdered &&
+                repairedHealth >
+                    damagedHealth &&
+                repairedHealth <=
+                    fullHealth &&
+                continuity,
+            "health=" +
+                std::to_string(
+                    damagedHealth) +
+                "->" +
+                std::to_string(
+                    repairedHealth) +
+                " save=" +
+                std::to_string(
+                    (int)continuity) +
+                " loaded=" +
+                std::to_string(
+                    (int)loaded) +
+                " carry=" +
+                std::to_string(
+                    savedCarry) +
+                "/" +
+                std::to_string(
+                    loadedCarry) +
+                " valid=" +
+                std::to_string(
+                    (int)validAfterLoad) +
+                " error=" + err);
+    }
+
+    {
+        const int attributes[] = {
+            2, 11, 13, 14, 15,
+        };
+        for (int attribute :
+             attributes) {
+            Game game(assets);
+            game.init(0xA770u +
+                          (uint32_t)attribute,
+                      48, &err);
+            const int civilization =
+                game.civilizationForPlayerForTesting(
+                    1);
+            bool changed = false;
+            int testedUnit = -1;
+            int testedTech = -1;
+            float before = 0.0f;
+            float after = 0.0f;
+            bool hasApplicableCommand =
+                false;
+            const auto &units =
+                assets.dat()
+                    .civs[(size_t)civilization]
+                    .units;
+            for (const dat::Unit &unit :
+                 units) {
+                if (!unit.exists)
+                    continue;
+                float base = 0.0f;
+                if (attribute == 2)
+                    base =
+                        (float)unit
+                            .garrisonCapacity;
+                else if (attribute == 11)
+                    base =
+                        (float)unit
+                            .accuracyPercent;
+                else if (attribute == 13)
+                    base = unit.workRate;
+                else if (attribute == 14)
+                    base =
+                        unit.resourceCapacity;
+                else if (attribute == 15)
+                    base = unit.baseArmor;
+                if (base <= 0.0f &&
+                    attribute != 15)
+                    continue;
+                for (size_t technologyId = 0;
+                     technologyId <
+                         assets.dat()
+                             .techs.size();
+                     ++technologyId) {
+                    const dat::Tech &technology =
+                        assets.dat().techs[
+                            technologyId];
+                    if (technology.effectId < 0 ||
+                        (size_t)technology
+                                .effectId >=
+                            assets.dat()
+                                .effects.size())
+                        continue;
+                    bool applicable = false;
+                    for (const dat::EffectCommand
+                             &command :
+                         assets.dat()
+                             .effects[(size_t)
+                                          technology
+                                              .effectId]
+                             .commands) {
+                        if (command.c !=
+                                attribute ||
+                            (command.type != 0 &&
+                             command.type != 4 &&
+                             command.type != 5) ||
+                            (command.a >= 0 &&
+                             command.a != unit.id) ||
+                            (command.b >= 0 &&
+                             command.b !=
+                                 unit.cls))
+                            continue;
+                        hasApplicableCommand =
+                            true;
+                        applicable = true;
+                        break;
+                    }
+                    if (!applicable)
+                        continue;
+                    const uint32_t object =
+                        game.spawnObjectForTesting(
+                            civilization,
+                            unit.id, 1,
+                            20.0f, 20.0f);
+                    if (!object)
+                        continue;
+                    before =
+                        game.objectUnitAttributeForTesting(
+                            object, attribute,
+                            base);
+                    game.researchTechnologyForTesting(
+                        1,
+                        (int)technologyId);
+                    after =
+                        game.objectUnitAttributeForTesting(
+                            object, attribute,
+                            base);
+                    if (std::abs(
+                            after - before) >
+                        0.0001f) {
+                        changed = true;
+                        testedUnit = unit.id;
+                        testedTech =
+                            (int)technologyId;
+                        break;
+                    }
+                }
+                if (changed)
+                    break;
+            }
+            report(
+                ("technology-attribute-" +
+                 std::to_string(attribute))
+                    .c_str(),
+                changed ||
+                    !hasApplicableCommand,
+                "unit=" +
+                    std::to_string(
+                        testedUnit) +
+                    " tech=" +
+                    std::to_string(
+                        testedTech) +
+                    " value=" +
+                    std::to_string(before) +
+                    "->" +
+                    std::to_string(after) +
+                    (!hasApplicableCommand
+                         ? " no-applicable-command"
+                         : ""));
+        }
+    }
+
+    {
+        int hits = 0;
+        int misses = 0;
+        bool deterministic = true;
+        std::array<float, 2>
+            referenceAim{};
+        bool haveReference = false;
+        for (uint32_t seed = 1;
+             seed <= 16; ++seed) {
+            Game game(assets);
+            if (!game.init(seed, 48,
+                           &err)) {
+                fprintf(
+                    stderr, "error: %s\n",
+                    err.c_str());
+                return 1;
+            }
+            game.setDiplomacyForTesting(
+                1, 2, 3);
+            game.setDiplomacyForTesting(
+                2, 1, 3);
+            const uint32_t source =
+                game.spawnObjectForTesting(
+                    7, 6, 1,
+                    20.0f, 20.0f);
+            const uint32_t target =
+                game.spawnObjectForTesting(
+                    7, 460, 2,
+                    25.0f, 20.0f);
+            game.setAttackModeForTesting(
+                source, 3);
+            game.setAttackModeForTesting(
+                target, 3);
+            if (!game.issueAttackForTesting(
+                    source, target))
+                continue;
+            for (int frame = 0;
+                 frame < 300 &&
+                 game.projectileCountForTesting() ==
+                     0;
+                 ++frame)
+                game.update(
+                    1.0f / 30.0f, {});
+            if (game.projectileCountForTesting() ==
+                0)
+                continue;
+            const auto aim =
+                game.projectileAimForTesting(0);
+            const bool fixed =
+                game.projectileUsesFixedAimForTesting(
+                    0);
+            const float dx = aim[0] - 25.0f;
+            const float dy = aim[1] - 20.0f;
+            if (fixed &&
+                dx * dx + dy * dy > 0.25f)
+                misses++;
+            else
+                hits++;
+            if (seed == 7) {
+                referenceAim = aim;
+                haveReference = true;
+                const char *savePath =
+                    "swgb-core-projectile.tmp";
+                std::remove(savePath);
+                const bool saved =
+                    game.saveMatch(
+                        savePath, &err);
+                const bool loaded =
+                    saved &&
+                    game.loadMatch(
+                        savePath, &err);
+                const auto loadedAim =
+                    game.projectileAimForTesting(
+                        0);
+                deterministic =
+                    deterministic && loaded &&
+                    std::abs(
+                        loadedAim[0] -
+                        aim[0]) <
+                        0.0001f &&
+                    std::abs(
+                        loadedAim[1] -
+                        aim[1]) <
+                        0.0001f;
+                std::remove(savePath);
+            }
+        }
+        if (haveReference) {
+            Game replay(assets);
+            replay.init(7, 48, &err);
+            replay.setDiplomacyForTesting(
+                1, 2, 3);
+            replay.setDiplomacyForTesting(
+                2, 1, 3);
+            const uint32_t source =
+                replay.spawnObjectForTesting(
+                    7, 6, 1,
+                    20.0f, 20.0f);
+            const uint32_t target =
+                replay.spawnObjectForTesting(
+                    7, 460, 2,
+                    25.0f, 20.0f);
+            replay.setAttackModeForTesting(
+                source, 3);
+            replay.setAttackModeForTesting(
+                target, 3);
+            replay.issueAttackForTesting(
+                source, target);
+            for (int frame = 0;
+                 frame < 300 &&
+                 replay.projectileCountForTesting() ==
+                     0;
+                 ++frame)
+                replay.update(
+                    1.0f / 30.0f, {});
+            const auto aim =
+                replay.projectileAimForTesting(0);
+            deterministic =
+                std::abs(
+                    aim[0] -
+                    referenceAim[0]) <
+                    0.0001f &&
+                std::abs(
+                    aim[1] -
+                    referenceAim[1]) <
+                    0.0001f;
+        }
+        report(
+            "accuracy-deterministic-misses",
+            hits > 0 && misses > 0 &&
+                deterministic,
+            "hits=" +
+                std::to_string(hits) +
+                " misses=" +
+                std::to_string(misses) +
+                " replay=" +
+                std::to_string(
+                    (int)deterministic));
+    }
+
+    {
+        Game game(assets);
+        game.init(7, 96, &err);
+        const int civilization =
+            game.civilizationForPlayerForTesting(
+                1);
+        std::vector<uint32_t> troops;
+        for (int index = 0;
+             index < 12; ++index)
+            troops.push_back(
+                game.spawnObjectForTesting(
+                    civilization, 460, 1,
+                    40.0f +
+                        (index % 4) * 0.8f,
+                    11.0f +
+                        (index / 4) * 0.8f));
+        game.groupMoveForTesting(
+            troops, 52.0f, 24.0f, 0);
+        step(game, 3.0f);
+        const char *savePath =
+            "swgb-core-formation.tmp";
+        std::remove(savePath);
+        const bool saved =
+            game.saveMatch(
+                savePath, &err);
+        const float shapeBefore =
+            game.marchShapeErrorForTesting();
+        const bool loaded =
+            saved &&
+            game.loadMatch(
+                savePath, &err);
+        const float shapeAfter =
+            game.marchShapeErrorForTesting();
+        game.damageObjectForTesting(
+            troops.front(), 10000);
+        game.update(
+            1.0f / 30.0f, {});
+        const size_t membersAfterDeath =
+            game.formationMemberCountForTesting();
+        for (int frame = 0;
+             frame < 30 * 90 &&
+             game.movementStats()
+                     .pendingMoveGoals >
+                 0;
+             ++frame)
+            game.update(
+                1.0f / 30.0f, {});
+        const MovementStats movement =
+            game.movementStats();
+        std::remove(savePath);
+        report(
+            "formation-save-narrow-passage",
+            loaded &&
+                std::abs(
+                    shapeBefore -
+                    shapeAfter) < 0.001f &&
+                movement.pendingMoveGoals ==
+                    0 &&
+                movement.overlappingPairs ==
+                    0 &&
+                movement.terrainViolations ==
+                    0 &&
+                membersAfterDeath ==
+                    troops.size() - 1 &&
+                game.invariantsForTesting(),
+            "shape=" +
+                std::to_string(
+                    shapeBefore) +
+                "/" +
+                std::to_string(
+                    shapeAfter) +
+                " pending=" +
+                std::to_string(
+                    movement
+                        .pendingMoveGoals) +
+                " members=" +
+                std::to_string(
+                    membersAfterDeath) +
+                " overlaps=" +
+                std::to_string(
+                    movement
+                        .overlappingPairs));
+    }
+
+    {
+        bool soak = true;
+        int completed = 0;
+        const SkirmishMapStyle styles[] = {
+            SkirmishMapStyle::Grasslands,
+            SkirmishMapStyle::Archipelago,
+            SkirmishMapStyle::CompactIslands,
+        };
+        for (int index = 0;
+             index < 3; ++index) {
+            SkirmishSettings settings;
+            settings.seed =
+                0x500000u +
+                (uint32_t)index;
+            settings.mapSize = 48;
+            settings.playerCivilization =
+                1 + index;
+            settings.computerCivilization =
+                8 - index;
+            settings.mapStyle =
+                styles[index];
+            settings.startingResources =
+                1000;
+            settings.populationCap = 75;
+            Game game(assets);
+            soak =
+                soak &&
+                game.initSkirmish(
+                    settings, &err);
+            const char *savePath =
+                "swgb-core-soak.tmp";
+            std::remove(savePath);
+            for (int frame = 0;
+                 frame < 600 && soak;
+                 ++frame) {
+                game.update(0.2f, {});
+                if (frame == 299)
+                    soak =
+                        game.saveMatch(
+                            savePath, &err) &&
+                        game.loadMatch(
+                            savePath, &err);
+                soak =
+                    soak &&
+                    game.invariantsForTesting();
+            }
+            std::remove(savePath);
+            if (soak)
+                completed++;
+        }
+        report(
+            "generated-match-soak",
+            soak && completed == 3,
+            "maps=" +
+                std::to_string(
+                    completed) +
+                "/3");
+    }
+
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) return usage();
     const char *cmd = argv[1];
@@ -7852,6 +8537,9 @@ int main(int argc, char **argv) {
         return cmdTestSkirmish(argv[2]);
     if (!strcmp(cmd, "test-interface"))
         return cmdTestInterface(argv[2]);
+    if (!strcmp(cmd, "test-core-gameplay"))
+        return cmdTestCoreGameplay(
+            argv[2]);
     if (!strcmp(cmd, "mp3")) return cmdMp3(argv[2]);
     return usage();
 }

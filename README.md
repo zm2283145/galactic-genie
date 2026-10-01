@@ -18,7 +18,8 @@ It is written clean-room style: file formats come from public documentation (ope
 | CPX/SCX terrain, elevation, player state, triggers, saved camera, and initial object loading (“Breaking Bread”) | done |
 | Initial trigger runtime: timers, object/area/resource conditions, ordered effects, voiced dialogue, and collision-aware scripted movement | in progress |
 | Units: idle/walk animation, 8-way facing with mirroring, graphic deltas for buildings | done |
-| Combat: contextual attack orders, pursuit, projectiles, DAT-driven range/reload/damage, health, building damage, and death | in progress |
+| Combat: contextual orders, deterministic accuracy/misses, projectiles/blast, DAT-driven attributes, shields, damage, and death | in progress |
+| Fishing/naval economy: Utility Trawler gathering, Aqua Harvesters, naval construction/repair, island resources, and AI use | done |
 | Vita: renderer, camera controls, original cursors, unit selection/status markers, formation movement, and fog-aware navigable minimap | done |
 | Vita frontend: title/main menu, campaign entry, skirmish lobby, real pause/options, save/continue, and outcome flow | done |
 | Deterministic random maps: grasslands, archipelago, and compact two-island regression layout | done |
@@ -99,15 +100,22 @@ Settings are stored in `ux0:data/swgb/settings.bin`; generated-skirmish continua
 reported and reset to defaults; corrupt, oversized, mismatched, or unsupported saves are rejected
 without replacing the current match.
 
-Combat currently includes pursuit with collision-aware A* pathfinding, attack animations and
-acknowledgements, original projectile graphics and weapon sounds, DAT attack/armor classes,
-reload timing, health-bar depletion, death sounds and animations, decaying unit remains and
-building rubble, and progressive building fire/damage graphics. X can also select a visible
-hostile unit or building for inspection without allowing it to receive orders. Accuracy, blast
-damage, and explicit guard/patrol commands remain to be implemented. Idle combat units acquire
-nearby hostile targets according to their stance, retaliate when attacked, return to their
-assigned post after defensive pursuits, and armed buildings fire automatically. Move and attack
-orders briefly display the original game's red target marker at the commanded location.
+Combat includes pursuit with collision-aware A* pathfinding, attack animations and
+acknowledgements, original projectile graphics and weapon sounds, researched accuracy with
+deterministic misses, DAT attack/armor classes, frame delays, secondary projectiles, minimum
+range, blast impact, shields, reload timing, health-bar depletion, death animations, remains,
+rubble, and progressive building damage graphics. X can select a visible hostile unit or
+building for inspection without allowing it to receive orders. Idle combat units acquire nearby
+hostile targets according to stance, retaliate when attacked, return after defensive pursuits,
+and armed buildings fire automatically. Move and attack orders briefly display the original
+red target marker. Exact original range/elevation accuracy modifiers and blast-level comparison
+remain under executable research.
+
+On island maps, select a Utility Trawler and command visible fish or an Aqua Harvester with the
+normal contextual input. Trawlers carry fish as food, deposit at compatible naval drop sites,
+retarget nearby fish after exhaustion, construct DAT-authorized naval buildings and defenses,
+and repair eligible naval/mechanical targets. Carried food and capacity appear in the selection
+panel, and generated-skirmish saves retain active fishing, projectiles, and formation movement.
 
 ## License
 

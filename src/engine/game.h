@@ -461,6 +461,9 @@ public:
         int player,
         const std::string &symbol,
         bool includeFoundations = true) const;
+    int aiObjectTotalForTesting(
+        int player,
+        const std::string &symbol) const;
     size_t aiQueuedUnitCountForTesting(
         int player, int unitId) const;
     size_t aiGathererCountForTesting(
@@ -715,6 +718,7 @@ public:
     // Mean distance of marching members from their moving slots (-1 if no
     // group is marching).
     float marchShapeErrorForTesting() const;
+    size_t formationMemberCountForTesting() const;
     // Drags a wall of unitId from tile (x1,y1) to (x2,y2) for the worker;
     // returns the new foundation ids.
     std::vector<uint32_t> placeWallForTesting(uint32_t workerId, int civilization, int unitId,
@@ -803,6 +807,7 @@ public:
         return populationCapacity(player);
     }
     size_t activeObjectCount() const;
+    bool invariantsForTesting() const;
     size_t underConstructionObjectCount() const;
     size_t selectedObjectCount() const;
     size_t selectedMovingObjectCount() const;
@@ -813,6 +818,16 @@ public:
     float objectShieldPoints(uint32_t spawnId) const;
     float objectMaxShieldPoints(uint32_t spawnId) const;
     bool objectShielded(uint32_t spawnId) const;
+    float objectUnitAttributeForTesting(
+        uint32_t spawnId, int attribute,
+        float baseValue) const {
+        const Object *object = findObject(spawnId);
+        return object
+                   ? modifiedUnitAttribute(
+                         *object, attribute,
+                         baseValue)
+                   : baseValue;
+    }
     uint32_t spawnObjectForTesting(int civilization, int unitId, int player,
                                    float x, float y);
     uint32_t spawnFoundationForTesting(
@@ -930,6 +945,20 @@ public:
                        !projectiles_[index].unit
                    ? -1
                    : projectiles_[index].unit->id;
+    }
+    std::array<float, 2>
+    projectileAimForTesting(size_t index) const {
+        return index < projectiles_.size()
+                   ? std::array<float, 2>{
+                         projectiles_[index].aimX,
+                         projectiles_[index].aimY}
+                   : std::array<float, 2>{-1.0f,
+                                          -1.0f};
+    }
+    bool projectileUsesFixedAimForTesting(
+        size_t index) const {
+        return index < projectiles_.size() &&
+               projectiles_[index].groundAimed;
     }
     bool attackShotPendingForTesting(
         uint32_t spawnId) const {
@@ -1437,6 +1466,7 @@ private:
     void spawnStartingResources(
         int player, float baseX, float baseY,
         float inlandDirection);
+    void spawnFishingResources();
     void buildTileElevation();
     void resetVisibility();
     void updateVisibility();
@@ -1471,6 +1501,7 @@ private:
     bool hasAnyGarrisonTask(const Object &unit) const;
     bool hasGarrisonTask(const Object &unit, const Object &container) const;
     bool isTransport(const Object &object) const;
+    bool isFarmUnit(const dat::Unit &unit) const;
     bool isFoodProcessingCenter(const Object &building) const;
     bool queueFarmReseed(const Object &building, const dat::Unit &farm);
     void playInterfaceFeedback(int soundId);
@@ -1545,6 +1576,8 @@ private:
         const dat::AttackOrArmor &attack) const;
     int modifiedArmourAmount(const Object &target, int armourClass,
                              bool &present) const;
+    int effectiveGarrisonCapacity(
+        const Object &object) const;
     bool technologyCommandApplies(
         const dat::EffectCommand &command,
         const Object &object) const;
@@ -1673,6 +1706,7 @@ private:
         const Object &object) const;
     int civilizationGraphic(int graphicId, int player) const;
     bool isWorker(const Object &object) const;
+    bool isGatherer(const Object &object) const;
     bool isBuilder(const Object &object) const;
     bool isRepairer(const Object &object) const;
     bool isPowerCore(const Object &object) const;
