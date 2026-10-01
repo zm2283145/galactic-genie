@@ -14,7 +14,8 @@ namespace {
 
 constexpr char kSaveMagic[8] = {
     'S', 'W', 'G', 'B', 'S', 'A', 'V', 'E'};
-constexpr uint32_t kSaveVersion = 1;
+constexpr uint32_t kSaveVersion = 2;
+constexpr uint32_t kOldestSaveVersion = 1;
 constexpr size_t kMaxSaveBytes = 32u * 1024u * 1024u;
 constexpr uint32_t kMaxObjects = 20000;
 constexpr uint32_t kMaxCollection = 1000000;
@@ -153,8 +154,9 @@ void writeSettings(
 
 bool readSettings(
     Reader &reader,
-    SkirmishSettings &settings) {
-    return reader.scalar(settings.seed) &&
+    SkirmishSettings &settings,
+    uint32_t version) {
+    if (!(reader.scalar(settings.seed) &&
            reader.scalar(settings.mapSize) &&
            reader.scalar(
                settings.playerCivilization) &&
@@ -167,7 +169,22 @@ bool readSettings(
            reader.scalar(
                settings.startingResources) &&
            reader.scalar(settings.populationCap) &&
-           reader.scalar(settings.victory);
+           reader.scalar(settings.victory)))
+        return false;
+    if (version == 1) {
+        const uint8_t old =
+            (uint8_t)settings.victory;
+        if (old == 0)
+            settings.victory =
+                SkirmishVictory::Conquest;
+        else if (old == 1)
+            settings.victory =
+                SkirmishVictory::CommandCenter;
+        else
+            return reader.fail(
+                "save contains invalid legacy victory mode");
+    }
+    return true;
 }
 
 bool sameSettings(
@@ -234,6 +251,7 @@ bool payloadFromFile(
     std::vector<uint8_t> &bytes,
     const uint8_t *&payload,
     size_t &payloadSize,
+    uint32_t &version,
     std::string *err) {
     if (!readFile(path, bytes, err)) return false;
     constexpr size_t headerSize = 20;
@@ -247,15 +265,17 @@ bool payloadFromFile(
     Reader header(
         bytes.data() + sizeof kSaveMagic,
         headerSize - sizeof kSaveMagic);
-    uint32_t version = 0;
+    version = 0;
     uint32_t encodedSize = 0;
     uint32_t encodedChecksum = 0;
     if (!header.scalar(version) ||
         !header.scalar(encodedSize) ||
         !header.scalar(encodedChecksum) ||
-        version != kSaveVersion) {
+        version < kOldestSaveVersion ||
+        version > kSaveVersion) {
         if (err)
-            *err = version != kSaveVersion
+            *err = version < kOldestSaveVersion ||
+                           version > kSaveVersion
                        ? "unsupported save version"
                        : "truncated save header";
         return false;
@@ -389,11 +409,13 @@ bool Game::readSaveSettings(
     std::vector<uint8_t> bytes;
     const uint8_t *payload = nullptr;
     size_t payloadSize = 0;
+    uint32_t version = 0;
     if (!payloadFromFile(
-            path, bytes, payload, payloadSize, err))
+            path, bytes, payload, payloadSize,
+            version, err))
         return false;
     Reader reader(payload, payloadSize);
-    if (!readSettings(reader, settings)) {
+    if (!readSettings(reader, settings, version)) {
         if (err) *err = reader.error();
         return false;
     }
@@ -405,7 +427,11 @@ bool Game::readSaveSettings(
         settings.computerCivilization > 8 ||
         settings.populationCap < 25 ||
         settings.populationCap > 250 ||
-        settings.startingResources < 0) {
+        settings.startingResources < 0 ||
+        settings.victory <
+            SkirmishVictory::Standard ||
+        settings.victory >
+            SkirmishVictory::CommandCenter) {
         if (err) *err = "save contains invalid match settings";
         return false;
     }
@@ -432,6 +458,16 @@ bool Game::saveMatch(
     writer.scalar(victoryState_);
     writer.scalar(conquestEnabled_);
     writer.scalar(conquestCheckTime_);
+    writer.scalar(victoryCountdownPlayer_);
+    writer.scalar(victoryCountdownKind_);
+    writer.scalar(victoryCountdownRemaining_);
+    writer.scalar(standardVictoryCountdown_);
+    writer.scalar(timeLimitSeconds_);
+    writer.scalar(scoreLimit_);
+    writer.scalar(
+        monumentVictoryCountdowns_);
+    writer.scalar(
+        holocronVictoryCountdowns_);
     writer.scalar(camX_);
     writer.scalar(camY_);
     writer.scalar(zoom_);
@@ -638,6 +674,12 @@ bool Game::saveMatch(
         SAVE_FIELD(discoveredByPlayers);
         SAVE_FIELD(garrisonedInId);
         SAVE_FIELD(initialFrame);
+        SAVE_FIELD(conversionTargetId);
+        SAVE_FIELD(conversionProgress);
+        SAVE_FIELD(conversionRecharge);
+        SAVE_FIELD(holocronTargetId);
+        SAVE_FIELD(carriedHolocronId);
+        SAVE_FIELD(carriedById);
 #undef SAVE_FIELD
     }
 
@@ -831,12 +873,14 @@ bool Game::loadMatch(
     std::vector<uint8_t> bytes;
     const uint8_t *payload = nullptr;
     size_t payloadSize = 0;
+    uint32_t version = 0;
     if (!payloadFromFile(
-            path, bytes, payload, payloadSize, err))
+            path, bytes, payload, payloadSize,
+            version, err))
         return false;
     Reader reader(payload, payloadSize);
     SkirmishSettings settings;
-    if (!readSettings(reader, settings) ||
+    if (!readSettings(reader, settings, version) ||
         !generatedMatch_ ||
         !sameSettings(
             settings,
@@ -859,6 +903,17 @@ bool Game::loadMatch(
     int victoryState = -1;
     bool conquestEnabled = false;
     float conquestCheckTime = 0;
+    int victoryCountdownPlayer = -1;
+    int victoryCountdownKind = 0;
+    float victoryCountdownRemaining = 0.0f;
+    float standardVictoryCountdown =
+        600.0f;
+    float timeLimitSeconds = 3600.0f;
+    int scoreLimit = 4000;
+    std::array<float, 17>
+        monumentVictoryCountdowns{};
+    std::array<float, 17>
+        holocronVictoryCountdowns{};
     float camX = 0, camY = 0, zoom = 1;
     float animClock = 0;
     FormationType formation = FormationType::Line;
@@ -877,6 +932,22 @@ bool Game::loadMatch(
         !reader.scalar(victoryState) ||
         !reader.scalar(conquestEnabled) ||
         !reader.scalar(conquestCheckTime) ||
+        (version >= 2 &&
+         (!reader.scalar(
+              victoryCountdownPlayer) ||
+          !reader.scalar(
+              victoryCountdownKind) ||
+          !reader.scalar(
+              victoryCountdownRemaining) ||
+          !reader.scalar(
+              standardVictoryCountdown) ||
+          !reader.scalar(
+              timeLimitSeconds) ||
+          !reader.scalar(scoreLimit) ||
+          !reader.scalar(
+              monumentVictoryCountdowns) ||
+          !reader.scalar(
+              holocronVictoryCountdowns))) ||
         !reader.scalar(camX) ||
         !reader.scalar(camY) ||
         !reader.scalar(zoom) ||
@@ -891,11 +962,57 @@ bool Game::loadMatch(
         !reader.scalar(reseedQueue) ||
         mapSize != settings.mapSize ||
         localPlayer <= 0 || localPlayer >= 17 ||
-        zoom < 0.4f || zoom > 1.0f) {
+        zoom < 0.4f || zoom > 1.0f ||
+        victoryCondition <
+            SkirmishVictory::Standard ||
+        victoryCondition >
+            SkirmishVictory::CommandCenter ||
+        victoryCountdownPlayer < -1 ||
+        victoryCountdownPlayer >= 17 ||
+        victoryCountdownKind < 0 ||
+        victoryCountdownKind > 2 ||
+        victoryCountdownRemaining < 0.0f ||
+        standardVictoryCountdown <= 0.0f ||
+        timeLimitSeconds <= 0.0f ||
+        scoreLimit <= 0) {
         if (err)
             *err = reader.ok()
                        ? "save contains invalid global state"
                        : reader.error();
+        return false;
+    }
+    if (version == 1) {
+        const uint8_t old =
+            (uint8_t)victoryCondition;
+        if (old == 0)
+            victoryCondition =
+                SkirmishVictory::Conquest;
+        else if (old == 1)
+            victoryCondition =
+                SkirmishVictory::CommandCenter;
+        else {
+            if (err)
+                *err =
+                    "save contains invalid legacy victory mode";
+            return false;
+        }
+    }
+    const auto invalidCountdown =
+        [](float value) {
+            return !std::isfinite(value) ||
+                   value < 0.0f;
+        };
+    if (std::any_of(
+            monumentVictoryCountdowns.begin(),
+            monumentVictoryCountdowns.end(),
+            invalidCountdown) ||
+        std::any_of(
+            holocronVictoryCountdowns.begin(),
+            holocronVictoryCountdowns.end(),
+            invalidCountdown)) {
+        if (err)
+            *err =
+                "save contains invalid victory countdown";
         return false;
     }
     std::string randomState;
@@ -1024,7 +1141,11 @@ bool Game::loadMatch(
                       (size_t)player - 1]
                       .civilization
                 : 0;
-        return findUnit(civilization, unitId);
+        const dat::Unit *unit =
+            findUnit(civilization, unitId);
+        if (!unit && unitId == 285)
+            unit = findUnit(0, unitId);
+        return unit;
     };
     uint32_t objectCount = 0;
     if (!reader.scalar(objectCount) ||
@@ -1217,6 +1338,21 @@ bool Game::loadMatch(
             if (err) *err = reader.error();
             return false;
         }
+        if (version >= 2 &&
+            (!LOAD_FIELD(
+                 conversionTargetId) ||
+             !LOAD_FIELD(
+                 conversionProgress) ||
+             !LOAD_FIELD(
+                 conversionRecharge) ||
+             !LOAD_FIELD(
+                 holocronTargetId) ||
+             !LOAD_FIELD(
+                 carriedHolocronId) ||
+             !LOAD_FIELD(carriedById))) {
+            if (err) *err = reader.error();
+            return false;
+        }
 #undef LOAD_FIELD
         object.unit =
             resolveUnit(object.player, unitId);
@@ -1265,6 +1401,73 @@ bool Game::loadMatch(
         object.pathIndex =
             (size_t)objectPathIndex;
         objects.push_back(std::move(object));
+    }
+    const auto savedObject =
+        [&](uint32_t spawnId)
+        -> const Object * {
+        if (!spawnId) return nullptr;
+        const auto found =
+            std::find_if(
+                objects.begin(),
+                objects.end(),
+                [&](const Object &object) {
+                    return object.spawnId ==
+                           spawnId;
+                });
+        return found == objects.end()
+                   ? nullptr
+                   : &*found;
+    };
+    for (const Object &object : objects) {
+        if (object.state > State::Convert) {
+            if (err)
+                *err =
+                    "save contains invalid object state";
+            return false;
+        }
+        if (object.conversionTargetId &&
+            !savedObject(
+                object.conversionTargetId)) {
+            if (err)
+                *err =
+                    "save contains stale conversion target";
+            return false;
+        }
+        if (object.holocronTargetId &&
+            !savedObject(
+                object.holocronTargetId)) {
+            if (err)
+                *err =
+                    "save contains stale holocron target";
+            return false;
+        }
+        if (object.carriedHolocronId) {
+            const Object *holocron =
+                savedObject(
+                    object.carriedHolocronId);
+            if (!holocron ||
+                holocron->carriedById !=
+                    object.spawnId) {
+                if (err)
+                    *err =
+                        "save contains inconsistent carried holocron";
+                return false;
+            }
+        }
+        if (object.carriedById) {
+            const Object *carrier =
+                savedObject(
+                    object.carriedById);
+            if (!carrier ||
+                carrier
+                        ->carriedHolocronId !=
+                    object.spawnId) {
+                if (err)
+                    *err =
+                        "save contains inconsistent holocron carrier";
+                return false;
+            }
+        }
     }
 
     uint32_t projectileCount = 0;
@@ -1627,6 +1830,20 @@ bool Game::loadMatch(
     victoryState_ = victoryState;
     conquestEnabled_ = conquestEnabled;
     conquestCheckTime_ = conquestCheckTime;
+    victoryCountdownPlayer_ =
+        victoryCountdownPlayer;
+    victoryCountdownKind_ =
+        victoryCountdownKind;
+    victoryCountdownRemaining_ =
+        victoryCountdownRemaining;
+    standardVictoryCountdown_ =
+        standardVictoryCountdown;
+    timeLimitSeconds_ = timeLimitSeconds;
+    scoreLimit_ = scoreLimit;
+    monumentVictoryCountdowns_ =
+        monumentVictoryCountdowns;
+    holocronVictoryCountdowns_ =
+        holocronVictoryCountdowns;
     camX_ = camX;
     camY_ = camY;
     zoom_ = zoom;

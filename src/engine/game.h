@@ -574,12 +574,27 @@ public:
     int victoryStateForTesting() const {
         return victoryState_;
     }
+    float victoryCountdownForTesting() const {
+        return victoryCountdownRemaining_;
+    }
+    int victoryCountdownPlayerForTesting() const {
+        return victoryCountdownPlayer_;
+    }
+    void setVictoryParametersForTesting(
+        float countdown, float timeLimit,
+        int scoreLimit) {
+        standardVictoryCountdown_ = countdown;
+        timeLimitSeconds_ = timeLimit;
+        scoreLimit_ = scoreLimit;
+    }
     int difficultyForTesting() const {
         return difficulty_;
     }
     SkirmishVictory victoryConditionForTesting() const {
         return victoryCondition_;
     }
+    void setVictoryConditionForTesting(
+        SkirmishVictory condition);
     uint64_t mapHashForTesting() const;
     std::array<float, 2>
     playerBasePositionForTesting(int player) const;
@@ -1139,6 +1154,38 @@ public:
         forceExploreCheat_ = explore;
         forceSightCheat_ = sight;
     }
+    bool issueConversionForTesting(
+        uint32_t converterId,
+        uint32_t targetId);
+    uint32_t spawnConverterForTesting(
+        int player, float x, float y);
+    float conversionProgressForTesting(
+        uint32_t converterId) const;
+    float conversionChargeForTesting(
+        uint32_t converterId) const;
+    bool objectStealthedForTesting(
+        uint32_t spawnId) const;
+    bool objectDetectedForTesting(
+        int player, uint32_t spawnId) const;
+    uint32_t spawnDetectorForTesting(
+        int player, float x, float y);
+    bool setStealthedForTesting(
+        int player, bool enabled);
+    uint32_t spawnHolocronForTesting(
+        float x, float y);
+    uint32_t spawnTempleForTesting(
+        int player, float x, float y);
+    bool issueHolocronOrderForTesting(
+        uint32_t carrierId,
+        uint32_t targetId);
+    uint32_t carriedHolocronForTesting(
+        uint32_t carrierId) const;
+    int holocronHolderForTesting(
+        uint32_t holocronId) const;
+    int storedHolocronCountForTesting(
+        int player) const;
+    int holocronCountForTesting() const;
+    int playerScoreForTesting(int player) const;
 
     static constexpr int kTileHalfW = 48;
     static constexpr int kTileHalfH = 24;
@@ -1151,6 +1198,7 @@ private:
         Build,
         Gather,
         Repair,
+        Convert,
     };
     enum class CursorMode : uint8_t {
         Normal,
@@ -1161,6 +1209,7 @@ private:
         Guard,
         Follow,
         AttackGround,
+        Convert,
         Placement,
         GatherPoint,
     };
@@ -1186,6 +1235,7 @@ private:
         Guard,
         Follow,
         AttackGround,
+        Convert,
     };
 
     struct ProductionItem {
@@ -1250,6 +1300,12 @@ private:
         float patrolEndY = 0;
         uint32_t guardTargetId = 0;
         uint32_t followTargetId = 0;
+        uint32_t conversionTargetId = 0;
+        float conversionProgress = 0;
+        float conversionRecharge = 0;
+        uint32_t holocronTargetId = 0;
+        uint32_t carriedHolocronId = 0;
+        uint32_t carriedById = 0;
         bool moveGoalActive = false;
         bool wander = false;
         bool drawShadows = true;
@@ -1467,6 +1523,7 @@ private:
         int player, float baseX, float baseY,
         float inlandDirection);
     void spawnFishingResources();
+    void spawnHolocrons();
     void buildTileElevation();
     void resetVisibility();
     void updateVisibility();
@@ -1479,6 +1536,12 @@ private:
     bool objectCurrentlyVisibleToPlayer(
         const Object &object, int player) const;
     bool objectVisibleToPlayer(
+        const Object &object, int player) const;
+    bool isStealthed(
+        const Object &object) const;
+    bool isDetector(
+        const Object &object) const;
+    bool detectedByPlayer(
         const Object &object, int player) const;
     void spawnBase(int player, int civ, char civLetter, float cx, float cy);
     const dat::Unit *findUnit(int civ, const std::string &name) const;
@@ -1562,6 +1625,27 @@ private:
         const Object &source, const Object &target) const;
     bool canAttackGround(
         const Object &source) const;
+    const dat::Task *conversionTask(
+        const Object &converter) const;
+    bool canConvert(
+        const Object &converter,
+        const Object &target) const;
+    bool issueConversion(
+        Object &converter, Object &target);
+    void updateConversion(float dt);
+    bool isHolocron(
+        const Object &object) const;
+    bool isTemple(
+        const Object &object) const;
+    bool canCarryHolocron(
+        const Object &object) const;
+    bool issueHolocronOrder(
+        Object &carrier, Object &target);
+    void updateHolocrons(float dt);
+    void dropHolocron(Object &carrier);
+    void releaseHolocronsForRemoval(
+        Object &object);
+    int storedHolocronCount(int player) const;
     bool selectedCanAttackGround() const;
     bool issueAttackGround(
         Object &source, float x, float y);
@@ -1811,6 +1895,9 @@ private:
     void updateRemains(float dt);
     void damageObject(Object &object, int damage, uint32_t attackerId);
     void killObject(Object &object, bool countKill = true);
+    bool transferOwnership(
+        Object &object, int player,
+        bool clearOrders = true);
     void objectScreenPosition(const Object &object, int screenW, int screenH,
                               float &screenX, float &screenY) const;
     void screenToWorld(float screenX, float screenY, int screenW, int screenH,
@@ -1905,6 +1992,10 @@ private:
                         uint8_t customKind = 0);
     void defeatCheatPlayer(int player);
     void updateConquest(float dt);
+    void updateVictoryConditions(float dt);
+    int playerScore(int player) const;
+    bool playersShareVictory(
+        int first, int second) const;
     void eliminatePlayer(
         int player, bool surrendered);
     void setMatchOutcome(int outcome);
@@ -1979,10 +2070,20 @@ private:
     uint32_t nextMoveGroupId_ = 1;
     int difficulty_ = 2;
     SkirmishVictory victoryCondition_ =
-        SkirmishVictory::Conquest;
+        SkirmishVictory::Standard;
     int victoryState_ = -1;
     bool conquestEnabled_ = false;
     float conquestCheckTime_ = 0.0f;
+    float standardVictoryCountdown_ = 600.0f;
+    float timeLimitSeconds_ = 3600.0f;
+    int scoreLimit_ = 4000;
+    int victoryCountdownPlayer_ = -1;
+    int victoryCountdownKind_ = 0;
+    float victoryCountdownRemaining_ = 0.0f;
+    std::array<float, 17>
+        monumentVictoryCountdowns_{};
+    std::array<float, 17>
+        holocronVictoryCountdowns_{};
     std::set<int> warnedEffects_;
     std::set<int> warnedConditions_;
     int localPlayer_ = 0;

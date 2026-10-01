@@ -18,7 +18,10 @@ enum class AiPersonality : uint8_t {
 };
 
 enum class SkirmishVictory : uint8_t {
+    Standard,
     Conquest,
+    TimeLimit,
+    Score,
     CommandCenter,
 };
 
@@ -33,7 +36,7 @@ struct SkirmishSettings {
     SkirmishMapStyle mapStyle = SkirmishMapStyle::Grasslands;
     int startingResources = 500;
     int populationCap = 200;
-    SkirmishVictory victory = SkirmishVictory::Conquest;
+    SkirmishVictory victory = SkirmishVictory::Standard;
 };
 
 const char *civilizationName(int civilization);

@@ -261,10 +261,10 @@ void Frontend::adjustLobbyValue(int direction) {
         break;
     case 9:
         settings_.victory =
-            settings_.victory ==
-                    SkirmishVictory::Conquest
-                ? SkirmishVictory::CommandCenter
-                : SkirmishVictory::Conquest;
+            (SkirmishVictory)(
+                ((int)settings_.victory + 5 +
+                 (direction < 0 ? -1 : 1)) %
+                5);
         break;
     case 10:
         settings_.seed +=

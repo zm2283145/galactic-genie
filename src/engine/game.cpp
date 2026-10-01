@@ -56,6 +56,10 @@ constexpr int kInterfaceAttackWarningSound = 50315; // atakwarn.wav
 constexpr int kInterfaceTechLevelSound = 50325; // archupg.wav
 constexpr int kInterfaceNeedHousingSound = 50354; // needhous.wav
 constexpr int kInterfaceCaptureAnimalSound = 50355; // capsheep.wav
+constexpr int kInterfaceHolocronPickupSound = 50365; // puprelic.wav
+constexpr int kHolocronUnitId = 285;
+constexpr int kTempleUnitId = 104;
+constexpr int kMonumentUnitId = 276;
 constexpr float kGarrisonCriticalHealth = 0.2f;
 constexpr float kAiTownDefenseRadius = 14.0f;
 // Stance buttons (exe 0x503800): Aggressive, Defensive, Stand Ground, No
@@ -397,6 +401,13 @@ void Game::resetMatchState() {
     victoryState_ = -1;
     conquestEnabled_ = false;
     conquestCheckTime_ = 0.0f;
+    victoryCountdownPlayer_ = -1;
+    victoryCountdownKind_ = 0;
+    victoryCountdownRemaining_ = 0.0f;
+    monumentVictoryCountdowns_.fill(
+        0.0f);
+    holocronVictoryCountdowns_.fill(
+        0.0f);
     warnedEffects_.clear();
     warnedConditions_.clear();
     actionMenuOpen_ = false;
@@ -658,6 +669,7 @@ bool Game::initGenerated(
                     SkirmishMapStyle::Archipelago
                 ? -1.0f
                 : 1.0f);
+        spawnHolocrons();
     }
     if (objects_.empty()) {
         if (err) *err = "no units could be spawned (dat/graphics mismatch?)";
@@ -1548,6 +1560,96 @@ void Game::spawnFishingResources() {
         }
 }
 
+void Game::spawnHolocrons() {
+    const dat::Unit *holocron =
+        findUnit(0, kHolocronUnitId);
+    if (!holocron)
+        return;
+    const std::array<std::array<float, 2>, 5>
+        normalized{{
+            {0.50f, 0.50f},
+            {0.38f, 0.30f},
+            {0.62f, 0.70f},
+            {0.30f, 0.62f},
+            {0.70f, 0.38f},
+        }};
+    std::vector<std::array<float, 2>> placed;
+    for (const auto &point : normalized) {
+        const float desiredX =
+            point[0] * mapSize_;
+        const float desiredY =
+            point[1] * mapSize_;
+        bool found = false;
+        float x = desiredX;
+        float y = desiredY;
+        for (int ring = 0;
+             ring < mapSize_ / 2 && !found;
+             ++ring) {
+            const int samples =
+                ring == 0 ? 1 : ring * 8;
+            for (int sample = 0;
+                 sample < samples; ++sample) {
+                const float angle =
+                    sample *
+                    (2.0f * kPi / samples);
+                const float candidateX =
+                    std::clamp(
+                        desiredX +
+                            std::cos(angle) * ring,
+                        1.0f,
+                        (float)mapSize_ - 1.0f);
+                const float candidateY =
+                    std::clamp(
+                        desiredY +
+                            std::sin(angle) * ring,
+                        1.0f,
+                        (float)mapSize_ - 1.0f);
+                Object probe;
+                probe.unit = holocron;
+                probe.x = candidateX;
+                probe.y = candidateY;
+                if (!terrainPassable(
+                        probe, candidateX,
+                        candidateY))
+                    continue;
+                const bool separated =
+                    std::none_of(
+                        placed.begin(),
+                        placed.end(),
+                        [&](const auto &other) {
+                            const float dx =
+                                other[0] -
+                                candidateX;
+                            const float dy =
+                                other[1] -
+                                candidateY;
+                            return dx * dx +
+                                       dy * dy <
+                                   16.0f;
+                        });
+                if (!separated)
+                    continue;
+                x = candidateX;
+                y = candidateY;
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            continue;
+        Object *created =
+            addObject(
+                holocron, 0, x, y, 0.0f,
+                nextSpawnId_++);
+        if (!created)
+            continue;
+        created->wander = false;
+        created->resourceType = -1;
+        created->resourceAmount = 0.0f;
+        placed.push_back({x, y});
+    }
+}
+
 uint64_t Game::mapHashForTesting() const {
     uint64_t hash = 1469598103934665603ull;
     auto add = [&](uint8_t value) {
@@ -1746,8 +1848,9 @@ void Game::updateVisibility() {
     for (Object &object : objects_) {
         if (!object.active || object.hidden ||
             !object.unit ||
-            object.unit->type !=
-                dat::UT_Building)
+            (object.unit->type !=
+                 dat::UT_Building &&
+             !isHolocron(object)))
             continue;
         for (int player = 1; player < 17;
              player++)
@@ -1799,6 +1902,9 @@ bool Game::objectCurrentlyVisibleToPlayer(
     if (object.player == player ||
         isFriendlyPlayer(player, object.player))
         return true;
+    if (isStealthed(object) &&
+        !detectedByPlayer(object, player))
+        return false;
     const float halfX =
         object.unit
             ? std::max(
@@ -1833,6 +1939,10 @@ bool Game::objectVisibleToPlayer(
     if (objectCurrentlyVisibleToPlayer(
             object, player))
         return true;
+    if (isHolocron(object))
+        return player > 0 && player < 17 &&
+               (object.discoveredByPlayers &
+                (1u << player));
     if (!isGatherable(object) ||
         isLiveAnimal(object))
         return object.unit &&
@@ -1846,6 +1956,71 @@ bool Game::objectVisibleToPlayer(
     const int x = (int)std::floor(object.x);
     const int y = (int)std::floor(object.y);
     return tileExplored(player, x, y);
+}
+
+bool Game::isStealthed(
+    const Object &object) const {
+    if (!object.active || object.hidden ||
+        !object.unit ||
+        object.player <= 0 ||
+        object.state == State::Attack ||
+        object.state == State::Convert ||
+        object.conversionTargetId != 0)
+        return false;
+    if (playerAttribute(
+            object.player, 56) <= 0.0f)
+        return false;
+    const dat::Task *task =
+        conversionTask(object);
+    const bool master =
+        task && task->targetDiplomacy == 2;
+    return master || object.unit->cls == 64;
+}
+
+bool Game::isDetector(
+    const Object &object) const {
+    if (!object.active || object.hidden ||
+        object.garrisonedInId >= 0 ||
+        !object.unit ||
+        object.underConstruction ||
+        object.player <= 0)
+        return false;
+    if ((object.unit->trait & 8u) != 0)
+        return true;
+    const dat::Task *task =
+        conversionTask(object);
+    return task &&
+           task->targetDiplomacy == 2 &&
+           playerAttribute(
+               object.player, 58) > 0.0f;
+}
+
+bool Game::detectedByPlayer(
+    const Object &object, int player) const {
+    if (!isStealthed(object))
+        return true;
+    if (player == localPlayer_ &&
+        forceSightCheat_)
+        return true;
+    for (const Object &detector : objects_) {
+        if (!isDetector(detector) ||
+            !isFriendlyPlayer(
+                player, detector.player))
+            continue;
+        const float radius =
+            std::max(
+                0.0f,
+                detector.unit->lineOfSight) +
+            collisionRadius(object);
+        const float dx =
+            detector.x - object.x;
+        const float dy =
+            detector.y - object.y;
+        if (dx * dx + dy * dy <=
+            radius * radius)
+            return true;
+    }
+    return false;
 }
 
 float Game::elevationAt(float x, float y) const {
@@ -2934,6 +3109,224 @@ void Game::setResourceForTesting(
         std::max(0.0f, amount);
 }
 
+void Game::setVictoryConditionForTesting(
+    SkirmishVictory condition) {
+    victoryCondition_ = condition;
+    victoryState_ = -1;
+    victoryCountdownPlayer_ = -1;
+    victoryCountdownKind_ = 0;
+    victoryCountdownRemaining_ = 0.0f;
+    monumentVictoryCountdowns_.fill(
+        0.0f);
+    holocronVictoryCountdowns_.fill(
+        0.0f);
+}
+
+int Game::playerScoreForTesting(
+    int player) const {
+    return playerScore(player);
+}
+
+uint32_t Game::spawnConverterForTesting(
+    int player, float x, float y) {
+    const int civilization =
+        civilizationForPlayer(player);
+    const int preferred[] = {115, 180};
+    for (int unitId : preferred)
+        if (findUnit(civilization, unitId)) {
+            researchedTechs_[(size_t)player]
+                .insert(156);
+            return spawnObjectForTesting(
+                civilization, unitId,
+                player, x, y);
+        }
+    if (civilization < 0 ||
+        (size_t)civilization >=
+            assets_.dat().civs.size())
+        return 0;
+    for (const dat::Unit &unit :
+         assets_.dat()
+             .civs[(size_t)civilization]
+             .units)
+        if (unit.id >= 0) {
+            const dat::Unit *candidate =
+                findUnit(
+                    civilization, unit.id);
+            if (!candidate)
+                continue;
+            Object probe{};
+            probe.unit = candidate;
+            if (!conversionTask(probe))
+                continue;
+            researchedTechs_[(size_t)player]
+                .insert(156);
+            return spawnObjectForTesting(
+                civilization, unit.id,
+                player, x, y);
+        }
+    return 0;
+}
+
+bool Game::issueConversionForTesting(
+    uint32_t converterId,
+    uint32_t targetId) {
+    Object *converter =
+        findObject(converterId);
+    Object *target = findObject(targetId);
+    return converter && target &&
+           issueConversion(
+               *converter, *target);
+}
+
+float Game::conversionProgressForTesting(
+    uint32_t converterId) const {
+    const Object *converter =
+        findObject(converterId);
+    return converter
+               ? converter->conversionProgress
+               : 0.0f;
+}
+
+float Game::conversionChargeForTesting(
+    uint32_t converterId) const {
+    const Object *converter =
+        findObject(converterId);
+    return converter
+               ? converter->conversionRecharge
+               : 0.0f;
+}
+
+uint32_t Game::spawnHolocronForTesting(
+    float x, float y) {
+    const dat::Unit *unit =
+        findUnit(0, kHolocronUnitId);
+    if (!unit)
+        unit = findUnit(
+            civilizationForPlayer(1),
+            kHolocronUnitId);
+    if (!unit)
+        return 0;
+    const uint32_t spawnId =
+        nextSpawnId_++;
+    Object *holocron = addObject(
+        unit, 0, x, y, 0, spawnId);
+    if (!holocron)
+        return 0;
+    holocron->wander = false;
+    updateVisibility();
+    return spawnId;
+}
+
+uint32_t Game::spawnTempleForTesting(
+    int player, float x, float y) {
+    return spawnObjectForTesting(
+        civilizationForPlayer(player),
+        kTempleUnitId,
+        player, x, y);
+}
+
+bool Game::issueHolocronOrderForTesting(
+    uint32_t carrierId,
+    uint32_t targetId) {
+    Object *carrier =
+        findObject(carrierId);
+    Object *target = findObject(targetId);
+    return carrier && target &&
+           issueHolocronOrder(
+               *carrier, *target);
+}
+
+uint32_t Game::carriedHolocronForTesting(
+    uint32_t carrierId) const {
+    const Object *carrier =
+        findObject(carrierId);
+    return carrier
+               ? carrier->carriedHolocronId
+               : 0;
+}
+
+int Game::holocronHolderForTesting(
+    uint32_t holocronId) const {
+    const Object *holocron =
+        findObject(holocronId);
+    if (!holocron)
+        return -1;
+    if (holocron->carriedById)
+        return (int)holocron->carriedById;
+    return holocron->garrisonedInId;
+}
+
+int Game::storedHolocronCountForTesting(
+    int player) const {
+    return storedHolocronCount(player);
+}
+
+int Game::holocronCountForTesting() const {
+    return (int)std::count_if(
+        objects_.begin(), objects_.end(),
+        [&](const Object &object) {
+            return object.active &&
+                   isHolocron(object);
+        });
+}
+
+uint32_t Game::spawnDetectorForTesting(
+    int player, float x, float y) {
+    const int civilization =
+        civilizationForPlayer(player);
+    if (civilization < 0 ||
+        (size_t)civilization >=
+            assets_.dat().civs.size())
+        return 0;
+    for (const dat::Unit &entry :
+         assets_.dat()
+             .civs[(size_t)civilization]
+             .units) {
+        const dat::Unit *unit =
+            findUnit(
+                civilization, entry.id);
+        if (unit && (unit->trait & 8))
+            return spawnObjectForTesting(
+                civilization, unit->id,
+                player, x, y);
+    }
+    researchedTechs_[(size_t)player]
+        .insert(158);
+    return spawnConverterForTesting(
+        player, x, y);
+}
+
+bool Game::setStealthedForTesting(
+    int player, bool enabled) {
+    if (player <= 0 ||
+        (size_t)player >
+            players_.size())
+        return false;
+    if (enabled)
+        researchedTechs_[(size_t)player]
+            .insert(159);
+    else
+        researchedTechs_[(size_t)player]
+            .erase(159);
+    return true;
+}
+
+bool Game::objectDetectedForTesting(
+    int viewer, uint32_t spawnId) const {
+    const Object *object =
+        findObject(spawnId);
+    return object &&
+           objectCurrentlyVisibleToPlayer(
+               *object, viewer);
+}
+
+bool Game::objectStealthedForTesting(
+    uint32_t spawnId) const {
+    const Object *object =
+        findObject(spawnId);
+    return object && isStealthed(*object);
+}
+
 void Game::setDiplomacyForTesting(
     int sourcePlayer, int targetPlayer,
     uint32_t stance) {
@@ -3191,6 +3584,584 @@ bool Game::canAttackTarget(
     default:
         return !aircraft;
     }
+}
+
+const dat::Task *Game::conversionTask(
+    const Object &converter) const {
+    if (!converter.unit ||
+        converter.unit->id < 0 ||
+        (size_t)converter.unit->id >=
+            assets_.dat().unitHeaders.size())
+        return nullptr;
+    for (const dat::Task &task :
+         assets_.dat()
+             .unitHeaders[
+                 (size_t)converter.unit->id]
+             .tasks)
+        if (task.actionType == 104)
+            return &task;
+    return nullptr;
+}
+
+bool Game::canConvert(
+    const Object &converter,
+    const Object &target) const {
+    const dat::Task *task =
+        conversionTask(converter);
+    if (!task || !converter.active ||
+        converter.hidden ||
+        converter.garrisonedInId >= 0 ||
+        converter.underConstruction ||
+        converter.player <= 0 ||
+        converter.conversionRecharge > 0.0f ||
+        !target.active || target.hidden ||
+        target.garrisonedInId >= 0 ||
+        target.underConstruction ||
+        target.player <= 0 ||
+        !target.unit ||
+        target.unit->type <
+            dat::UT_Combatant ||
+        target.unit->heroMode != 0 ||
+        !isEnemy(converter, target) ||
+        !objectCurrentlyVisibleToPlayer(
+            target, converter.player) ||
+        isTemple(target) ||
+        isHolocron(target))
+        return false;
+
+    const bool targetForceUser =
+        conversionTask(target) != nullptr ||
+        target.unit->cls == 50 ||
+        target.unit->cls == 51;
+    if (targetForceUser &&
+        playerAttribute(
+            converter.player, 27) <= 0.0f)
+        return false;
+
+    const int cls = target.unit->cls;
+    const bool heavy =
+        target.unit->type ==
+            dat::UT_Building ||
+        (cls >= 11 && cls <= 17) ||
+        cls == 43 || cls == 48 ||
+        cls == 53 || cls == 59 ||
+        cls == 62 || cls == 63 ||
+        cls == 64;
+    return !heavy ||
+           playerAttribute(
+               converter.player, 87) > 0.0f;
+}
+
+bool Game::issueConversion(
+    Object &converter, Object &target) {
+    const dat::Task *task =
+        conversionTask(converter);
+    if (!task ||
+        !canConvert(converter, target))
+        return false;
+    stopUnit(converter);
+    converter.conversionTargetId =
+        target.spawnId;
+    converter.conversionProgress = 0.0f;
+    converter.homeX = converter.x;
+    converter.homeY = converter.y;
+    converter.facing =
+        std::atan2(
+            target.y - converter.y,
+            target.x - converter.x);
+    const float range =
+        std::max(0.5f, task->workRange);
+    const float dx = target.x - converter.x;
+    const float dy = target.y - converter.y;
+    if (dx * dx + dy * dy >
+        range * range)
+        issueMove(
+            converter, target.x, target.y,
+            &target, range);
+    return true;
+}
+
+void Game::updateConversion(float dt) {
+    for (Object &converter : objects_) {
+        const dat::Task *task =
+            conversionTask(converter);
+        if (task &&
+            converter.conversionRecharge >
+                0.0f) {
+            const float rechargeMultiplier =
+                1.0f +
+                std::max(
+                    0.0f,
+                    playerAttribute(
+                        converter.player,
+                        35)) /
+                    6.0f;
+            converter.conversionRecharge =
+                std::max(
+                    0.0f,
+                    converter
+                            .conversionRecharge -
+                        dt *
+                            rechargeMultiplier);
+        }
+        if (!converter.active ||
+            !converter.conversionTargetId)
+            continue;
+        Object *target =
+            findObject(
+                converter.conversionTargetId);
+        if (!target ||
+            !canConvert(converter, *target)) {
+            converter.conversionTargetId = 0;
+            converter.conversionProgress = 0.0f;
+            if (converter.state ==
+                State::Convert)
+                converter.state =
+                    State::Idle;
+            continue;
+        }
+        const float range =
+            std::max(0.5f, task->workRange);
+        const float dx =
+            target->x - converter.x;
+        const float dy =
+            target->y - converter.y;
+        if (dx * dx + dy * dy >
+            range * range) {
+            if (converter.state !=
+                    State::Walk ||
+                converter.pathGoalId !=
+                    target->spawnId)
+                issueMove(
+                    converter,
+                    target->x, target->y,
+                    target, range);
+            continue;
+        }
+        converter.path.clear();
+        converter.pathIndex = 0;
+        converter.moveGoalActive = false;
+        converter.state = State::Convert;
+        converter.facing =
+            std::atan2(
+                target->y - converter.y,
+                target->x - converter.x);
+        converter.animTime += dt;
+        const bool resistant =
+            playerAttribute(
+                target->player, 77) > 0.0f ||
+            playerAttribute(
+                target->player, 178) > 0.0f ||
+            playerAttribute(
+                target->player, 179) > 0.0f;
+        converter.conversionProgress +=
+            dt / (resistant ? 1.5f : 1.0f);
+        const float workTime =
+            std::max(
+                0.1f, task->workValue1);
+        if (converter.conversionProgress +
+                0.0001f <
+            workTime)
+            continue;
+
+        const uint32_t convertedId =
+            target->spawnId;
+        const int newPlayer =
+            converter.player;
+        if (!transferOwnership(
+                *target, newPlayer))
+            continue;
+        converter.conversionTargetId = 0;
+        converter.conversionProgress = 0.0f;
+        converter.conversionRecharge =
+            std::max(
+                0.1f, task->workValue2);
+        converter.state = State::Idle;
+        for (Object &other : objects_)
+            if (other.conversionTargetId ==
+                convertedId) {
+                other.conversionTargetId = 0;
+                other.conversionProgress =
+                    0.0f;
+                if (other.state ==
+                    State::Convert)
+                    other.state =
+                        State::Idle;
+            }
+        if (task->resourceDepositSound >= 0)
+            playWorldUnitSound(
+                converter,
+                task->resourceDepositSound);
+        if (newPlayer == localPlayer_) {
+            statusMessage_ =
+                unitDisplayName(
+                    *target->unit) +
+                " CONVERTED";
+            statusTime_ = 3.0f;
+        }
+    }
+}
+
+bool Game::isHolocron(
+    const Object &object) const {
+    return object.unit &&
+           object.unit->id ==
+               kHolocronUnitId;
+}
+
+bool Game::isTemple(
+    const Object &object) const {
+    return object.unit &&
+           object.unit->id ==
+               kTempleUnitId;
+}
+
+bool Game::canCarryHolocron(
+    const Object &object) const {
+    if (!object.active || object.hidden ||
+        object.garrisonedInId >= 0 ||
+        !object.unit ||
+        object.unit->id < 0 ||
+        (size_t)object.unit->id >=
+            assets_.dat().unitHeaders.size())
+        return false;
+    for (const dat::Task &task :
+         assets_.dat()
+             .unitHeaders[
+                 (size_t)object.unit->id]
+             .tasks)
+        if (task.actionType == 132 &&
+            (task.unitId < 0 ||
+             task.unitId ==
+                 kHolocronUnitId))
+            return true;
+    return false;
+}
+
+bool Game::issueHolocronOrder(
+    Object &carrier, Object &target) {
+    if (!canCarryHolocron(carrier))
+        return false;
+    if (isHolocron(target)) {
+        if (carrier.carriedHolocronId ||
+            !target.active ||
+            target.hidden ||
+            target.carriedById ||
+            target.garrisonedInId >= 0 ||
+            !objectCurrentlyVisibleToPlayer(
+                target, carrier.player))
+            return false;
+    } else if (isTemple(target)) {
+        if (!carrier.carriedHolocronId ||
+            target.player <= 0 ||
+            !isFriendlyPlayer(
+                carrier.player,
+                target.player) ||
+            target.underConstruction)
+            return false;
+    } else {
+        return false;
+    }
+    stopUnit(carrier);
+    carrier.holocronTargetId =
+        target.spawnId;
+    const float clearance =
+        isTemple(target) ? 0.5f : 0.2f;
+    issueMove(
+        carrier, target.x, target.y,
+        &target, clearance);
+    return true;
+}
+
+void Game::dropHolocron(Object &carrier) {
+    if (!carrier.carriedHolocronId)
+        return;
+    Object *holocron =
+        findObject(
+            carrier.carriedHolocronId);
+    carrier.carriedHolocronId = 0;
+    carrier.holocronTargetId = 0;
+    if (!holocron || !holocron->active)
+        return;
+    holocron->carriedById = 0;
+    holocron->garrisonedInId = -1;
+    holocron->player = 0;
+    holocron->x =
+        std::clamp(
+            carrier.x, 0.0f,
+            (float)mapSize_ - 0.001f);
+    holocron->y =
+        std::clamp(
+            carrier.y, 0.0f,
+            (float)mapSize_ - 0.001f);
+    holocron->hidden = false;
+    holocron->draw = true;
+    holocron->discoveredByPlayers |=
+        carrier.player > 0 &&
+                carrier.player < 17
+            ? 1u << carrier.player
+            : 0u;
+}
+
+void Game::releaseHolocronsForRemoval(
+    Object &object) {
+    dropHolocron(object);
+    if (!isTemple(object))
+        return;
+    size_t offset = 0;
+    for (Object &holocron : objects_) {
+        if (!holocron.active ||
+            !isHolocron(holocron) ||
+            holocron.garrisonedInId !=
+                (int32_t)object.spawnId)
+            continue;
+        const float angle =
+            offset++ * 2.39996323f;
+        holocron.garrisonedInId = -1;
+        holocron.carriedById = 0;
+        holocron.player = 0;
+        holocron.x = std::clamp(
+            object.x +
+                std::cos(angle) * 1.2f,
+            0.0f,
+            (float)mapSize_ - 0.001f);
+        holocron.y = std::clamp(
+            object.y +
+                std::sin(angle) * 1.2f,
+            0.0f,
+            (float)mapSize_ - 0.001f);
+        holocron.hidden = false;
+        holocron.draw = true;
+    }
+}
+
+void Game::updateHolocrons(float dt) {
+    for (Object &carrier : objects_)
+        if (carrier.active &&
+            carrier.carriedHolocronId &&
+            (!canCarryHolocron(carrier) ||
+             carrier.garrisonedInId >= 0 ||
+             carrier.underConstruction))
+            dropHolocron(carrier);
+
+    for (Object &carrier : objects_) {
+        if (!carrier.active ||
+            !carrier.holocronTargetId)
+            continue;
+        Object *target =
+            findObject(
+                carrier.holocronTargetId);
+        if (!target ||
+            !target->active ||
+            !canCarryHolocron(carrier)) {
+            carrier.holocronTargetId = 0;
+            continue;
+        }
+        const bool pickup =
+            isHolocron(*target);
+        if (pickup &&
+            (target->hidden ||
+             target->carriedById ||
+             target->garrisonedInId >= 0 ||
+             !objectCurrentlyVisibleToPlayer(
+                 *target,
+                 carrier.player))) {
+            carrier.holocronTargetId = 0;
+            continue;
+        }
+        if (!pickup &&
+            (!isTemple(*target) ||
+             target->underConstruction ||
+             !isFriendlyPlayer(
+                 carrier.player,
+                 target->player))) {
+            carrier.holocronTargetId = 0;
+            continue;
+        }
+        const float dx =
+            target->x - carrier.x;
+        const float dy =
+            target->y - carrier.y;
+        const float reach =
+            collisionRadius(carrier) +
+            collisionRadius(*target) +
+            0.35f;
+        if (dx * dx + dy * dy >
+            reach * reach) {
+            if (carrier.state !=
+                    State::Walk ||
+                carrier.pathGoalId !=
+                    target->spawnId)
+                issueMove(
+                    carrier,
+                    target->x, target->y,
+                    target,
+                    pickup ? 0.2f : 0.5f);
+            continue;
+        }
+        carrier.path.clear();
+        carrier.pathIndex = 0;
+        carrier.moveGoalActive = false;
+        carrier.state = State::Idle;
+        carrier.holocronTargetId = 0;
+        if (pickup) {
+            carrier.carriedHolocronId =
+                target->spawnId;
+            target->carriedById =
+                carrier.spawnId;
+            target->garrisonedInId = -1;
+            target->player =
+                carrier.player;
+            target->hidden = true;
+            target->draw = false;
+            for (AiPlayerState &state :
+                 aiPlayers_)
+                for (AiMilitaryGroup &group :
+                     state.militaryGroups) {
+                    group.members.erase(
+                        std::remove(
+                            group.members.begin(),
+                            group.members.end(),
+                            carrier.spawnId),
+                        group.members.end());
+                    group.escorts.erase(
+                        std::remove(
+                            group.escorts.begin(),
+                            group.escorts.end(),
+                            carrier.spawnId),
+                        group.escorts.end());
+                }
+            playInterfaceFeedback(
+                kInterfaceHolocronPickupSound);
+            if (carrier.player ==
+                localPlayer_) {
+                statusMessage_ =
+                    "HOLOCRON ACQUIRED - RETURN IT TO A TEMPLE";
+                statusTime_ = 4.0f;
+            }
+        } else {
+            Object *holocron =
+                findObject(
+                    carrier
+                        .carriedHolocronId);
+            if (!holocron ||
+                !holocron->active)
+                continue;
+            carrier.carriedHolocronId = 0;
+            holocron->carriedById = 0;
+            holocron->garrisonedInId =
+                (int32_t)target->spawnId;
+            holocron->player =
+                target->player;
+            holocron->x = target->x;
+            holocron->y = target->y;
+            holocron->hidden = true;
+            holocron->draw = false;
+            if (target->player ==
+                localPlayer_) {
+                statusMessage_ =
+                    "HOLOCRON SECURED - NOVA INCOME INCREASED";
+                statusTime_ = 4.0f;
+            }
+        }
+    }
+
+    for (const Object &holocron : objects_) {
+        if (!holocron.active ||
+            !isHolocron(holocron) ||
+            holocron.garrisonedInId < 0 ||
+            holocron.player <= 0)
+            continue;
+        const Object *temple =
+            findObject(
+                (uint32_t)
+                    holocron.garrisonedInId);
+        if (!temple || !temple->active ||
+            !isTemple(*temple) ||
+            temple->player !=
+                holocron.player)
+            continue;
+        resources_[
+            (size_t)holocron.player][3] +=
+            std::max(
+                0.0f,
+                playerAttribute(
+                    holocron.player,
+                    191)) *
+            dt / 60.0f;
+    }
+
+    for (size_t player = 1;
+         player < aiPlayers_.size();
+         ++player) {
+        if (!players_[player - 1].active ||
+            players_[player - 1].human)
+            continue;
+        for (Object &carrier : objects_) {
+            if (!carrier.active ||
+                carrier.player !=
+                    (int)player ||
+                !canCarryHolocron(carrier) ||
+                carrier.holocronTargetId ||
+                carrier.attackTargetId ||
+                carrier.state != State::Idle)
+                continue;
+            Object *best = nullptr;
+            float bestDistance =
+                std::numeric_limits<float>::max();
+            for (Object &candidate :
+                 objects_) {
+                const bool eligible =
+                    carrier.carriedHolocronId
+                        ? isTemple(candidate) &&
+                              isFriendlyPlayer(
+                                  carrier.player,
+                                  candidate.player) &&
+                              !candidate
+                                   .underConstruction
+                        : isHolocron(candidate) &&
+                              !candidate.hidden &&
+                              !candidate
+                                   .carriedById &&
+                              candidate
+                                      .garrisonedInId <
+                                  0 &&
+                              objectCurrentlyVisibleToPlayer(
+                                  candidate,
+                                  carrier.player);
+                if (!eligible)
+                    continue;
+                const float dx =
+                    candidate.x -
+                    carrier.x;
+                const float dy =
+                    candidate.y -
+                    carrier.y;
+                const float distance =
+                    dx * dx + dy * dy;
+                if (distance <
+                    bestDistance) {
+                    bestDistance = distance;
+                    best = &candidate;
+                }
+            }
+            if (best)
+                issueHolocronOrder(
+                    carrier, *best);
+        }
+    }
+}
+
+int Game::storedHolocronCount(
+    int player) const {
+    return (int)std::count_if(
+        objects_.begin(), objects_.end(),
+        [&](const Object &object) {
+            return object.active &&
+                   isHolocron(object) &&
+                   object.player == player &&
+                   object.garrisonedInId >= 0;
+        });
 }
 
 // The command-panel test reached through the selected object's virtual method
@@ -3608,6 +4579,8 @@ bool Game::canReachObject(
 
 bool Game::isInspectable(const Object &object) const {
     if (!object.active || object.hidden || !object.draw || !object.spawnId) return false;
+    if (isHolocron(object))
+        return true;
     // Annex parts are selected through their building.
     if (object.annexParentId)
         if (const Object *parent = findObject(object.annexParentId); parent && parent->active)
@@ -4732,6 +5705,9 @@ std::vector<Game::UnitCommand> Game::unitCommands(
     if (selectedCanAttackGround())
         commands.push_back(
             UnitCommand::AttackGround);
+    if (conversionTask(unit))
+        commands.push_back(
+            UnitCommand::Convert);
     return commands;
 }
 
@@ -4744,6 +5720,8 @@ int Game::unitCommandIcon(
     case UnitCommand::Follow: return 8;
     case UnitCommand::AttackGround:
         return (int)kCommandAttackGroundIcon;
+    case UnitCommand::Convert:
+        return 5;
     }
     return 3;
 }
@@ -4769,6 +5747,10 @@ std::string Game::unitCommandTitle(
     case UnitCommand::AttackGround:
         languageId = 4123;
         fallback = "Attack Ground";
+        break;
+    case UnitCommand::Convert:
+        languageId = 4125;
+        fallback = "Convert";
         break;
     }
     const std::string &localized =
@@ -4805,6 +5787,11 @@ std::string Game::unitCommandHelp(
         fallback =
             "Attack a selected ground location.";
         break;
+    case UnitCommand::Convert:
+        languageId = 4925;
+        fallback =
+            "Convert an eligible enemy unit or building.";
+        break;
     }
     std::string help =
         assets_.localizedString(languageId);
@@ -4820,6 +5807,9 @@ void Game::clearUnitCommandOrder(
     unit.patrolActive = false;
     unit.guardTargetId = 0;
     unit.followTargetId = 0;
+    unit.conversionTargetId = 0;
+    unit.conversionProgress = 0.0f;
+    unit.holocronTargetId = 0;
 }
 
 void Game::stopUnit(Object &unit) {
@@ -4883,7 +5873,10 @@ void Game::executeUnitCommand(
                 : command ==
                           UnitCommand::Guard
                       ? "SELECT A UNIT OR BUILDING TO GUARD"
-                      : "SELECT A UNIT TO FOLLOW";
+                      : command ==
+                                UnitCommand::Follow
+                            ? "SELECT A UNIT TO FOLLOW"
+                            : "SELECT AN ENEMY TO CONVERT";
     }
     garrisonCursorActive_ = false;
     repairCursorActive_ = false;
@@ -8636,6 +9629,29 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
         return;
     }
 
+    Object *specialTarget =
+        objectAtScreen(
+            screenX, screenY,
+            screenW, screenH, true);
+    if (specialTarget &&
+        (isHolocron(*specialTarget) ||
+         isTemple(*specialTarget))) {
+        Object *acknowledgement = nullptr;
+        for (Object *object : selected)
+            if (issueHolocronOrder(
+                    *object,
+                    *specialTarget) &&
+                !acknowledgement)
+                acknowledgement = object;
+        if (acknowledgement) {
+            playUnitAcknowledgement(
+                *acknowledgement, false);
+            flashCommandTarget(
+                *specialTarget);
+            return;
+        }
+    }
+
     Object *resource =
         gatherableAtScreen(
             screenX, screenY, screenW, screenH);
@@ -9062,9 +10078,25 @@ void Game::eliminatePlayer(
         !players_[(size_t)player - 1]
              .active)
         return;
+    for (Object &object : objects_)
+        if (object.active &&
+            object.player == player &&
+            !isHolocron(object))
+            releaseHolocronsForRemoval(
+                object);
     for (Object &object : objects_) {
-        if (object.active && object.player == player)
+        if (!object.active ||
+            object.player != player)
+            continue;
+        if (isHolocron(object)) {
+            object.player = 0;
+            object.carriedById = 0;
+            object.garrisonedInId = -1;
+            object.hidden = false;
+            object.draw = true;
+        } else {
             object.active = false;
+        }
     }
     players_[(size_t)player - 1].active =
         false;
@@ -9097,7 +10129,9 @@ void Game::eliminatePlayer(
 void Game::updateConquest(float dt) {
     if (!conquestEnabled_ ||
         localPlayer_ <= 0 ||
-        victoryState_ >= 0)
+        victoryState_ >= 0 ||
+        victoryCondition_ ==
+            SkirmishVictory::TimeLimit)
         return;
     conquestCheckTime_ -= dt;
     if (conquestCheckTime_ > 0.0f)
@@ -9253,6 +10287,281 @@ void Game::updateConquest(float dt) {
         }
     if (!activeEnemy)
         setMatchOutcome(1);
+}
+
+bool Game::playersShareVictory(
+    int first, int second) const {
+    if (first <= 0 || second <= 0)
+        return false;
+    if (first == second)
+        return true;
+    return isFriendlyPlayer(first, second) &&
+           isFriendlyPlayer(second, first) &&
+           players_[(size_t)first - 1]
+               .alliedVictory &&
+           players_[(size_t)second - 1]
+               .alliedVictory;
+}
+
+int Game::playerScore(int player) const {
+    if (player <= 0 ||
+        (size_t)player > players_.size())
+        return 0;
+    float score = 0.0f;
+    for (const auto &resource :
+         resources_[(size_t)player])
+        if (resource.first >= 0 &&
+            resource.first <= 3)
+            score +=
+                std::max(0.0f, resource.second);
+    score +=
+        researchedTechs_[(size_t)player]
+            .size() *
+        25.0f;
+    for (const Object &object : objects_) {
+        if (!object.active ||
+            object.player != player ||
+            !object.unit ||
+            object.annexParentId ||
+            isHolocron(object))
+            continue;
+        float value = 0.0f;
+        for (const dat::ResourceCost &cost :
+             object.unit->costs)
+            if (cost.flag && cost.type >= 0 &&
+                cost.type <= 3)
+                value +=
+                    std::max(
+                        0, (int)cost.amount);
+        const float health =
+            object.maxHitPoints > 0.0f
+                ? std::clamp(
+                      object.hitPoints /
+                          object.maxHitPoints,
+                      0.0f, 1.0f)
+                : 0.0f;
+        score += value * health;
+    }
+    return (int)std::lround(score);
+}
+
+void Game::updateVictoryConditions(float dt) {
+    if (!conquestEnabled_ ||
+        localPlayer_ <= 0 ||
+        victoryState_ >= 0)
+        return;
+
+    if (victoryCondition_ ==
+        SkirmishVictory::TimeLimit) {
+        if (simulationTime_ <
+            timeLimitSeconds_)
+            return;
+        int winner = -1;
+        int winnerScore = -1;
+        for (int player = 1;
+             player <=
+                 (int)players_.size();
+             ++player) {
+            if (!players_[
+                     (size_t)player - 1]
+                     .active)
+                continue;
+            int teamScore = 0;
+            for (int member = 1;
+                 member <=
+                     (int)players_.size();
+                 ++member)
+                if (playersShareVictory(
+                        player, member))
+                    teamScore +=
+                        playerScore(member);
+            if (teamScore > winnerScore ||
+                (teamScore == winnerScore &&
+                 (winner < 0 ||
+                  player < winner))) {
+                winner = player;
+                winnerScore = teamScore;
+            }
+        }
+        setMatchOutcome(
+            playersShareVictory(
+                localPlayer_, winner));
+        return;
+    }
+
+    if (victoryCondition_ ==
+        SkirmishVictory::Score) {
+        int winner = -1;
+        int winnerScore = -1;
+        for (int player = 1;
+             player <=
+                 (int)players_.size();
+             ++player) {
+            if (!players_[
+                     (size_t)player - 1]
+                     .active)
+                continue;
+            int teamScore = 0;
+            for (int member = 1;
+                 member <=
+                     (int)players_.size();
+                 ++member)
+                if (playersShareVictory(
+                        player, member))
+                    teamScore +=
+                        playerScore(member);
+            if (teamScore >= scoreLimit_ &&
+                (teamScore > winnerScore ||
+                 (teamScore ==
+                      winnerScore &&
+                  (winner < 0 ||
+                   player < winner)))) {
+                winner = player;
+                winnerScore = teamScore;
+            }
+        }
+        if (winner > 0)
+            setMatchOutcome(
+                playersShareVictory(
+                    localPlayer_,
+                    winner));
+        return;
+    }
+
+    if (victoryCondition_ !=
+        SkirmishVictory::Standard) {
+        victoryCountdownPlayer_ = -1;
+        victoryCountdownKind_ = 0;
+        victoryCountdownRemaining_ =
+            0.0f;
+        return;
+    }
+
+    const int holocronTotal =
+        holocronCountForTesting();
+    int winner = -1;
+    int displayPlayer = -1;
+    int displayKind = 0;
+    float displayRemaining =
+        std::numeric_limits<float>::max();
+    for (int player = 1;
+         player <= (int)players_.size();
+         ++player) {
+        const bool active =
+            players_[(size_t)player - 1]
+                .active;
+        bool canonical = active;
+        for (int earlier = 1;
+             earlier < player &&
+             canonical;
+             ++earlier)
+            if (players_[
+                    (size_t)earlier - 1]
+                    .active &&
+                playersShareVictory(
+                    player, earlier))
+                canonical = false;
+        bool monument = false;
+        int teamHolocrons = 0;
+        if (canonical)
+            for (int member = 1;
+                 member <=
+                     (int)players_.size();
+                 ++member)
+                if (playersShareVictory(
+                        player, member)) {
+                    teamHolocrons +=
+                        storedHolocronCount(
+                            member);
+                    if (!monument)
+                        for (const Object &object :
+                             objects_)
+                            if (object.active &&
+                                object.player ==
+                                    member &&
+                                object.unit &&
+                                object.unit->id ==
+                                    kMonumentUnitId &&
+                                !object
+                                     .underConstruction) {
+                                monument = true;
+                                break;
+                            }
+                }
+        const bool holocronControl =
+            canonical &&
+            holocronTotal > 0 &&
+            teamHolocrons ==
+                holocronTotal;
+        auto updateCountdown =
+            [&](std::array<float, 17>
+                    &countdowns,
+                bool qualified,
+                int kind) {
+                float &remaining =
+                    countdowns[
+                        (size_t)player];
+                if (!qualified) {
+                    remaining = 0.0f;
+                    return;
+                }
+                if (remaining <= 0.0f) {
+                    remaining =
+                        standardVictoryCountdown_;
+                    statusMessage_ =
+                        playerDisplayName(
+                            player) +
+                        (kind == 2
+                             ? " CONTROLS ALL HOLOCRONS"
+                             : " COMPLETED A MONUMENT");
+                    statusTime_ = 5.0f;
+                }
+                remaining =
+                    std::max(
+                        0.0f,
+                        remaining - dt);
+                if (remaining <= 0.0f) {
+                    if (winner < 0 ||
+                        player < winner)
+                        winner = player;
+                    return;
+                }
+                if (remaining <
+                        displayRemaining ||
+                    (remaining ==
+                         displayRemaining &&
+                     (displayPlayer < 0 ||
+                      player <
+                          displayPlayer ||
+                      (player ==
+                           displayPlayer &&
+                       kind <
+                           displayKind)))) {
+                    displayPlayer = player;
+                    displayKind = kind;
+                    displayRemaining =
+                        remaining;
+                }
+            };
+        updateCountdown(
+            monumentVictoryCountdowns_,
+            canonical && monument, 1);
+        updateCountdown(
+            holocronVictoryCountdowns_,
+            holocronControl, 2);
+    }
+    victoryCountdownPlayer_ =
+        displayPlayer;
+    victoryCountdownKind_ =
+        displayKind;
+    victoryCountdownRemaining_ =
+        displayPlayer > 0
+            ? displayRemaining
+            : 0.0f;
+    if (winner > 0)
+        setMatchOutcome(
+            playersShareVictory(
+                localPlayer_, winner));
 }
 
 bool Game::spawnCheatUnit(int unitId, bool requireWater,
@@ -9747,6 +11056,8 @@ void Game::retryAttackApproach(Object &source) {
 void Game::acquireAutomaticTarget(Object &source) {
     if (!canAttack(source) || source.attackTargetId ||
         source.attackMode == AttackMode::Passive || source.state != State::Idle ||
+        source.conversionTargetId ||
+        source.holocronTargetId ||
         source.moveGoalActive ||
         mobileObjectGridWidth_ <= 0 ||
         combatObjectCells_.size() !=
@@ -9870,6 +11181,7 @@ void Game::syncFarmTerrain(Object &farm, bool dying) {
 }
 
 void Game::killObject(Object &object, bool countKill) {
+    releaseHolocronsForRemoval(object);
     if (object.unit->type ==
             dat::UT_Building &&
         isFarmUnit(*object.unit))
@@ -9971,6 +11283,145 @@ void Game::killObject(Object &object, bool countKill) {
     if (wasStatic) rebuildAdjacency();
 }
 
+bool Game::transferOwnership(
+    Object &object, int player,
+    bool clearOrders) {
+    if (!object.active || player < 0 ||
+        player >= 17 ||
+        (player > 0 &&
+         (size_t)player > players_.size()))
+        return false;
+    if (object.player == player)
+        return true;
+
+    if (clearOrders)
+        stopUnit(object);
+    dropHolocron(object);
+    size_t ejectionOffset = 0;
+    for (Object &passenger : objects_)
+        if (&passenger != &object &&
+            passenger.active &&
+            !isHolocron(passenger) &&
+            passenger.garrisonedInId ==
+                (int32_t)object.spawnId)
+            if (!ejectGarrisonedUnit(
+                    object, passenger,
+                    ejectionOffset++))
+                transferOwnership(
+                    passenger, player);
+    object.player = player;
+    object.homeX = object.x;
+    object.homeY = object.y;
+    object.garrisonTargetId = 0;
+    object.rallyTargetId = 0;
+    object.volleyTargetId = 0;
+    object.volleyRemaining = 0;
+    object.selected =
+        object.selected &&
+        (player == localPlayer_ ||
+         object.unit->type ==
+             dat::UT_Building);
+
+    for (Object &other : objects_) {
+        if (!other.active || &other == &object)
+            continue;
+        if (other.annexParentId ==
+            object.spawnId)
+            other.player = player;
+        if (isTemple(object) &&
+            isHolocron(other) &&
+            other.garrisonedInId ==
+                (int32_t)object.spawnId)
+            other.player = player;
+        if (other.attackTargetId ==
+                object.spawnId &&
+            (!isEnemy(other, object) ||
+             !canAttackTarget(other, object)))
+            finishAttack(other, false);
+        if (other.guardTargetId ==
+                object.spawnId &&
+            !isFriendlyPlayer(
+                other.player, player))
+            other.guardTargetId = 0;
+        if (other.followTargetId ==
+                object.spawnId &&
+            !isFriendlyPlayer(
+                other.player, player))
+            other.followTargetId = 0;
+        if (other.constructionTargetId ==
+                object.spawnId &&
+            other.player != player)
+            clearConstructionAssignment(other);
+        if (other.repairTargetId ==
+                object.spawnId &&
+            !isFriendlyPlayer(
+                other.player, player)) {
+            other.repairTargetId = 0;
+            if (other.state == State::Repair)
+                other.state = State::Idle;
+        }
+        if (other.garrisonTargetId ==
+                object.spawnId &&
+            !canGarrison(other, object))
+            other.garrisonTargetId = 0;
+    }
+
+    for (AiPlayerState &state :
+         aiPlayers_) {
+        for (AiMilitaryGroup &group :
+             state.militaryGroups) {
+            if (group.targetId ==
+                    object.spawnId)
+                group.targetId = 0;
+            group.members.erase(
+                std::remove(
+                    group.members.begin(),
+                    group.members.end(),
+                    object.spawnId),
+                group.members.end());
+            group.transports.erase(
+                std::remove(
+                    group.transports.begin(),
+                    group.transports.end(),
+                    object.spawnId),
+                group.transports.end());
+            group.escorts.erase(
+                std::remove(
+                    group.escorts.begin(),
+                    group.escorts.end(),
+                    object.spawnId),
+                group.escorts.end());
+            group.boardingAssignments.erase(
+                object.spawnId);
+            for (auto assignment =
+                     group.boardingAssignments.begin();
+                 assignment !=
+                 group.boardingAssignments.end();) {
+                if (assignment->second ==
+                    object.spawnId)
+                    assignment =
+                        group.boardingAssignments.erase(
+                            assignment);
+                else
+                    ++assignment;
+            }
+        }
+        state.shelteredWorkers.erase(
+            object.spawnId);
+    }
+
+    syncSelectionOrder();
+    syncControlGroups();
+    shieldGeneratorCacheSize_ =
+        (size_t)-1;
+    techGeneration_++;
+    refreshAllAutomaticTechnologies();
+    rebuildAdjacency();
+    rebuildMobileOccupancy();
+    updateVisibility();
+    return true;
+}
+
 void Game::damageObject(Object &object, int damage, uint32_t attackerId) {
     if (!object.active || damage <= 0) return;
     Object *attacker = findObject(attackerId);
@@ -10037,6 +11488,7 @@ void Game::damageObject(Object &object, int damage, uint32_t attackerId) {
         isEnemy(object, *attacker) &&
         canAttackTarget(object, *attacker) &&
         object.attackMode != AttackMode::Passive &&
+        !object.conversionTargetId &&
         (!object.attackTargetId || object.attackAutomatic) &&
         !engagedWithCurrentTarget(object)) {
         const float dx = attacker->x - object.x;
@@ -12801,7 +14253,12 @@ void Game::executeEffect(const ScenarioEffect &effect) {
         break;
     case 14:
     case 15:
-        for (Object *object : effectTargets(effect)) object->active = false;
+        for (Object *object :
+             effectTargets(effect)) {
+            releaseHolocronsForRemoval(
+                *object);
+            object->active = false;
+        }
         rebuildAdjacency();
         break;
     case 16:
@@ -12811,9 +14268,10 @@ void Game::executeEffect(const ScenarioEffect &effect) {
         break;
     }
     case 18:
-        for (Object *object : effectTargets(effect)) object->player = targetPlayer;
-        refreshAllAutomaticTechnologies();
-        rebuildAdjacency();
+        for (Object *object :
+             effectTargets(effect))
+            transferOwnership(
+                *object, targetPlayer);
         break;
     case 20:
         queueInstruction(
@@ -14335,6 +15793,34 @@ Game::AiTruth Game::evaluateAiCondition(
     }
     if (fact == "death-match-game")
         return AiTruth::False;
+    if (fact == "hold-holocrons") {
+        for (const Object &holocron :
+             objects_)
+            if (holocron.active &&
+                isHolocron(holocron) &&
+                holocron.player == player &&
+                (holocron.carriedById ||
+                 holocron.garrisonedInId >=
+                     0))
+                return AiTruth::True;
+        return AiTruth::False;
+    }
+    if (fact ==
+        "enemy-captured-holocrons") {
+        for (const Object &holocron :
+             objects_)
+            if (holocron.active &&
+                isHolocron(holocron) &&
+                holocron.player > 0 &&
+                !isFriendlyPlayer(
+                    player,
+                    holocron.player) &&
+                (holocron.carriedById ||
+                 holocron.garrisonedInId >=
+                     0))
+                return AiTruth::True;
+        return AiTruth::False;
+    }
     if (fact == "player-number" &&
         condition.children.size() == 2) {
         bool known = false;
@@ -15260,6 +16746,7 @@ void Game::updateAiStrategy(
         if (object.unit->type !=
                 dat::UT_Building &&
             !isWorker(object) &&
+            !object.carriedHolocronId &&
             canAttack(object)) {
             const int domain =
                 aiMilitaryDomain(
@@ -15441,6 +16928,7 @@ void Game::updateAiStrategy(
             object.unit->type !=
                 dat::UT_Building &&
             !isWorker(object) &&
+            !object.carriedHolocronId &&
             canAttack(object) &&
             !assigned.count(
                 object.spawnId))
@@ -15564,6 +17052,7 @@ bool Game::aiAttackNow(
             object.unit->type ==
                 dat::UT_Building ||
             isWorker(object) ||
+            object.carriedHolocronId ||
             assigned.count(object.spawnId))
             continue;
         if (isTransport(object) &&
@@ -17612,6 +19101,8 @@ void Game::update(float dt, const InputState &in) {
     updateLivestockOwnership();
     updateGathering(dt);
     updateRepairing(dt);
+    updateConversion(dt);
+    updateHolocrons(dt);
     // Gate logic, following the original (battlegrounds_x1.exe 0x558390):
     // the gate watches a 0.4-tile-wide corridor between its two end posts.
     // A closed, unlocked gate swaps to its OPEN unit the moment a friendly
@@ -17994,6 +19485,28 @@ void Game::update(float dt, const InputState &in) {
             commandMarkerX_ = targetX;
             commandMarkerY_ = targetY;
             commandMarkerTime_ = 0.65f;
+        } else if (pendingUnitCommand_ ==
+                   UnitCommand::Convert) {
+            Object *target =
+                objectAtScreen(
+                    in.pointerX,
+                    in.pointerY,
+                    in.screenW,
+                    in.screenH);
+            if (target) {
+                for (Object *unit :
+                     selected)
+                    if (issueConversion(
+                            *unit, *target)) {
+                        if (!acknowledgement)
+                            acknowledgement =
+                                unit;
+                        issued = true;
+                    }
+                if (issued)
+                    flashCommandTarget(
+                        *target);
+            }
         } else {
             Object *target =
                 objectAtScreen(
@@ -18041,7 +19554,10 @@ void Game::update(float dt, const InputState &in) {
                     : pendingUnitCommand_ ==
                               UnitCommand::Guard
                           ? "GUARDING"
-                          : "FOLLOWING";
+                          : pendingUnitCommand_ ==
+                                    UnitCommand::Follow
+                                ? "FOLLOWING"
+                                : "CONVERTING";
             statusTime_ = 2.0f;
             unitCommandCursorActive_ =
                 false;
@@ -18051,7 +19567,10 @@ void Game::update(float dt, const InputState &in) {
                 pendingUnitCommand_ ==
                         UnitCommand::Patrol
                     ? "CANNOT PATROL THERE"
-                    : "SELECT A FRIENDLY TARGET");
+                    : pendingUnitCommand_ ==
+                              UnitCommand::Convert
+                          ? "THAT TARGET CANNOT BE CONVERTED"
+                          : "SELECT A FRIENDLY TARGET");
         }
         unitCommandHandled = true;
     }
@@ -18249,6 +19768,12 @@ void Game::update(float dt, const InputState &in) {
              pendingUnitCommand_ ==
                  UnitCommand::Follow)
         cursorMode_ = CursorMode::Follow;
+    else if (!consumeWorldInput &&
+             cursorVisible_ &&
+             unitCommandCursorActive_ &&
+             pendingUnitCommand_ ==
+                 UnitCommand::Convert)
+        cursorMode_ = CursorMode::Convert;
     else if (!consumeWorldInput && cursorVisible_ &&
         !boxSelectActive_ && hasSelectedUnit()) {
         Object *hovered =
@@ -18877,6 +20402,7 @@ void Game::update(float dt, const InputState &in) {
         visibilityTime_ = 0.15f;
     }
     updateConquest(dt);
+    updateVictoryConditions(dt);
 }
 
 // Picks the SLP frame for a graphic given a world-space facing and time.
@@ -19193,7 +20719,8 @@ void Game::updateMinimapTexture(
         const bool staticObject =
             object.unit->type ==
                 dat::UT_Building ||
-            isGatherable(object);
+            isGatherable(object) ||
+            isHolocron(object);
         if (staticObject
                 ? !objectVisibleToPlayer(
                       object, localPlayer_)
@@ -19496,6 +21023,18 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 }
             }
         }
+        if (o.state == State::Convert) {
+            const dat::Task *task =
+                conversionTask(o);
+            if (task) {
+                if (task->workingGraphic >= 0)
+                    gid = task->workingGraphic;
+                else if (
+                    task->proceedingGraphic >= 0)
+                    gid =
+                        task->proceedingGraphic;
+            }
+        }
         if (o.underConstruction &&
             o.unit->constructionGraphic >= 0)
             gid = o.unit->constructionGraphic;
@@ -19511,6 +21050,21 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             else if (visualUnit->walkingGraphic >= 0)
                 gid = visualUnit->walkingGraphic;
         }
+        if (o.carriedHolocronId &&
+            o.unit->id >= 0 &&
+            (size_t)o.unit->id <
+                assets_.dat()
+                    .unitHeaders.size())
+            for (const dat::Task &task :
+                 assets_.dat()
+                     .unitHeaders[
+                         (size_t)o.unit->id]
+                     .tasks)
+                if (task.actionType == 132 &&
+                    task.carryingGraphic >= 0) {
+                    gid = task.carryingGraphic;
+                    break;
+                }
         if (o.state == State::Attack &&
             o.unit->attackGraphic >= 0)
             gid = o.unit->attackGraphic;
@@ -20271,6 +21825,36 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         r.fillRect(sx - pulse, sy + pulse, pulse * 2, 2 / zoom_, 255, 255, 0, 220);
         r.fillRect(sx - pulse, sy - pulse, 2 / zoom_, pulse * 2, 255, 255, 0, 220);
         r.fillRect(sx + pulse, sy - pulse, 2 / zoom_, pulse * 2, 255, 255, 0, 220);
+    }
+
+    for (const Object &carrier : objects_) {
+        if (!carrier.active ||
+            carrier.hidden ||
+            !carrier.draw ||
+            !carrier.carriedHolocronId ||
+            !objectCurrentlyVisibleToPlayer(
+                carrier, localPlayer_))
+            continue;
+        float sx = 0.0f, sy = 0.0f;
+        objectScreenPosition(
+            carrier, screenW, screenH,
+            sx, sy);
+        const float invZoom =
+            1.0f / zoom_;
+        sx *= invZoom;
+        sy = sy * invZoom -
+             32.0f * invZoom;
+        const float size =
+            4.0f * invZoom;
+        r.fillRect(
+            sx - size, sy - size,
+            size * 2.0f, size * 2.0f,
+            248, 221, 72, 230);
+        r.fillRect(
+            sx - size * 0.5f,
+            sy - size * 1.5f,
+            size, size * 3.0f,
+            255, 246, 168, 245);
     }
 
     if (localPlayer_ > 0 &&
@@ -23037,6 +24621,69 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         r.fillRect(x + w - line, y, line, h, 80, 210, 255, 230);
     }
 
+    std::string objectiveMessage;
+    if (victoryState_ < 0) {
+        if (victoryCountdownPlayer_ > 0) {
+            objectiveMessage =
+                playerDisplayName(
+                    victoryCountdownPlayer_) +
+                (victoryCountdownKind_ == 2
+                     ? " HOLOCRON CONTROL: "
+                     : " MONUMENT CONTROL: ") +
+                std::to_string(
+                    (int)std::ceil(
+                        victoryCountdownRemaining_)) +
+                "s";
+        } else if (
+            victoryCondition_ ==
+            SkirmishVictory::TimeLimit) {
+            objectiveMessage =
+                "TIME LIMIT: " +
+                std::to_string(
+                    (int)std::ceil(
+                        std::max(
+                            0.0f,
+                            timeLimitSeconds_ -
+                                simulationTime_))) +
+                "s  SCORE " +
+                std::to_string(
+                    playerScore(
+                        localPlayer_));
+        } else if (
+            victoryCondition_ ==
+            SkirmishVictory::Score) {
+            objectiveMessage =
+                "SCORE " +
+                std::to_string(
+                    playerScore(
+                        localPlayer_)) +
+                " / " +
+                std::to_string(scoreLimit_);
+        }
+    }
+    if (!objectiveMessage.empty()) {
+        const float invZoom =
+            1.0f / zoom_;
+        const float width =
+            objectiveMessage.size() *
+                9.0f +
+            20.0f;
+        const float x =
+            (screenW - width - 12.0f) *
+            invZoom;
+        const float y = 72.0f * invZoom;
+        r.fillRect(
+            x, y, width * invZoom,
+            23.0f * invZoom,
+            8, 18, 34, 220);
+        drawBitmapText(
+            r, {objectiveMessage},
+            x + 10.0f * invZoom,
+            y + 6.0f * invZoom,
+            0.9f * invZoom,
+            246, 220, 116);
+    }
+
     if (!statusMessage_.empty()) {
         const float invZoom = 1.0f / zoom_;
         const bool attackAlert =
@@ -23069,6 +24716,8 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         if (cursorMode_ == CursorMode::Placement) frameIndex = kCursorPlacement;
         if (cursorMode_ == CursorMode::GatherPoint) frameIndex = kCursorGatherPoint;
         if (cursorMode_ == CursorMode::Attack) frameIndex = kCursorAttack;
+        if (cursorMode_ == CursorMode::Convert)
+            frameIndex = kCursorAttack;
         if (cursorMode_ == CursorMode::AttackGround)
             frameIndex = kCursorAttackGround;
         if (cursorMode_ == CursorMode::Garrison)

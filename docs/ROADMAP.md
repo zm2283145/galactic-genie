@@ -115,8 +115,10 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   Modifications consistently. Researched garrison capacity, accuracy, work
   rate, carrying capacity, and base armor now join the existing hit-point,
   sight, movement, packed armor/attack, reload, range, projectile, and minimum
-  range consumers. Unproven player-resource counters and conversion/trickle
-  semantics remain explicitly unsupported rather than being blanket-applied.
+  range consumers. Conversion and Holocron consumers are now limited to the
+  executable/DAT-backed resources documented in `ORIGINAL_SYSTEMS.md`; other
+  unproven player-resource counters remain unsupported rather than being
+  blanket-applied.
 - SWGB-specific mechanics: power and shield coverage are implemented. A powered Shield Generator
   gives eligible units and buildings a gold shield bar equal to maximum HP, with original
   tiered regeneration, non-stacking coverage, overflow damage, and one-HP per-hit leakage for
@@ -124,8 +126,17 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   points per second, reduced to 20 by Superconducting Shields; Shield Wall enables adjacent wall
   coverage. World and selection bars display the remaining shield amount numerically.
   Civilization-correct Air Transports and Transport Ships are available from completed Airbases and
-  Shipyards through their original `AVAIL-*` technologies. Other air-unit special behavior,
-  Jedi/Sith conversion, holocrons, stealth, and detection remain.
+  Shipyards through their original `AVAIL-*` technologies. Aircraft movement ignores ground
+  occupancy according to DAT fly mode, while class-based air/ground weapon restrictions, transports,
+  shields, formations, repair, fog, AI production/use, projectiles, death, and save/load share the
+  normal authoritative systems. No unsupported fuel mechanic is added.
+  Jedi/Sith action-104 conversion is complete through command UI, deterministic DAT work/recharge,
+  researched eligibility/resistance/recharge modifiers, ownership cleanup, AI-safe visibility, and
+  save/load. Holocrons now have deterministic generated-map placement, discovery, Force-user
+  pickup/carry/drop, Temple delivery/ejection/ownership, DAT resource-191 Nova generation,
+  minimap/world presentation, AI acquisition/delivery, reset, and save/load. Mind Trick stealth and
+  Perception/trait-bit-8 detection are enforced across rendering, minimap, selection, targeting,
+  automatic acquisition, conversion, allied sharing, AI knowledge, cheats, and persistence.
 
 ## Milestone 4: interface and input on Vita
 - Replace the temporary bitmap trigger-dialogue font with UI rendering from `interfac.drs` SLPs.
@@ -225,13 +236,19 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   below 20 percent health, then unlock after repair above that threshold.
 - Generated matches now expose original Computer Expanded and Computer Classic personalities,
   five difficulty defines, both civilizations, diplomacy/team state, deterministic seeds,
-  population and resource presets, and Conquest or Command Center victory. Grasslands,
+  population and resource presets, and Standard, Conquest, Time Limit, Score, or Command Center
+  victory. Standard combines conquest with controlled Monument and all-Holocron countdowns;
+  control loss resets the countdown, mutual allies share team evaluation, and ties resolve by the
+  lowest player number. Grasslands,
   Archipelago, and the compact two-island regression map are selectable. Starts have symmetric
   DAT resource patches and island maps retain DAT-valid Shipyard shorelines. Repeated matches
   reset simulation, AI, trigger, fog, queue, outcome, input, and audio state.
 - Generated matches now enforce conquest elimination, AI recognition of defeated players, and
   collapse/outmatched surrender. Local victory and defeat display full-screen outcome panels and
   play the original `WON1.MP3` or `lost.mp3` stream.
+- Original AI `hold-holocrons` and `enemy-captured-holocrons` facts now read authoritative
+  carried/secured Holocron state. Native AI carriers only acquire currently visible Holocrons,
+  return them to friendly Temples, and never query hidden positions.
 
 ## Vita performance notes
 - The main memory cost is texture atlases. Terrain and sprite working sets are capped at 64 MB,

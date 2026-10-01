@@ -53,8 +53,14 @@ const char *mapStyleName(SkirmishMapStyle style) {
 
 const char *victoryName(SkirmishVictory victory) {
     switch (victory) {
+    case SkirmishVictory::Standard:
+        return "Standard";
     case SkirmishVictory::Conquest:
         return "Conquest";
+    case SkirmishVictory::TimeLimit:
+        return "Time Limit";
+    case SkirmishVictory::Score:
+        return "Score";
     case SkirmishVictory::CommandCenter:
         return "Command Center";
     }

@@ -19,6 +19,7 @@ It is written clean-room style: file formats come from public documentation (ope
 | Initial trigger runtime: timers, object/area/resource conditions, ordered effects, voiced dialogue, and collision-aware scripted movement | in progress |
 | Units: idle/walk animation, 8-way facing with mirroring, graphic deltas for buildings | done |
 | Combat: contextual orders, deterministic accuracy/misses, projectiles/blast, DAT-driven attributes, shields, damage, and death | in progress |
+| Major SWGB mechanics: conversion, Holocrons, stealth/detection, Standard/Conquest/Time/Score/Command Center victory, and aircraft rules | done |
 | Fishing/naval economy: Utility Trawler gathering, Aqua Harvesters, naval construction/repair, island resources, and AI use | done |
 | Vita: renderer, camera controls, original cursors, unit selection/status markers, formation movement, and fog-aware navigable minimap | done |
 | Vita frontend: title/main menu, campaign entry, skirmish lobby, real pause/options, save/continue, and outcome flow | done |
@@ -95,10 +96,30 @@ during the same chord to assign the current ordered local selection. Recalling a
 centers its first unit. The Options screen provides live master/music/dialogue/effects levels
 and a Left-Handed preset that swaps the camera/cursor sticks and X/O gameplay roles.
 
+Jedi and Sith with the original action-104 task expose **Convert** on their Commands page.
+Choose it, then target a currently visible eligible enemy. Conversion uses the DAT work/recharge
+times, Force Influence and Concentration restrictions, Faith in the Force resistance, and Stamina
+recharge modifier. Converters drop a carried Holocron before changing ownership. Eligible Force
+users can context-command a visible Holocron, then context-command a friendly Temple to secure it.
+The carrier has a gold world marker; discovered Holocrons remain on the world/minimap under explored
+fog, while undiscovered or carried Holocrons are not exposed. Each secured Holocron generates the
+civilization's DAT resource-191 Nova rate.
+
+The skirmish lobby offers the original **Standard**, **Conquest**, **Time Limit**, and **Score**
+victory choices plus the existing Command Center compatibility mode. Standard combines military
+conquest with Monument and all-Holocron control. Monument/Holocron control displays a persistent
+countdown and resets when control is lost. Time Limit and Score show live objective status; team
+victory requires mutual alliance and allied-victory participation. Stealth from Mind Trick is
+enforced in rendering, selection, commands, minimap, automatic acquisition, conversion, and AI
+queries. Perception-enabled Masters and DAT trait-bit-8 detectors share detection with allies;
+`FORCESIGHT` remains the explicit human-player detection bypass.
+
 Settings are stored in `ux0:data/swgb/settings.bin`; generated-skirmish continuation is stored in
 `ux0:data/swgb/skirmish.save`. Both formats are versioned and validated. Corrupt settings are
 reported and reset to defaults; corrupt, oversized, mismatched, or unsupported saves are rejected
-without replacing the current match.
+without replacing the current match. Save version 2 persists conversion work/recharge, Holocron
+carrier/Temple relationships, and victory countdowns. Version-1 generated-skirmish saves remain
+accepted through an explicit victory-enum migration; later unsupported versions fail clearly.
 
 Combat includes pursuit with collision-aware A* pathfinding, attack animations and
 acknowledgements, original projectile graphics and weapon sounds, researched accuracy with

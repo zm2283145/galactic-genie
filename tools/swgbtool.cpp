@@ -63,6 +63,7 @@ static int usage() {
             "  swgbtool test-skirmish <DataDir>\n"
             "  swgbtool test-interface <DataDir>\n"
             "  swgbtool test-core-gameplay <DataDir>\n"
+            "  swgbtool test-major-mechanics <DataDir>\n"
             "  swgbtool mp3 <file.mp3>\n");
     return 2;
 }
@@ -8459,6 +8460,803 @@ static int cmdTestCoreGameplay(
     return failures ? 1 : 0;
 }
 
+static int cmdTestMajorMechanics(
+    const char *dataDir) {
+    std::string err;
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n",
+                err.c_str());
+        return 1;
+    }
+    int failures = 0;
+    auto report =
+        [&](const char *name, bool ok,
+            const std::string &detail) {
+            printf(
+                "%s %s %s\n",
+                ok ? "PASS" : "FAIL",
+                name, detail.c_str());
+            if (!ok)
+                failures++;
+        };
+    auto step = [](Game &game,
+                   float seconds) {
+        for (float elapsed = 0.0f;
+             elapsed < seconds;
+             elapsed += 1.0f / 30.0f)
+            game.update(
+                1.0f / 30.0f, {});
+    };
+    auto compact = [&]() {
+        Game game(assets);
+        if (!game.initCompactTestMap(
+                0x4D414A4Fu, 96,
+                &err)) {
+            fprintf(
+                stderr, "error: %s\n",
+                err.c_str());
+            std::exit(1);
+        }
+        game.setLocalPlayerForTesting(1);
+        return game;
+    };
+
+    {
+        Game game = compact();
+        const int civilization =
+            game.civilizationForPlayerForTesting(
+                2);
+        const uint32_t converter =
+            game.spawnConverterForTesting(
+                1, 30.0f, 30.0f);
+        const uint32_t target =
+            game.spawnObjectForTesting(
+                civilization, 83, 2,
+                30.3f, 30.0f);
+        game.setAttackModeForTesting(
+            target, 3);
+        const bool issued =
+            game.issueConversionForTesting(
+                converter, target);
+        step(game, 4.5f);
+        const bool converted =
+            target &&
+            game.objectPlayer(target) == 1 &&
+            game.conversionChargeForTesting(
+                converter) > 0.0f;
+        const bool rechargeBlocks =
+            !game.issueConversionForTesting(
+                converter, target);
+        const uint32_t temple =
+            game.spawnTempleForTesting(
+                2, 31.0f, 30.0f);
+        const uint32_t holocron =
+            game.spawnHolocronForTesting(
+                31.2f, 30.0f);
+        const uint32_t immunityConverter =
+            game.spawnConverterForTesting(
+                1, 31.0f, 30.3f);
+        const bool immuneTargets =
+            !game.issueConversionForTesting(
+                immunityConverter, temple) &&
+            !game.issueConversionForTesting(
+                immunityConverter, holocron);
+        report(
+            "conversion-lifecycle",
+            converter && target && issued &&
+                converted && rechargeBlocks &&
+                immuneTargets &&
+                game.invariantsForTesting(),
+            "owner=" +
+                std::to_string(
+                    game.objectPlayer(target)) +
+                " recharge=" +
+                std::to_string(
+                    game.conversionChargeForTesting(
+                        converter)));
+    }
+
+    {
+        Game game = compact();
+        const int civilization =
+            game.civilizationForPlayerForTesting(
+                2);
+        const uint32_t converter =
+            game.spawnConverterForTesting(
+                1, 33.0f, 33.0f);
+        const uint32_t target =
+            game.spawnObjectForTesting(
+                civilization, 115, 2,
+                33.3f, 33.0f);
+        game.setAttackModeForTesting(
+            target, 3);
+        const bool researched =
+            game.researchTechnologyForTesting(
+                2, 155);
+        const bool issued =
+            game.issueConversionForTesting(
+                converter, target);
+        step(game, 4.2f);
+        const bool resisted =
+            game.objectPlayer(target) == 2;
+        step(game, 2.1f);
+        const bool completed =
+            game.objectPlayer(target) == 1;
+        report(
+            "conversion-resistance",
+            researched && issued &&
+                resisted && completed,
+            "research/owner-mid/final=" +
+                std::to_string(researched) +
+                "/" +
+                std::to_string(
+                    resisted ? 2
+                              : game.objectPlayer(
+                                    target)) +
+                "/" +
+                std::to_string(
+                    game.objectPlayer(target)));
+    }
+
+    {
+        Game game = compact();
+        const uint32_t carrier =
+            game.spawnConverterForTesting(
+                1, 32.0f, 32.0f);
+        const uint32_t holocron =
+            game.spawnHolocronForTesting(
+                32.2f, 32.0f);
+        const uint32_t temple =
+            game.spawnTempleForTesting(
+                1, 32.4f, 32.0f);
+        const bool pickup =
+            game.issueHolocronOrderForTesting(
+                carrier, holocron);
+        step(game, 0.3f);
+        const bool carried =
+            game.carriedHolocronForTesting(
+                carrier) == holocron;
+        const bool deposit =
+            game.issueHolocronOrderForTesting(
+                carrier, temple);
+        step(game, 0.3f);
+        const float novaBefore =
+            game.resource(1, 3);
+        step(game, 60.0f);
+        const float novaGain =
+            game.resource(1, 3) -
+            novaBefore;
+        const bool stored =
+            game.storedHolocronCountForTesting(
+                1) == 1;
+
+        const uint32_t carrier2 =
+            game.spawnConverterForTesting(
+                1, 34.0f, 34.0f);
+        const uint32_t holocron2 =
+            game.spawnHolocronForTesting(
+                34.2f, 34.0f);
+        game.issueHolocronOrderForTesting(
+            carrier2, holocron2);
+        step(game, 0.3f);
+        game.damageObjectForTesting(
+            carrier2, 100000);
+        const bool dropped =
+            game.holocronHolderForTesting(
+                holocron2) == -1;
+        report(
+            "holocron-lifecycle",
+            carrier && holocron && temple &&
+                pickup && carried && deposit &&
+                stored && novaGain > 40.0f &&
+                dropped &&
+                game.invariantsForTesting(),
+            "stored=" +
+                std::to_string(
+                    game.storedHolocronCountForTesting(
+                        1)) +
+                " nova=" +
+                std::to_string(novaGain) +
+                " dropped=" +
+                std::to_string(dropped));
+    }
+
+    {
+        Game game = compact();
+        const uint32_t stealthUnit =
+            game.spawnConverterForTesting(
+                2, 40.0f, 40.0f);
+        const bool stealthEnabled =
+            game.setStealthedForTesting(
+                2, true);
+        game.updateVisibilityForTesting();
+        const bool concealed =
+            game.objectStealthedForTesting(
+                stealthUnit) &&
+            !game.objectDetectedForTesting(
+                1, stealthUnit);
+        const uint32_t converter =
+            game.spawnConverterForTesting(
+                1, 39.7f, 40.0f);
+        const bool concealedConversionBlocked =
+            !game.issueConversionForTesting(
+                converter, stealthUnit);
+        game.setDiplomacyForTesting(
+            1, 3, 3);
+        const uint32_t sharedDetector =
+            game.spawnDetectorForTesting(
+                3, 40.5f, 40.0f);
+        game.updateVisibilityForTesting();
+        const bool hostileDetectorHidden =
+            !game.objectDetectedForTesting(
+                1, stealthUnit);
+        game.setDiplomacyForTesting(
+            1, 3, 0);
+        game.updateVisibilityForTesting();
+        const bool alliedDetectorReveal =
+            game.objectDetectedForTesting(
+                1, stealthUnit);
+        const bool revealedConversionAllowed =
+            game.issueConversionForTesting(
+                converter, stealthUnit);
+        game.stopUnitForTesting(converter);
+        game.setDiplomacyForTesting(
+            1, 3, 3);
+        const uint32_t detector =
+            game.spawnDetectorForTesting(
+                1, 40.5f, 40.0f);
+        game.updateVisibilityForTesting();
+        const bool revealed =
+            game.objectDetectedForTesting(
+                1, stealthUnit);
+        game.moveObjectForTesting(
+            detector, 80.0f, 80.0f);
+        game.updateVisibilityForTesting();
+        const bool concealedAgain =
+            !game.objectDetectedForTesting(
+                1, stealthUnit);
+        game.setVisibilityCheatsForTesting(
+            false, true);
+        const bool cheatReveal =
+            game.objectDetectedForTesting(
+                1, stealthUnit);
+        game.setVisibilityCheatsForTesting(
+            false, false);
+        uint32_t stealthAttacker =
+            game.spawnObjectForTesting(
+                game
+                    .civilizationForPlayerForTesting(
+                        2),
+                641, 2, 60.0f, 60.0f);
+        if (!stealthAttacker)
+            stealthAttacker =
+                game.spawnObjectForTesting(
+                    game
+                        .civilizationForPlayerForTesting(
+                            2),
+                    638, 2,
+                    60.0f, 60.0f);
+        const uint32_t attackTarget =
+            game.spawnObjectForTesting(
+                game
+                    .civilizationForPlayerForTesting(
+                        1),
+                109, 1, 60.5f, 60.0f);
+        const bool attackIssued =
+            game.issueAttackForTesting(
+                stealthAttacker,
+                attackTarget);
+        step(game, 0.5f);
+        game.updateVisibilityForTesting();
+        const bool attackBreaksStealth =
+            attackIssued &&
+            !game.objectStealthedForTesting(
+                stealthAttacker) &&
+            game.objectDetectedForTesting(
+                1, stealthAttacker);
+        report(
+            "stealth-detection",
+            stealthUnit && detector &&
+                sharedDetector &&
+                stealthEnabled && concealed &&
+                concealedConversionBlocked &&
+                hostileDetectorHidden &&
+                alliedDetectorReveal &&
+                revealedConversionAllowed &&
+                revealed && concealedAgain &&
+                cheatReveal &&
+                attackBreaksStealth,
+            "concealed/convert-blocked/hostile/allied/convert/revealed/reset/cheat/attack=" +
+                std::to_string(concealed) +
+                "/" +
+                std::to_string(
+                    concealedConversionBlocked) +
+                "/" +
+                std::to_string(
+                    hostileDetectorHidden) +
+                "/" +
+                std::to_string(
+                    alliedDetectorReveal) +
+                "/" +
+                std::to_string(
+                    revealedConversionAllowed) +
+                "/" +
+                std::to_string(revealed) +
+                "/" +
+                std::to_string(
+                    concealedAgain) +
+                "/" +
+                std::to_string(
+                    cheatReveal) +
+                "/" +
+                std::to_string(
+                    attackBreaksStealth) +
+                " attacker/target/issued/stealthed/detected=" +
+                std::to_string(
+                    stealthAttacker) +
+                "/" +
+                std::to_string(
+                    attackTarget) +
+                "/" +
+                std::to_string(
+                    attackIssued) +
+                "/" +
+                std::to_string(
+                    game.objectStealthedForTesting(
+                        stealthAttacker)) +
+                "/" +
+                std::to_string(
+                    game.objectDetectedForTesting(
+                        1,
+                        stealthAttacker)));
+    }
+
+    {
+        Game game = compact();
+        const int civilization =
+            game.civilizationForPlayerForTesting(
+                1);
+        int buildingDetector = -1;
+        int mobileDetector = -1;
+        for (const dat::Unit &unit :
+             assets.dat()
+                 .civs[(size_t)civilization]
+                 .units) {
+            if (!unit.exists ||
+                (unit.trait & 8u) == 0)
+                continue;
+            if (unit.type ==
+                dat::UT_Building)
+                buildingDetector = unit.id;
+            else
+                mobileDetector = unit.id;
+        }
+        const uint32_t stealthUnit =
+            game.spawnConverterForTesting(
+                2, 52.0f, 52.0f);
+        game.setStealthedForTesting(
+            2, true);
+        const uint32_t building =
+            buildingDetector >= 0
+                ? game.spawnObjectForTesting(
+                      civilization,
+                      buildingDetector, 1,
+                      52.5f, 52.0f)
+                : 0;
+        game.updateVisibilityForTesting();
+        const bool buildingReveal =
+            building &&
+            game.objectDetectedForTesting(
+                1, stealthUnit);
+        game.moveObjectForTesting(
+            building, 80.0f, 80.0f);
+        const uint32_t mobile =
+            mobileDetector >= 0
+                ? game.spawnObjectForTesting(
+                      civilization,
+                      mobileDetector, 1,
+                      52.5f, 52.0f)
+                : 0;
+        game.updateVisibilityForTesting();
+        const bool mobileReveal =
+            mobile &&
+            game.objectDetectedForTesting(
+                1, stealthUnit);
+        report(
+            "detector-buildings-and-units",
+            buildingDetector >= 0 &&
+                mobileDetector >= 0 &&
+                buildingReveal &&
+                mobileReveal,
+            "ids=" +
+                std::to_string(
+                    buildingDetector) +
+                "/" +
+                std::to_string(
+                    mobileDetector) +
+                " reveal=" +
+                std::to_string(
+                    buildingReveal) +
+                "/" +
+                std::to_string(
+                    mobileReveal));
+    }
+
+    {
+        Game game = compact();
+        const int civ1 =
+            game.civilizationForPlayerForTesting(
+                1);
+        const int civ2 =
+            game.civilizationForPlayerForTesting(
+                2);
+        const uint32_t bomber =
+            game.spawnObjectForTesting(
+                civ1, 762, 1,
+                42.0f, 42.0f);
+        const uint32_t fighter =
+            game.spawnObjectForTesting(
+                civ2, 773, 2,
+                43.0f, 42.0f);
+        const uint32_t ground =
+            game.spawnObjectForTesting(
+                civ2, 83, 2,
+                43.0f, 43.0f);
+        const bool bomberRules =
+            !game.canAttackTargetForTesting(
+                bomber, fighter) &&
+            game.canAttackTargetForTesting(
+                bomber, ground);
+        const bool fighterRules =
+            game.canAttackTargetForTesting(
+                fighter, bomber);
+        game.researchTechnologyForTesting(
+            1, 73);
+        const bool shields =
+            game.objectMaxShieldPoints(
+                bomber) >= 0.0f;
+        report(
+            "aircraft-class-rules",
+            bomber && fighter && ground &&
+                bomberRules && fighterRules &&
+                shields &&
+                game.invariantsForTesting(),
+            "bomber-air/ground=" +
+                std::to_string(
+                    game.canAttackTargetForTesting(
+                        bomber, fighter)) +
+                "/" +
+                std::to_string(
+                    game.canAttackTargetForTesting(
+                        bomber, ground)) +
+                " fighter-air=" +
+                std::to_string(
+                    fighterRules));
+    }
+
+    {
+        Game monument = compact();
+        monument.setVictoryConditionForTesting(
+            SkirmishVictory::Standard);
+        monument.setVictoryParametersForTesting(
+            0.2f, 3600.0f, 4000);
+        monument.spawnObjectForTesting(
+            monument
+                .civilizationForPlayerForTesting(
+                    1),
+            276, 1, 45.0f, 45.0f);
+        step(monument, 0.5f);
+
+        Game holocron = compact();
+        holocron.setVictoryConditionForTesting(
+            SkirmishVictory::Standard);
+        holocron.setVictoryParametersForTesting(
+            0.2f, 3600.0f, 4000);
+        const uint32_t carrier =
+            holocron
+                .spawnConverterForTesting(
+                    1, 35.0f, 35.0f);
+        const uint32_t relic =
+            holocron
+                .spawnHolocronForTesting(
+                    35.1f, 35.0f);
+        const uint32_t temple =
+            holocron
+                .spawnTempleForTesting(
+                    1, 35.2f, 35.0f);
+        holocron
+            .issueHolocronOrderForTesting(
+                carrier, relic);
+        step(holocron, 0.3f);
+        holocron
+            .issueHolocronOrderForTesting(
+                carrier, temple);
+        step(holocron, 0.6f);
+
+        Game timed = compact();
+        timed.setVictoryConditionForTesting(
+            SkirmishVictory::TimeLimit);
+        timed.setVictoryParametersForTesting(
+            600.0f, 0.2f, 4000);
+        timed.setResourceForTesting(
+            1, 0, 10000.0f);
+        timed.setResourceForTesting(
+            2, 0, 0.0f);
+        step(timed, 0.5f);
+
+        Game timedNoConquest = compact();
+        timedNoConquest
+            .setVictoryConditionForTesting(
+                SkirmishVictory::TimeLimit);
+        timedNoConquest
+            .setVictoryParametersForTesting(
+                600.0f, 100.0f, 4000);
+        timedNoConquest
+            .eliminatePlayerForTesting(2);
+        step(timedNoConquest, 0.5f);
+
+        Game score = compact();
+        score.setVictoryConditionForTesting(
+            SkirmishVictory::Score);
+        score.setVictoryParametersForTesting(
+            600.0f, 3600.0f, 8000);
+        score.setResourceForTesting(
+            1, 0, 10000.0f);
+        score.setResourceForTesting(
+            2, 0, 0.0f);
+        step(score, 0.2f);
+        report(
+            "victory-modes",
+            monument.victoryStateForTesting() ==
+                    1 &&
+                holocron
+                        .victoryStateForTesting() ==
+                    1 &&
+                timed.victoryStateForTesting() ==
+                    1 &&
+                timedNoConquest
+                        .victoryStateForTesting() ==
+                    -1 &&
+                score.victoryStateForTesting() ==
+                    1,
+            "standard-monument=" +
+                std::to_string(
+                    monument
+                        .victoryStateForTesting()) +
+                " standard-holocron=" +
+                std::to_string(
+                    holocron
+                        .victoryStateForTesting()) +
+                " timed=" +
+                std::to_string(
+                    timed
+                        .victoryStateForTesting()) +
+                " timed-no-conquest=" +
+                std::to_string(
+                    timedNoConquest
+                        .victoryStateForTesting()) +
+                " score=" +
+                std::to_string(
+                    score
+                        .victoryStateForTesting()));
+    }
+
+    {
+        Game game = compact();
+        game.setVictoryConditionForTesting(
+            SkirmishVictory::Standard);
+        game.setVictoryParametersForTesting(
+            0.5f, 3600.0f, 4000);
+        game.spawnObjectForTesting(
+            game.civilizationForPlayerForTesting(
+                2),
+            276, 2, 46.0f, 46.0f);
+        step(game, 0.3f);
+        game.spawnObjectForTesting(
+            game.civilizationForPlayerForTesting(
+                1),
+            276, 1, 48.0f, 48.0f);
+        step(game, 0.3f);
+        report(
+            "independent-victory-countdowns",
+            game.victoryStateForTesting() ==
+                0,
+            "outcome=" +
+                std::to_string(
+                    game.victoryStateForTesting()));
+    }
+
+    {
+        Game game = compact();
+        const auto base =
+            game.playerBasePositionForTesting(
+                2);
+        const uint32_t holocron =
+            game.spawnHolocronForTesting(
+                base[0] + 0.2f, base[1]);
+        const uint32_t carrier =
+            game.spawnConverterForTesting(
+                2, base[0], base[1]);
+        game.issueHolocronOrderForTesting(
+            carrier, holocron);
+        step(game, 0.3f);
+        game.eliminatePlayerForTesting(2);
+        report(
+            "elimination-releases-holocron",
+            game.holocronCountForTesting() >=
+                    1 &&
+                game.holocronHolderForTesting(
+                    holocron) == -1,
+            "holder=" +
+                std::to_string(
+                    game.holocronHolderForTesting(
+                        holocron)) +
+                " total=" +
+                std::to_string(
+                    game.holocronCountForTesting()));
+    }
+
+    {
+        SkirmishSettings settings;
+        settings.seed = 0x53415645u;
+        settings.mapSize = 96;
+        settings.playerCivilization = 7;
+        settings.computerCivilization = 5;
+        settings.victory =
+            SkirmishVictory::Standard;
+        Game game(assets);
+        const bool initialized =
+            game.initSkirmish(
+                settings, &err);
+        game.setVictoryParametersForTesting(
+            8.0f, 90.0f, 1200);
+        const auto base =
+            game.playerBasePositionForTesting(
+                1);
+        const uint32_t carrier =
+            game.spawnConverterForTesting(
+                1, base[0], base[1]);
+        const uint32_t relic =
+            game.spawnHolocronForTesting(
+                base[0] + 0.2f, base[1]);
+        game.issueHolocronOrderForTesting(
+            carrier, relic);
+        step(game, 0.3f);
+        const std::string savePath =
+            "test-major-mechanics.sav";
+        const bool saved =
+            initialized &&
+            game.saveMatch(
+                savePath, &err);
+        Game loaded(assets);
+        const bool loadedInit =
+            loaded.initSkirmish(
+                settings, &err);
+        const bool restored =
+            loadedInit &&
+            loaded.loadMatch(
+                savePath, &err);
+        std::remove(savePath.c_str());
+        report(
+            "save-v2-roundtrip",
+            saved && restored &&
+                loaded
+                        .victoryConditionForTesting() ==
+                    SkirmishVictory::Standard &&
+                loaded
+                        .holocronCountForTesting() ==
+                    game.holocronCountForTesting() &&
+                loaded.invariantsForTesting(),
+            "saved/loaded=" +
+                std::to_string(saved) + "/" +
+                std::to_string(restored) +
+                " holocrons=" +
+                std::to_string(
+                    loaded
+                        .holocronCountForTesting()) +
+                (err.empty()
+                     ? ""
+                     : " error=" + err));
+    }
+
+    {
+        SkirmishSettings settings;
+        settings.seed = 0x41494348u;
+        settings.mapSize = 96;
+        settings.playerCivilization = 7;
+        settings.computerCivilization = 5;
+        settings.victory =
+            SkirmishVictory::Standard;
+        Game game(assets);
+        const bool initialized =
+            game.initSkirmish(
+                settings, &err);
+        const auto enemyBase =
+            game.playerBasePositionForTesting(
+                2);
+        const auto localBase =
+            game.playerBasePositionForTesting(
+                1);
+        const uint32_t carrier =
+            game.spawnConverterForTesting(
+                2, enemyBase[0],
+                enemyBase[1]);
+        const uint32_t hiddenRelic =
+            game.spawnHolocronForTesting(
+                localBase[0],
+                localBase[1]);
+        step(game, 1.0f);
+        const bool hiddenSafe =
+            game.carriedHolocronForTesting(
+                carrier) == 0;
+        game.moveObjectForTesting(
+            carrier, localBase[0] + 0.2f,
+            localBase[1]);
+        game.stopUnitForTesting(carrier);
+        step(game, 1.0f);
+        const bool acquiredWhenVisible =
+            game.carriedHolocronForTesting(
+                carrier) == hiddenRelic;
+        report(
+            "ai-holocron-knowledge",
+            initialized && carrier &&
+                hiddenRelic && hiddenSafe &&
+                acquiredWhenVisible,
+            "hidden-safe/acquired=" +
+                std::to_string(hiddenSafe) +
+                "/" +
+                std::to_string(
+                    acquiredWhenVisible));
+    }
+
+    {
+        SkirmishSettings land;
+        land.seed = 0x484F4C4Fu;
+        land.mapSize = 96;
+        land.playerCivilization = 7;
+        land.computerCivilization = 5;
+        land.mapStyle =
+            SkirmishMapStyle::Grasslands;
+        land.victory =
+            SkirmishVictory::Standard;
+        Game landGame(assets);
+        const bool landInitialized =
+            landGame.initSkirmish(
+                land, &err);
+        SkirmishSettings island = land;
+        island.mapStyle =
+            SkirmishMapStyle::Archipelago;
+        Game islandGame(assets);
+        const bool islandInitialized =
+            islandGame.initSkirmish(
+                island, &err);
+        report(
+            "generated-victory-prerequisites",
+            landInitialized &&
+                islandInitialized &&
+                landGame
+                        .holocronCountForTesting() ==
+                    5 &&
+                islandGame
+                        .holocronCountForTesting() ==
+                    5 &&
+                landGame.invariantsForTesting() &&
+                islandGame.invariantsForTesting(),
+            "land/island-holocrons=" +
+                std::to_string(
+                    landGame
+                        .holocronCountForTesting()) +
+                "/" +
+                std::to_string(
+                    islandGame
+                        .holocronCountForTesting()));
+    }
+
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) return usage();
     const char *cmd = argv[1];
@@ -8539,6 +9337,9 @@ int main(int argc, char **argv) {
         return cmdTestInterface(argv[2]);
     if (!strcmp(cmd, "test-core-gameplay"))
         return cmdTestCoreGameplay(
+            argv[2]);
+    if (!strcmp(cmd, "test-major-mechanics"))
+        return cmdTestMajorMechanics(
             argv[2]);
     if (!strcmp(cmd, "mp3")) return cmdMp3(argv[2]);
     return usage();

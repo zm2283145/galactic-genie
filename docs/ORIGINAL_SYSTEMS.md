@@ -38,6 +38,195 @@ build and test on Vita.
 | Control groups | `groupnum.shp` string at `0x689920`, referenced at `0x42745d` | Verified and covered |
 | Pause/options/audio | Pause request path at `0x4359a9`; sound/music controls at `0x42701f`/`0x427247` | Verified and covered |
 | Save/load | `"Save Game Screen"` constructor at `0x5286f0` | Native generated-skirmish format covered |
+| Jedi/Sith conversion | DAT action 104; strings 4125/4925; resources 27/35/77/87/178/179/193 | Implemented and covered; exact original probability formula unresolved |
+| Holocrons | unit 285; action 132 pickup/action 136 Temple delivery; resource 191; `puprelic.wav` xref `0x5e66db` | Implemented and covered |
+| Victory selection | setup field `+0x218`, switch `0x57f069`, strings 4327/4321/4329/4330/4331 | Standard/Conquest/Time/Score implemented; Custom remains scenario-defined |
+| Stealth/detection | resources 56/58; detector trait bit 8; strings 43209/43210 | Implemented; original reveal persistence unresolved |
+| Aircraft-specific targeting | action-7 validator `0x5b9930`, class filter `0x41c530`, aircraft classes 43/48/59/62/63/64 | Verified and covered; no fuel mechanic evidenced |
+
+## Conversion, Holocrons, victory, stealth, and aircraft
+
+This milestone rechecked the GOG Clone Campaigns executable and DAT before
+changing behavior:
+
+- `battlegrounds_x1.exe`: 2,813,952-byte PE32/i386 image, preferred base
+  `0x400000`, entry `0x636601`, `.text` at `0x401000`, SHA-256
+  `30fac6f443391e1e3a8f29887f85f4c5061ca9e12397a4b50db1ffda0d633761`.
+- `genie_x1.dat`: SHA-256
+  `9d2917c6c67e9df7af656459486f8e102406ad4a7299e7d0a85daac75c9c4b7d`.
+- Addresses below are preferred-base virtual addresses. DAT task fields and
+  localized resource IDs are recorded directly rather than inferred from
+  genre conventions.
+
+### Jedi/Sith conversion
+
+Sith Apprentice 180 and Sith Master 115 are representative class-50,
+trait-32 Temple units. Both have action 104 with `workValue1=4` and
+`workValue2=10`; the Master uses `targetDiplomacy=2`, while the Apprentice
+uses 0. Localized string 4125 names Convert, 4925 supplies its help, and
+43027 states that conversion consumes full Force Power and must recharge.
+
+The technology/resource contract is:
+
+- Concentration 152 sets player resource 87 and permits most buildings and
+  heavy units.
+- Force Influence 156 sets resource 27 and permits other Jedi/Sith targets.
+- Stamina 153 adds 3 to resource 35; its text promises 50% faster recharge.
+- Faith in the Force 155 affects resources 77, 178, and 179; its text promises
+  50% greater resistance.
+- Meditation 500 sets resource 193 and describes group conversion exhausting
+  only one converter.
+
+The native implementation uses action-104 presence for converters, the DAT
+task work range and graphics/sounds, deterministic timed work, and the DAT
+recharge duration. Faith in the Force extends required work by 50%; Stamina's
+`+3` produces 1.5x recharge speed. Force Influence and Concentration gate the
+target categories described above. The command cancels on invalid visibility,
+diplomacy, target state, or a replacement order. Conversion is a temporary
+stealth break.
+
+Ownership transfer is centralized for conversion and scenario Change
+Ownership effects. It clears invalid combat/work/guard/follow/garrison orders,
+selection and local control-group entries; removes old AI group/transport
+assignments; updates annexes, secured Holocrons, color/diplomacy-derived
+behavior, dynamic population/accounting, shield/power/technology caches,
+occupancy, adjacency, and fog. Carried Holocrons drop. Occupants are ejected
+from a converted building/transport where a valid position exists, otherwise
+they transfer with the container rather than remaining a hostile hidden stale
+reference. Production queues stay with the converted completed building;
+foundations are explicitly ineligible.
+
+Unresolved evidence is not filled with a guessed random formula. The exact
+original success-probability/RNG function, complete immunity table, command
+icon frame, and conversion cursor frame remain unproven. `unconv.txt` in the
+local installation is Expanded Fronts data and is not treated as a complete
+Clone Campaigns immunity table. Hero-mode targets are conservatively immune
+until executable evidence establishes per-record behavior. Meditation's
+multi-converter charge-sharing rule is documented but not claimed because the
+native deterministic implementation does not use an original random roll.
+
+### Holocron lifecycle
+
+Holocron 285 is `OBJ-HOLOCRON`, class 28, language ID 5502, with 30 HP, LOS 7,
+and selection sound 542. Base Force-user headers contain action 132 targeting
+unit 285; the carried-state task uses action 136 targeting Temple 104. Temple
+104 is class 18 with 2,500 HP, LOS 5, zero ordinary garrison capacity, cost
+180 carbon/25 nova, and build time 60. Holocron delivery therefore has its own
+relationship and does not pretend to consume normal garrison capacity.
+
+Pickup/deposit strings are 3722/3922 and 3732/3932. Strings 3820 and 26357
+describe Temple immunity/Nova generation; 41106 says that dropping loses
+control. Player resource 191 is the authoritative per-Holocron Nova rate:
+45/minute normally and 60/minute for the Naboo and Republic civilization
+records. `puprelic.wav` is named at `0x69a09c`, referenced at `0x5e66db`, and
+is sound resource 50365.
+
+Generated native maps place five Gaia Holocrons at deterministic, separated,
+symmetrically paired normalized sites, searching outward for valid terrain.
+The count of five is corroborated by the local EF random-map scripts; it is an
+integration/count reference, not falsely presented as proof of every stock
+Clone Campaigns map distribution rule. Grasslands and Archipelago tests both
+require five valid instances.
+
+A Holocron is not disclosed until ordinary sight discovers it. Discovery
+persists in explored world/minimap presentation, but `FORCEEXPLORE` alone does
+not mark undiscovered Holocrons and native AI never targets one without
+current sight. Action-132 carriers pick up exactly one, receive a world marker
+and pickup sound, and deliver it to a friendly completed Temple. Death,
+conversion, invalid garrison/transport state, or loss of carrier eligibility
+drops it. Temple destruction ejects all secured Holocrons; Temple ownership
+changes transfer them. The authoritative carrier/Temple links and trickle
+timing survive save/load and reset without duplicating objects.
+
+### Victory conditions
+
+The setup victory field is at `+0x218`; the switch at `0x57f069` identifies:
+
+| Value | Original setup choice | Localized ID |
+|---:|---|---:|
+| 0 | Standard | 4327 |
+| 1 | Conquest | 4321 |
+| 2 | Time Limit | 4329 |
+| 3 | Score | 4330 |
+| 4 | Custom | 4331 |
+
+This corrects the earlier native assumption that the setup offered only
+Conquest plus a Command Center mode. Standard means the first military
+conquest, all-Holocron control, or completed Monument countdown. Score also
+permits military conquest. Monument Race and Defend Monument are separate
+game types, not aliases for victory-dropdown values. Native Command Center
+victory remains as an explicitly named compatibility/testing mode rather than
+being attributed to setup value 4.
+
+Monument 276 is class 18 with 3,000 HP, LOS 6, icon 9, cost 3,000 each of
+carbon/ore/nova, build time 4,000, and technology 23. `WON1.MP3`, `lost.mp3`,
+and `countdown.mp3` are the evidenced outcome/countdown streams.
+
+Native Standard control countdowns reset immediately on Monument destruction,
+ownership loss, Holocron theft/drop, or team-state change. Mutual allies with
+allied-victory enabled combine secured Holocrons and share the result.
+Time-limit and score outcomes use authoritative object/resource/research
+scores; simultaneous ties resolve to the lowest player number. Objective UI
+shows the live control countdown, remaining time, or score threshold. Outcome
+continues through the existing original win/loss streams and post-match panel.
+Victory runtime is save-versioned.
+
+The exact stock Standard countdown duration and complete executable score
+weighting formula remain unresolved. The native compatibility defaults are
+therefore explicitly 600 seconds, 3,600 seconds, and 4,000 score; tests inject
+short thresholds rather than claiming those defaults are executable-proven.
+Custom remains scenario/trigger-defined and is not exposed as a falsely
+working skirmish option.
+
+### Stealth and detection
+
+Perception technology 158 sets resource 58; its language text says Masters
+detect stealth/submerged units. Mind Trick 159 sets resource 56; its text
+grants Master stealth, and the Clone Campaigns overlay also grants Jedi
+Starfighter stealth. Stealth drops while attacking or converting. Trait bit 8
+identifies inherent detectors in the audited records: Sensor Buoy 1576 has the
+bit and LOS 9, and localized descriptions identify Sentry Posts and Dark
+Troopers as detectors. Interface strings 43209/43210 name the stealth and
+detector status indicators.
+
+Detection uses an active detector's researched DAT LOS, shares with allies,
+and does not persist after leaving range. Undetected enemies are filtered
+before world/minimap rendering, selection, contextual commands, automatic
+acquisition/retaliation, conversion, projectiles/remains ownership queries,
+alerts, and AI target searches. Garrisoned detectors do not reveal.
+`FORCESIGHT` is the documented local-player bypass; `FORCEEXPLORE` is not.
+
+Exact original reveal persistence and any detector radius independent of LOS
+remain unresolved, so the native contract deliberately uses no persistence
+and detector LOS rather than inventing a genre-standard value.
+
+### Aircraft-specific audit
+
+Attack validation at `0x5b9930` delegates action 7 to the class filter at
+`0x41c530`. Target classes 43, 48, 59, 62, 63, and 64 are explicitly aircraft.
+Representative records are Bomber 762 (class 43, fly mode 1, restriction 23),
+Fighter 773 (class 48), Air Transport 1036 (class 59, action 12, zero ordinary
+garrison capacity), and Jedi Starfighters 641/638 (class 64). Technology 73,
+Shield Modifications, uses player resource 38 and is restricted to the
+evidenced fighter/bomber classes.
+
+The bounded audit confirmed that the existing shared systems already cover
+flight terrain/ground-occupancy bypass, air/ground target compatibility,
+DAT projectile/selection/render behavior, class-specific aircraft shields and
+drain/regeneration, formations, transport boarding/ejection, mechanical
+repair eligibility, patrol/guard/follow, death/remains, fog/detection,
+minimap, AI production/use, and save/load. The milestone retains those paths
+and adds stealth for the evidenced Jedi Starfighter class. No SWGB executable,
+DAT task, language, sound, scenario, or RMS evidence for fuel was found, so no
+fuel or docking assumption was added.
+
+The closely related audit also connected original AI facts
+`hold-holocrons` (`0x6934b0`, xref `0x5811a7`) and
+`enemy-captured-holocrons` (`0x69399c`, xref `0x580abb`) to authoritative
+carried/secured state. The Jedi Temple AI table is at `0x5ff648`; the Monument
+table is at `0x5ff6ac`. Larger unrelated gaps remain the general campaign AI
+fact/action surface, full trigger catalog, and exact score/probability
+formulas; these were not expanded without evidence.
 
 ## Minimap, controls, pause, audio, and saves
 
@@ -122,7 +311,12 @@ Save contract:
   resources/research/diplomacy/active state, fog, objects and stable IDs, HP and
   shields, production/construction, paths and orders, garrisons, projectiles,
   remains, AI goals/timers/escrow/groups/rule cursor, conquest state, camera,
-  selection, formations, and control groups.
+  selection, formations, control groups, conversion work/recharge, Holocron
+  carrier/Temple relationships, and victory countdown state.
+- Version 2 accepts version-1 generated-skirmish files through an explicit
+  Conquest/Command Center enum migration and safe defaults for the new fields.
+  Unknown versions and inconsistent stable-ID relationships fail with a clear
+  error before replacing the running match.
 - The original AI personality is loaded from disk before mutable AI state is
   applied. A different personality/rule count is rejected rather than partly
   loaded.
@@ -195,9 +389,11 @@ Generated-map contract:
 - Both players receive equal food, carbon, ore, and nova patches. Host
   validation checks that ordinary workers have a route to every resource
   class and that both island starts have a valid Shipyard footprint.
-- Command Center victory uses the selected condition directly; Conquest keeps
-  the existing last-hostile-assets contract. Unimplemented original victory
-  modes are not presented as working choices.
+- Command Center victory uses the selected compatibility condition directly;
+  Conquest keeps the existing last-hostile-assets contract. Standard combines
+  Conquest, Monument, and Holocron control; Time Limit and Score are separate
+  working choices. Original Custom remains trigger/scenario-defined and is
+  not presented as a working generated-skirmish alias.
 
 ## Compact island match
 
@@ -257,12 +453,12 @@ is retained for scenario/mod DAT compatibility.
 Player resource commands are not interchangeable with unit attributes. Known
 gameplay consumers include current stocks 0-3, population headroom 4,
 technology/attack eligibility such as Walker Research attribute 31, and
-aircraft shields attribute 38. Other parsed resource IDs include scenario
-counters, AI/internal state, and one-off mechanics; they remain unsupported
-until a DAT reference and executable behavior establish a safe semantic.
-Likewise, conversion resistance/range/recharge and generalized resource
-trickles are not claimed by this milestone. Unknown commands remain parsed and
-available for inspection rather than being blanket-applied as multipliers.
+aircraft shields attribute 38. Conversion consumes the evidenced resources
+27, 35, 77, 87, 178, and 179; Holocron Nova generation consumes resource 191.
+Other parsed resource IDs include scenario counters, AI/internal state, and
+one-off mechanics; they remain unsupported until a DAT reference and
+executable behavior establish a safe semantic. Unknown commands remain parsed
+and available for inspection rather than being blanket-applied as multipliers.
 
 ## AI scripts
 
@@ -635,8 +831,9 @@ attribute 11. The saved deterministic simulation RNG selects hit or miss.
 A miss receives a fixed point outside the target footprint, scaled by
 dispersion and range, and travels to that point; it does not silently damage
 the original target. Non-smart projectiles also snapshot a fixed aim point.
-The fixed point and RNG state already belong to save version 1, so active
-misses continue identically across save/load without a format migration.
+The fixed point and RNG state originated in save version 1 and remain
+unchanged in version 2, so active misses continue identically across
+save/load.
 
 Direct-fire attacks retain their immediate damage path. Projectile attacks
 retain frame delay, spawn offsets, arc/velocity, secondary projectiles,
@@ -812,4 +1009,4 @@ Engine contract:
   water resources. Idle AI task-capable water gatherers select only visible,
   reachable resource-17 targets. Gather state, carried food, exhaustion and
   nearby retargeting use the normal deterministic work state and persist in
-  save version 1.
+  save version 2; version-1 files migrate explicitly.

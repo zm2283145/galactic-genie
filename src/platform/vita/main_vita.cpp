@@ -231,7 +231,10 @@ int main() {
                     std::to_string(settings.populationCap),
             };
             if (settings.victory ==
-                swgb::SkirmishVictory::Conquest)
+                swgb::SkirmishVictory::Standard)
+                defines.insert("VICTORY-STANDARD");
+            else if (settings.victory ==
+                     swgb::SkirmishVictory::Conquest)
                 defines.insert("VICTORY-CONQUEST");
             if (settings.mapStyle ==
                     swgb::SkirmishMapStyle::Archipelago ||
