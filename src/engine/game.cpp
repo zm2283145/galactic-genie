@@ -429,6 +429,14 @@ bool Game::initCompactTestMap(
     std::string *err) {
     if (!init(seed, mapSize, err))
         return false;
+    for (int player = 1;
+         player <= 2; ++player)
+        for (int resourceType = 0;
+             resourceType < 4;
+             ++resourceType)
+            resources_[(size_t)player]
+                      [resourceType] =
+                3000.0f;
     // Computer Expanded's opening gather table expects no Troop Center until
     // its two processing centers have been established.
     const dat::Unit *aiTroopCenter =

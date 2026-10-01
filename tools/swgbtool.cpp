@@ -5683,8 +5683,27 @@ static int cmdTestAi(
             2, 83);
     Game openingGame(assets);
     if (!openingGame.initCompactTestMap(
-            0x5A17u, 64, &err) ||
-        !openingGame.loadAiScript(
+            0x5A17u, 64, &err)) {
+        fprintf(
+            stderr, "error: %s\n",
+            err.c_str());
+        return 1;
+    }
+    bool startingResources = true;
+    for (int player = 1;
+         player <= 2; ++player)
+        for (int resourceType = 0;
+             resourceType < 4;
+             ++resourceType)
+            startingResources =
+                startingResources &&
+                std::abs(
+                    openingGame.resource(
+                        player,
+                        resourceType) -
+                    3000.0f) <
+                    0.001f;
+    if (!openingGame.loadAiScript(
             2, entry,
             {"DIFFICULTY-MODERATE"},
             &err)) {
@@ -5701,18 +5720,31 @@ static int cmdTestAi(
         openingGame.aiStrategicNumberForTesting(
             2,
             "sn-carbon-gatherer-percentage");
+    const int openingGatherPercentage =
+        openingCarbonPercentage +
+        openingGame.aiStrategicNumberForTesting(
+            2,
+            "sn-food-gatherer-percentage") +
+        openingGame.aiStrategicNumberForTesting(
+            2,
+            "sn-metal-gatherer-percentage") +
+        openingGame.aiStrategicNumberForTesting(
+            2,
+            "sn-nova-gatherer-percentage");
     const size_t openingCarbonGatherers =
         openingGame.aiGathererCountForTesting(
             2, 1);
     const bool originalOpening =
-        openingCarbonPercentage == 100 &&
+        openingGatherPercentage == 100 &&
         openingCarbonGatherers > 0;
     printf(
         "AI parser files/constants/rules "
         "%zu/%zu/%zu, init %d, gather %d, "
         "carbon/food buildings %d/%d, "
-        "queued workers %zu, original opening %d "
-        "(%d%% carbon, %zu workers)\n",
+        "queued workers %zu, resources %d, "
+        "original opening %d "
+        "(%d%% assigned, %d%% carbon, "
+        "%zu workers)\n",
         original.files.size(),
         original.constants.size(),
         original.rules.size(),
@@ -5721,7 +5753,9 @@ static int cmdTestAi(
         carbonBuildings,
         foodBuildings,
         queuedWorkers,
+        startingResources ? 1 : 0,
         originalOpening ? 1 : 0,
+        openingGatherPercentage,
         openingCarbonPercentage,
         openingCarbonGatherers);
     if (!originalParsed ||
@@ -5729,6 +5763,7 @@ static int cmdTestAi(
         carbonBuildings != 1 ||
         foodBuildings != 1 ||
         queuedWorkers != 1 ||
+        !startingResources ||
         !originalOpening) {
         fprintf(
             stderr,

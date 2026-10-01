@@ -62,7 +62,8 @@ Engine contract:
 - The compact opponent starts in the personality's original opening state
   without a prebuilt Troop Center. Five nodes of each resource are guaranteed
   beside its base, so its opening 100%-carbon rule can assign every worker
-  without depending on random map generation.
+  without depending on random map generation. Both compact-map players begin
+  with 3,000 food, carbon, ore, and nova; scenario resources remain unchanged.
 - Unsupported facts block a rule and unsupported actions are reported once;
   neither is silently treated as success.
 - Vita loads player 2's `Computer Expanded.per` from
