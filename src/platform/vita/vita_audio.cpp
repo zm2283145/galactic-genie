@@ -239,6 +239,15 @@ void VitaAudio::playOiiaEffect() {
     log("playing original oiia effect");
 }
 
+void VitaAudio::resetSession() {
+    if (!running_) return;
+    sceKernelLockMutex(mutex_, 1, nullptr);
+    queue_.clear();
+    pendingEffects_.clear();
+    ++resetGeneration_;
+    sceKernelUnlockMutex(mutex_, 1);
+}
+
 int VitaAudio::threadEntry(SceSize args, void *argp) {
     if (args != sizeof(VitaAudio *) || !argp) return -1;
     VitaAudio *self = *static_cast<VitaAudio **>(argp);
@@ -258,6 +267,8 @@ int VitaAudio::run() {
     bool musicAvailable = true;
     size_t nextMusicTrack = 0;
     size_t frame = 0;
+    uint32_t resetGeneration =
+        resetGeneration_.load();
     size_t bufferIndex = 0;
     alignas(64) int16_t buffers[2][kBufferFrames * AudioClip::kChannels];
     alignas(64) int16_t musicBuffer[kBufferFrames * AudioClip::kChannels];
@@ -300,6 +311,14 @@ int VitaAudio::run() {
 
     while (running_) {
         sceKernelLockMutex(mutex_, 1, nullptr);
+        const uint32_t requestedReset =
+            resetGeneration_.load();
+        if (requestedReset != resetGeneration) {
+            current.reset();
+            effects.clear();
+            frame = 0;
+            resetGeneration = requestedReset;
+        }
         while (!pendingEffects_.empty()) {
             if (effects.size() >= kMaxActiveEffects) effects.erase(effects.begin());
             PendingVoice voice =

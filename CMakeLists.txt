@@ -24,8 +24,11 @@ set(SWGB_CORE_SOURCES
     src/core/language_strings.cpp
     src/engine/assets.cpp
     src/engine/ai_script.cpp
+    src/engine/frontend.cpp
     src/engine/game.cpp
     src/engine/pathfinding.cpp
+    src/engine/skirmish.cpp
+    src/engine/ui_text.cpp
 )
 
 if(VITA)

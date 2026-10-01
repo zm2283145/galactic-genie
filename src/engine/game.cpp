@@ -335,8 +335,167 @@ inline void toScreen(float x, float y, float &sx, float &sy) {
 
 } // namespace
 
-bool Game::init(uint32_t seed, int mapSize, std::string *err) {
-    rng_.seed(seed);
+void Game::resetMatchState() {
+    players_ = {};
+    resources_ = {};
+    researchedTechs_ = {};
+    aiPlayers_ = {};
+    disabledTechs_ = {};
+    disabledUnits_ = {};
+    availableCache_ = {};
+    availableCacheGeneration_ = {};
+    upgradeCache_ = {};
+    upgradeCacheGeneration_ = {};
+    researchMenuCache_.clear();
+    triggers_.clear();
+    triggerOrder_.clear();
+    triggerRuntime_.clear();
+    instructions_.clear();
+    currentInstruction_.clear();
+    currentInstructionPlayer_ = -1;
+    mapSize_ = 0;
+    terrain_.clear();
+    for (auto &tiles : exploredTiles_)
+        tiles.clear();
+    for (auto &tiles : visibleTiles_)
+        tiles.clear();
+    visibilityTime_ = 0.0f;
+    cornerElevation_.clear();
+    tileElevation_.clear();
+    tileSlope_.clear();
+    objects_.clear();
+    objectIndices_.clear();
+    projectiles_.clear();
+    remains_.clear();
+    pendingCarcasses_.clear();
+    selectionOrder_.clear();
+    pathGridCache_.clear();
+    mobileObjectIndices_.clear();
+    mobileObjectCells_.clear();
+    combatObjectIndices_.clear();
+    combatObjectCells_.clear();
+    staticObstructionIndices_.clear();
+    staticObstructionCells_.clear();
+    shieldGeneratorIndices_.clear();
+    shieldGeneratorCacheSize_ = (size_t)-1;
+    civilizationGraphicCache_.clear();
+    moveGroupDestinations_.clear();
+    marchGroups_.clear();
+    nextSpawnId_ = 1;
+    nextMoveGroupId_ = 1;
+    localPlayer_ = 0;
+    victoryState_ = -1;
+    conquestEnabled_ = false;
+    conquestCheckTime_ = 0.0f;
+    warnedEffects_.clear();
+    warnedConditions_.clear();
+    actionMenuOpen_ = false;
+    actionMenuObjectId_ = 0;
+    actionMenuTab_ = ActionMenuTab::Units;
+    actionMenuSelection_ = 0;
+    actionMenuScroll_ = 0;
+    placementUnit_ = nullptr;
+    placementBuilderId_ = 0;
+    placementFailureCode_ = 0;
+    placementJustBegun_ = false;
+    placementIgnore_ = nullptr;
+    gatherPointBuildingId_ = 0;
+    gatherPointJustBegun_ = false;
+    wallDragActive_ = false;
+    cheatMenuOpen_ = false;
+    cheatMenuSelection_ = 0;
+    forceBuildCheat_ = false;
+    fullTechTreeCheat_ = false;
+    forceExploreCheat_ = false;
+    forceSightCheat_ = false;
+    enemyIntelligenceCheat_ = false;
+    garrisonCursorActive_ = false;
+    repairCursorActive_ = false;
+    attackGroundCursorActive_ = false;
+    attackGroundJustBegun_ = false;
+    unitCommandCursorActive_ = false;
+    unitCommandJustBegun_ = false;
+    pendingUnitCommand_ = UnitCommand::Stop;
+    cursorVisible_ = false;
+    cursorMode_ = CursorMode::Normal;
+    boxSelectActive_ = false;
+    selectedFormation_ = FormationType::Line;
+    commandMarkerTime_ = 0.0f;
+    commandTargetId_ = 0;
+    commandTargetTime_ = 0.0f;
+    selectionClickAge_ = 1000.0f;
+    lastSelectionUnitId_ = -1;
+    lastSelectionX_ = lastSelectionY_ = 0.0f;
+    reseedQueue_ = {};
+    ambienceTime_ = 2.0f;
+    ambienceSequence_ = 0;
+    statusMessage_.clear();
+    attackAlertMessage_.clear();
+    statusTime_ = 0.0f;
+    instructionTime_ = 0.0f;
+    attackAlertCooldown_ = 0.0f;
+    animClock_ = 0.0f;
+    camX_ = camY_ = 0.0f;
+    zoom_ = 1.0f;
+    cursorX_ = cursorY_ = 0.0f;
+    attackOrdersIssued_ = attacksLanded_ =
+        unitsKilled_ = 0;
+    projectilesLaunched_ = attackPathsComputed_ =
+        attackApproachRetries_ = 0;
+    automaticTargetsAcquired_ = retaliationOrders_ =
+        armedBuildingsEngaged_ = attackModeChanges_ = 0;
+    stats_ = {};
+}
+
+void Game::clearMatch() {
+    resetMatchState();
+}
+
+bool Game::init(
+    uint32_t seed, int mapSize, std::string *err) {
+    SkirmishSettings settings;
+    settings.seed = seed;
+    settings.mapSize = mapSize;
+    settings.startingResources = 0;
+    settings.mapStyle =
+        SkirmishMapStyle::LegacyRandom;
+    return initGenerated(settings, false, err);
+}
+
+bool Game::initSkirmish(
+    const SkirmishSettings &settings,
+    std::string *err) {
+    if (settings.mapSize < 48 ||
+        settings.mapSize > 192) {
+        if (err)
+            *err = "skirmish map size must be between 48 and 192";
+        return false;
+    }
+    if (settings.playerCivilization < 1 ||
+        settings.playerCivilization > 8 ||
+        settings.computerCivilization < 1 ||
+        settings.computerCivilization > 8) {
+        if (err)
+            *err = "skirmish civilization must be between 1 and 8";
+        return false;
+    }
+    if (settings.populationCap < 25 ||
+        settings.populationCap > 250 ||
+        settings.startingResources < 0) {
+        if (err)
+            *err = "invalid skirmish economy settings";
+        return false;
+    }
+    return initGenerated(settings, true, err);
+}
+
+bool Game::initGenerated(
+    const SkirmishSettings &settings,
+    bool addStartingResources,
+    std::string *err) {
+    resetMatchState();
+    rng_.seed(settings.seed);
+    const int mapSize = settings.mapSize;
     players_ = {};
     resources_ = {};
     researchedTechs_ = {};
@@ -395,27 +554,56 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     victoryState_ = -1;
     conquestEnabled_ = true;
     conquestCheckTime_ = 3.0f;
+    difficulty_ = std::max(
+        0, std::min(4, settings.difficulty));
+    victoryCondition_ = settings.victory;
     warnedEffects_.clear();
     warnedConditions_.clear();
     for (size_t i = 0; i < players_.size(); i++) players_[i].color = (uint32_t)i;
     players_[0].active = true;
     players_[0].human = true;
-    players_[0].civilization = 1;
-    players_[0].populationLimit = 200;
-    players_[0].diplomacy[2] = 3;
+    players_[0].civilization =
+        (uint32_t)settings.playerCivilization;
+    players_[0].populationLimit =
+        (float)settings.populationCap;
+    players_[0].alliedVictory = settings.allied;
+    players_[0].diplomacy[2] =
+        settings.allied ? 0u : 3u;
     players_[1].active = true;
-    players_[1].civilization = 3;
-    players_[1].populationLimit = 200;
-    players_[1].diplomacy[1] = 3;
+    players_[1].civilization =
+        (uint32_t)settings.computerCivilization;
+    players_[1].populationLimit =
+        (float)settings.populationCap;
+    players_[1].alliedVictory = settings.allied;
+    players_[1].diplomacy[1] =
+        settings.allied ? 0u : 3u;
     localPlayer_ = 1;
     mapSize_ = mapSize;
-    generateTerrain(mapSize);
+    generateTerrain(mapSize, settings.mapStyle);
     resetVisibility();
 
-    // Two bases: the player is the Galactic Empire (civ 1), the enemy the
-    // Rebel Alliance (civ 3).
-    spawnBase(1, 1, 'E', mapSize * 0.30f, mapSize * 0.35f);
-    spawnBase(2, 3, 'R', mapSize * 0.62f, mapSize * 0.60f);
+    const float playerX =
+        settings.mapStyle ==
+                SkirmishMapStyle::Archipelago
+            ? mapSize * 0.26f
+            : mapSize * 0.30f;
+    const float playerY = mapSize * 0.35f;
+    const float computerX =
+        settings.mapStyle ==
+                SkirmishMapStyle::Archipelago
+            ? mapSize * 0.66f
+            : mapSize * 0.62f;
+    const float computerY = mapSize * 0.60f;
+    spawnBase(
+        1, settings.playerCivilization,
+        factionAbbreviation(
+            settings.playerCivilization),
+        playerX, playerY);
+    spawnBase(
+        2, settings.computerCivilization,
+        factionAbbreviation(
+            settings.computerCivilization),
+        computerX, computerY);
     // Keep the generated sandbox quiet until its opposing bases are engaged.
     for (Object &object : objects_)
         if (canAttack(object))
@@ -429,6 +617,26 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
         if (!(i % 2)) continue; // (there is no ANIMAL-BANTHA; keep the layout)
         spawn(0, "ANIMAL-CAPTUREA1", 0, x, y, 0);
     }
+    if (addStartingResources) {
+        for (int player = 1; player <= 2; ++player)
+            for (int resourceType = 0;
+                 resourceType < 4; ++resourceType)
+                resources_[(size_t)player]
+                          [resourceType] =
+                    (float)settings.startingResources;
+        spawnStartingResources(
+            1, playerX, playerY,
+            settings.mapStyle ==
+                    SkirmishMapStyle::Archipelago
+                ? 1.0f
+                : -1.0f);
+        spawnStartingResources(
+            2, computerX, computerY,
+            settings.mapStyle ==
+                    SkirmishMapStyle::Archipelago
+                ? -1.0f
+                : 1.0f);
+    }
     if (objects_.empty()) {
         if (err) *err = "no units could be spawned (dat/graphics mismatch?)";
         return false;
@@ -437,7 +645,7 @@ bool Game::init(uint32_t seed, int mapSize, std::string *err) {
     initializeCivilizationRestrictions();
     refreshAllAutomaticTechnologies();
     updateVisibility();
-    lookAt(mapSize * 0.30f + 2, mapSize * 0.35f + 2);
+    lookAt(playerX + 2, playerY + 2);
     return true;
 }
 
@@ -677,6 +885,7 @@ bool Game::initScenario(const Scenario &scenario, std::string *err) {
         }
     }
 
+    resetMatchState();
     rng_.seed(1);
     players_ = scenario.players;
     resources_ = {};
@@ -1058,7 +1267,8 @@ size_t Game::aiGathererCountForTesting(
     return count;
 }
 
-void Game::generateTerrain(int size) {
+void Game::generateTerrain(
+    int size, SkirmishMapStyle style) {
     terrain_.assign((size_t)size * size, T_GRASS1);
     cornerElevation_.assign((size_t)(size + 1) * (size + 1), 0);
     uint32_t seed = rng_();
@@ -1066,19 +1276,87 @@ void Game::generateTerrain(int size) {
         for (int x = 0; x < size; x++) {
             float h = fbm(x / 9.0f, y / 9.0f, seed);
             float m = fbm(x / 6.0f + 100, y / 6.0f, seed + 99);
-            uint8_t t;
-            if (h < 0.28f) t = h < 0.22f ? T_WATER2 : T_WATER1;
-            else if (h < 0.31f) t = T_SAND;
-            else if (m > 0.66f) t = T_DIRT1;
-            else if (m > 0.58f) t = T_DIRT2;
-            else if (m < 0.30f) t = T_GRASS2;
-            else t = T_GRASS1;
+            uint8_t t =
+                m > 0.68f
+                    ? T_DIRT1
+                : m > 0.60f
+                    ? T_DIRT2
+                : m < 0.30f
+                    ? T_GRASS2
+                    : T_GRASS1;
+            if (style ==
+                SkirmishMapStyle::LegacyRandom) {
+                if (h < 0.28f)
+                    t = h < 0.22f
+                            ? T_WATER2
+                            : T_WATER1;
+                else if (h < 0.31f)
+                    t = T_SAND;
+                else if (m > 0.66f)
+                    t = T_DIRT1;
+                else if (m > 0.58f)
+                    t = T_DIRT2;
+                else if (m < 0.30f)
+                    t = T_GRASS2;
+                else
+                    t = T_GRASS1;
+            } else if (style ==
+                SkirmishMapStyle::Archipelago) {
+                const float px = size * 0.26f;
+                const float py = size * 0.42f;
+                const float cx = size * 0.66f;
+                const float cy = size * 0.58f;
+                const float radiusX =
+                    size * 0.18f;
+                const float radiusY =
+                    size * 0.36f;
+                const float playerDistance =
+                    std::sqrt(
+                        ((x - px) / radiusX) *
+                            ((x - px) / radiusX) +
+                        ((y - py) / radiusY) *
+                            ((y - py) / radiusY));
+                const float computerDistance =
+                    std::sqrt(
+                        ((x - cx) / radiusX) *
+                            ((x - cx) / radiusX) +
+                        ((y - cy) / radiusY) *
+                            ((y - cy) / radiusY));
+                const float distance =
+                    std::min(
+                        playerDistance,
+                        computerDistance) +
+                    (h - 0.5f) * 0.08f;
+                if (distance > 1.12f)
+                    t = T_WATER2;
+                else if (distance > 1.03f)
+                    t = T_WATER1;
+                else if (distance > 0.94f)
+                    t = T_SHORE;
+            }
             terrain_[(size_t)y * size + x] = t;
         }
     }
+    if (style ==
+        SkirmishMapStyle::CompactIslands) {
+        const int shoreLeft = size / 2 - 6;
+        const int deepLeft = size / 2 - 1;
+        const int deepRight = size / 2;
+        const int shoreRight = size / 2 + 5;
+        for (int y = 0; y < size; ++y)
+            for (int x = shoreLeft;
+                 x <= shoreRight; ++x)
+                terrain_[(size_t)y * size + x] =
+                    x == shoreLeft ||
+                            x == shoreRight
+                        ? T_SHORE
+                    : x == deepLeft ||
+                            x == deepRight
+                        ? T_WATER2
+                        : T_WATER1;
+    }
 
-    // A deterministic two-level hill exercises every elevation-aware path in
-    // the prototype while leaving the generated terrain and base layout intact.
+    // Keep elevation deterministic while leaving island shorelines flat.
     const float hillX = size * 0.30f - 7.0f;
     const float hillY = size * 0.35f - 7.0f;
     for (int y = 0; y <= size; y++) {
@@ -1086,10 +1364,188 @@ void Game::generateTerrain(int size) {
             const float dx = x - hillX, dy = y - hillY;
             const float distance = std::sqrt(dx * dx + dy * dy);
             cornerElevation_[(size_t)y * (size + 1) + x] =
-                distance < 3.25f ? 2 : distance < 5.75f ? 1 : 0;
+                style ==
+                        SkirmishMapStyle::Archipelago
+                    ? 0
+                    : distance < 3.25f
+                          ? 2
+                      : distance < 5.75f
+                          ? 1
+                          : 0;
         }
     }
     buildTileElevation();
+}
+
+void Game::spawnStartingResources(
+    int player, float baseX, float baseY,
+    float inlandDirection) {
+    struct ResourcePatch {
+        const char *unit;
+        int resourceType;
+        int count;
+        int columns;
+        float offsetX;
+        float offsetY;
+        float amount;
+    };
+    static constexpr ResourcePatch patches[] = {
+        {"OBJ-VEGETABLE", 0, 12, 4,
+         -10.0f, 12.0f, 750.0f},
+        {"OBJ-BULLION", 3, 8, 4,
+         10.0f, 17.0f, 1000.0f},
+        {"OBJ-MINERAL", 2, 8, 4,
+         2.0f, 18.0f, 1000.0f},
+        {"OBJ-TIMBERA", 1, 24, 6,
+         8.0f, 13.0f, 750.0f},
+    };
+    for (const ResourcePatch &patch : patches) {
+        const int rows =
+            (patch.count + patch.columns - 1) /
+            patch.columns;
+        for (int index = 0;
+             index < patch.count; ++index) {
+            float x =
+                baseX +
+                inlandDirection * patch.offsetX +
+                (index % patch.columns -
+                 (patch.columns - 1) * 0.5f) *
+                    1.15f;
+            float y =
+                baseY + patch.offsetY +
+                (index / patch.columns -
+                 (rows - 1) * 0.5f) *
+                    1.15f;
+            x = std::max(
+                2.0f,
+                std::min((float)mapSize_ - 2.0f, x));
+            y = std::max(
+                2.0f,
+                std::min((float)mapSize_ - 2.0f, y));
+            const int tx = (int)std::floor(x);
+            const int ty = (int)std::floor(y);
+            if (terrainAt(tx, ty) == T_WATER1 ||
+                terrainAt(tx, ty) == T_WATER2 ||
+                terrainAt(tx, ty) == T_WATER3 ||
+                terrainAt(tx, ty) == T_SHORE) {
+                terrain_[(size_t)ty * mapSize_ + tx] =
+                    T_GRASS1;
+            }
+            if (Object *resource =
+                    spawn(
+                        0, patch.unit, 0,
+                        x, y, 0.0f)) {
+                resource->resourceType =
+                    patch.resourceType;
+                resource->resourceAmount =
+                    std::max(
+                        resource->resourceAmount,
+                        patch.amount);
+            }
+        }
+    }
+}
+
+uint64_t Game::mapHashForTesting() const {
+    uint64_t hash = 1469598103934665603ull;
+    auto add = [&](uint8_t value) {
+        hash ^= value;
+        hash *= 1099511628211ull;
+    };
+    for (uint8_t terrain : terrain_)
+        add(terrain);
+    for (uint8_t elevation : cornerElevation_)
+        add(elevation);
+    return hash;
+}
+
+std::array<float, 2>
+Game::playerBasePositionForTesting(int player) const {
+    for (const Object &object : objects_)
+        if (object.active &&
+            object.player == player &&
+            object.unit &&
+            (object.unit->name.rfind(
+                 "BLDG-MAIN", 0) == 0 ||
+             object.unit->name2.rfind(
+                 "BLDG-MAIN", 0) == 0))
+            return {object.x, object.y};
+    return {-1.0f, -1.0f};
+}
+
+int Game::reachableStartingResourceCountForTesting(
+    int player, int resourceType) const {
+    const auto base =
+        playerBasePositionForTesting(player);
+    int count = 0;
+    for (const Object &resource : objects_) {
+        if (!resource.active ||
+            !isGatherable(resource) ||
+            resource.resourceType != resourceType)
+            continue;
+        const float dx = resource.x - base[0];
+        const float dy = resource.y - base[1];
+        if (dx * dx + dy * dy > 35.0f * 35.0f)
+            continue;
+        const bool reachable =
+            std::any_of(
+                objects_.begin(), objects_.end(),
+                [&](const Object &worker) {
+                    return worker.active &&
+                           worker.player == player &&
+                           isWorker(worker) &&
+                           canReachObject(
+                               worker, resource, 0.1f);
+                });
+        if (reachable) ++count;
+    }
+    return count;
+}
+
+bool Game::shorelineShipyardSiteForTesting(
+    int player) {
+    const int civilization =
+        civilizationForPlayer(player);
+    if (civilization < 0 ||
+        (size_t)civilization >=
+            assets_.dat().civs.size())
+        return false;
+    const dat::Unit *shipyard = nullptr;
+    for (const dat::Unit &unit :
+         assets_.dat().civs[(size_t)civilization]
+             .units)
+        if (unit.exists &&
+            unit.type == dat::UT_Building &&
+            ((unit.placementTerrain[0] == 1 ||
+              unit.placementTerrain[1] == 1 ||
+              unit.placementTerrain[0] == 4 ||
+              unit.placementTerrain[1] == 4) &&
+             (unit.placementSideTerrain[0] == 2 ||
+              unit.placementSideTerrain[1] == 2 ||
+              unit.placementSideTerrain[0] == 35 ||
+              unit.placementSideTerrain[1] == 35))) {
+            shipyard = &unit;
+            break;
+        }
+    if (!shipyard) return false;
+    const auto base =
+        playerBasePositionForTesting(player);
+    for (int y = 2; y < mapSize_ - 2; ++y)
+        for (int x = 2; x < mapSize_ - 2; ++x) {
+            const float dx = x + 0.5f - base[0];
+            const float dy = y + 0.5f - base[1];
+            if (dx * dx + dy * dy >
+                42.0f * 42.0f)
+                continue;
+            float px = x + 0.5f;
+            float py = y + 0.5f;
+            snapBuildingPosition(
+                *shipyard, px, py);
+            if (placementValid(
+                    *shipyard, px, py))
+                return true;
+        }
+    return false;
 }
 
 void Game::buildTileElevation() {
@@ -8355,16 +8811,22 @@ void Game::updateConquest(float dt) {
                 objects_.begin(),
                 objects_.end(),
                 [&](const Object &object) {
-                    return object.active &&
-                           object.player ==
-                               player &&
-                           object.unit &&
-                           object.annexParentId ==
-                               0 &&
-                           object.carcassClass <
-                               0 &&
-                           object.unit->type >=
-                               dat::UT_Combatant;
+                    if (!object.active ||
+                        object.player != player ||
+                        !object.unit ||
+                        object.annexParentId != 0 ||
+                        object.carcassClass >= 0)
+                        return false;
+                    if (victoryCondition_ ==
+                        SkirmishVictory::CommandCenter)
+                        return object.unit->name.rfind(
+                                   "BLDG-MAIN", 0) ==
+                                   0 ||
+                               object.unit->name2.rfind(
+                                   "BLDG-MAIN", 0) ==
+                                   0;
+                    return object.unit->type >=
+                           dat::UT_Combatant;
                 });
         if (!hasAssets)
             eliminatePlayer(

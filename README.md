@@ -4,7 +4,7 @@ A from-scratch, portable reimplementation of the Genie engine, as used by *Star 
 
 It is written clean-room style: file formats come from public documentation (openage, genieutils). Game behaviour is to be matched by observation, and by using Ghidra only to answer "how does X work" questions. Decompiled code is never copied into the tree.
 
-## Status: milestone 3 (simulation core, in progress)
+## Status: native skirmish vertical slice
 
 | Area | State |
 |---|---|
@@ -20,6 +20,8 @@ It is written clean-room style: file formats come from public documentation (ope
 | Units: idle/walk animation, 8-way facing with mirroring, graphic deltas for buildings | done |
 | Combat: contextual attack orders, pursuit, projectiles, DAT-driven range/reload/damage, health, building damage, and death | in progress |
 | Vita: renderer, camera controls, original cursors, unit selection/status markers, formation movement, and debug minimap | done |
+| Vita frontend: title/main menu, campaign entry, configurable skirmish lobby, loading, pause/restart/menu, and outcome flow | done |
+| Deterministic random maps: grasslands, archipelago, and compact two-island regression layout | done |
 | PC `swgbtool`: data inspection, CPX/SCX listing, and procedural/scenario PNG rendering | done |
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for what comes next.
@@ -54,17 +56,25 @@ cmake -B build-pc && cmake --build build-pc
 ## Installing on the Vita
 
 1. Copy these files from the game's `Game/Data` folder to `ux0:data/swgb/Data/`: `genie_x1.dat`, `graphics.drs`, `graphics_x1.drs`, `terrain.drs`, `terrain_x1.drs`, `interfac.drs`, `interfac_x1.drs`, `sounds.drs`, `sounds_x1.drs`, `blendomatic.dat`, `STemplet.dat`, `FilterMaps.dat`, `VIEW_ICM.DAT`, `lightMaps.dat`, and `PatternMasks.dat`. Also copy `Game/language.dll`, `language_x1.dll`, and `language_x2.dll` for localized interface names. `tools\deploy_vita.ps1 -GameData` copies the core data; `tools\deploy_vita.ps1 -UnitSoundData` copies the unit audio archives; `tools\deploy_vita.ps1 -LanguageData` copies the language strings.
-2. Copy `Game/Campaign/XCAM3.CPX` to `ux0:data/swgb/Campaign/xcam3.cpx`. `tools\deploy_vita.ps1 -CampaignData` does this over FTP. The current vertical slice loads its second mission, “Breaking Bread,” including its initial trees, resources, buildings, and units.
+2. Copy `Game/Campaign/XCAM3.CPX` to `ux0:data/swgb/Campaign/xcam3.cpx`. `tools\deploy_vita.ps1 -CampaignData` does this over FTP. The Clone Campaigns menu entry loads its second mission, “Breaking Bread,” including its initial trees, resources, buildings, and units.
 3. Copy the MP3 dialogue referenced by the mission from `Game/Sound/Scenario` to
    `ux0:data/swgb/Sound/Scenario/`. `tools\deploy_vita.ps1 -SoundData` extracts the names from
    campaign entry 2 and copies only those files.
 4. Copy `Game/MUSIC/Track02.ogg` and `Track03.ogg` to `ux0:data/swgb/Music/`, and the WAV files
    from `Game/Sound/Terrain` to `ux0:data/swgb/Sound/Terrain/`. The deployment script options
    `-MusicData` and `-TerrainSoundData` copy these soundtrack and ambience files.
-5. Install `swgb.vpk` with VitaShell. `tools\deploy_vita.ps1 -Vpk` uploads it to `ux0:data/swgb/`.
-6. The app writes a log to `ux0:data/swgb/swgb.log`. `tools\deploy_vita.ps1 -PullLog` fetches it.
+5. Copy the original `Game/AI` directory to `ux0:data/swgb/AI/`.
+   `tools\deploy_vita.ps1 -AiData` copies every `.per` file while preserving
+   personality subdirectories required by Computer Classic.
+6. Install `swgb.vpk` with VitaShell. `tools\deploy_vita.ps1 -Vpk` uploads it to `ux0:data/swgb/`.
+7. The app writes a log to `ux0:data/swgb/swgb.log`. `tools\deploy_vita.ps1 -PullLog` fetches it.
 
-Controls: left stick, d-pad, or a touch drag scrolls; L/R zoom. The right stick moves the
+Frontend controls: d-pad or left-stick up/down selects an entry, left/right changes a lobby
+value, X activates, and O returns. Touching an entry selects and activates it. START pauses an
+active match; the pause and outcome screens can restart with the exact same settings and seed or
+return to the main menu.
+
+Gameplay controls: left stick, d-pad, or a touch drag scrolls; L/R zoom. The right stick moves the
 command cursor, and holding it against a screen edge scrolls the camera. X selects a visible
 unit or building for inspection. With friendly units selected, O over a hostile unit issues an
 attack order; O over terrain issues a move order. A touch tap uses the same contextual selection
@@ -76,7 +86,7 @@ combat units through defensive, stand-ground, passive, and aggressive stances. T
 panel's garrison command enters original-cursor building targeting; Triangle on a selected
 production building opens its Units, Research, and Commands pages, where queued items can be
 cancelled, while a gate opens only its lock/unlock command. Selected buildings show power and
-shield-coverage state. SELECT toggles the minimap overlay and START quits.
+shield-coverage state. SELECT toggles the minimap overlay.
 
 Combat currently includes pursuit with collision-aware A* pathfinding, attack animations and
 acknowledgements, original projectile graphics and weapon sounds, DAT attack/armor classes,

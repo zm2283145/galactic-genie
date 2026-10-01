@@ -26,6 +26,7 @@ public:
     float playAmbient(const std::string &name);
     bool playEffect(int resourceId, const std::vector<uint8_t> &data);
     void playOiiaEffect();
+    void resetSession();
     void setLogger(std::function<void(const std::string &)> logger) { log_ = std::move(logger); }
 
 private:
@@ -43,6 +44,7 @@ private:
     std::string terrainSoundDir_;
     std::function<void(const std::string &)> log_;
     std::atomic<bool> running_{false};
+    std::atomic<uint32_t> resetGeneration_{0};
     SceUID thread_ = -1;
     SceUID mutex_ = -1;
     int port_ = -1;

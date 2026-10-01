@@ -157,9 +157,14 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   production/construction, victory/player defeat, and hidden DAT cheat technologies. It also includes
   the custom `OIIA OIIA` secret-unit entry: the OIIA Cat uses the contributed 94-frame cat animation,
   spins while attacking, and plays an original synthesized oiia-style vocal/chiptune cue.
+  The app now starts at a controller/touch title and main menu rather than a fixed development
+  match. Skirmish opens a complete setup lobby; the existing Breaking Bread vertical slice remains
+  available from the main menu, while unavailable Multiplayer and Options entries are visibly
+  disabled. START pauses an active match with resume, same-seed restart, and main-menu controls;
+  victory and defeat provide restart and main-menu controls without restarting the process.
   A Star Wars/Clone Campaigns visual redesign of the remaining temporary panel framing, tabs,
   typography, resource bar, queues, tooltips, and status areas remains. The replacement minimap
-  and its matching frame, pause/options menus, control groups, and skirmish setup also remain.
+  and its matching frame, options menu, and control groups also remain.
 - Audio: selection, move, and attack acknowledgements plus camera-relative weapon-fire, impact, and
   death effects are implemented. The original Ogg soundtrack streams from storage, ducks beneath
   scenario dialogue, and mixes with terrain-specific world ambience. Scenario speaker text uses
@@ -194,9 +199,15 @@ The goal is a playable SWGB: Clone Campaigns skirmish on the PS Vita, running on
   excluded from economy retasking while moving or sheltered, and eject after five safe seconds.
   All completed garrison-capable non-transport buildings evacuate and reject new occupants at or
   below 20 percent health, then unlock after repair above that threshold.
+- Generated matches now expose original Computer Expanded and Computer Classic personalities,
+  five difficulty defines, both civilizations, diplomacy/team state, deterministic seeds,
+  population and resource presets, and Conquest or Command Center victory. Grasslands,
+  Archipelago, and the compact two-island regression map are selectable. Starts have symmetric
+  DAT resource patches and island maps retain DAT-valid Shipyard shorelines. Repeated matches
+  reset simulation, AI, trigger, fog, queue, outcome, input, and audio state.
 - Generated matches now enforce conquest elimination, AI recognition of defeated players, and
   collapse/outmatched surrender. Local victory and defeat display full-screen outcome panels and
-  play the original `WON1.MP3` or `lost.mp3` stream. A skirmish setup screen remains.
+  play the original `WON1.MP3` or `lost.mp3` stream.
 
 ## Vita performance notes
 - The main memory cost is texture atlases. Terrain and sprite working sets are capped at 64 MB,

@@ -5,6 +5,7 @@
 #include "assets.h"
 #include "ai_script.h"
 #include "pathfinding.h"
+#include "skirmish.h"
 #include "../core/scenario.h"
 
 #include <array>
@@ -45,6 +46,7 @@ struct InputState {
     bool menuBack = false;
     bool actionTabLeft = false;
     bool actionTabRight = false;
+    bool pausePressed = false;
 };
 
 struct FrameStats {
@@ -100,6 +102,10 @@ public:
     explicit Game(Assets &assets) : assets_(assets) {}
 
     bool init(uint32_t seed, int mapSize, std::string *err);
+    bool initSkirmish(
+        const SkirmishSettings &settings,
+        std::string *err);
+    void clearMatch();
     bool initCompactTestMap(
         uint32_t seed, int mapSize,
         std::string *err);
@@ -561,6 +567,26 @@ public:
     int victoryStateForTesting() const {
         return victoryState_;
     }
+    int difficultyForTesting() const {
+        return difficulty_;
+    }
+    SkirmishVictory victoryConditionForTesting() const {
+        return victoryCondition_;
+    }
+    uint64_t mapHashForTesting() const;
+    std::array<float, 2>
+    playerBasePositionForTesting(int player) const;
+    int reachableStartingResourceCountForTesting(
+        int player, int resourceType) const;
+    bool shorelineShipyardSiteForTesting(
+        int player);
+    size_t projectileCountForResetTesting() const {
+        return projectiles_.size();
+    }
+    size_t instructionCountForResetTesting() const {
+        return instructions_.size() +
+               (currentInstruction_.empty() ? 0u : 1u);
+    }
     bool playerActiveForTesting(
         int player) const {
         return player > 0 &&
@@ -774,6 +800,15 @@ public:
     void setDiplomacyForTesting(
         int sourcePlayer, int targetPlayer,
         uint32_t stance);
+    uint32_t diplomacyForTesting(
+        int sourcePlayer, int targetPlayer) const {
+        if (sourcePlayer <= 0 ||
+            (size_t)sourcePlayer > players_.size() ||
+            targetPlayer < 0 || targetPlayer >= 16)
+            return UINT32_MAX;
+        return players_[(size_t)sourcePlayer - 1]
+            .diplomacy[(size_t)targetPlayer];
+    }
     bool actionMenuOpenForTesting() const {
         return actionMenuOpen_;
     }
@@ -1345,7 +1380,16 @@ private:
         int player = -1;
     };
 
-    void generateTerrain(int size);
+    bool initGenerated(
+        const SkirmishSettings &settings,
+        bool addStartingResources,
+        std::string *err);
+    void resetMatchState();
+    void generateTerrain(
+        int size, SkirmishMapStyle style);
+    void spawnStartingResources(
+        int player, float baseX, float baseY,
+        float inlandDirection);
     void buildTileElevation();
     void resetVisibility();
     void updateVisibility();
@@ -1848,6 +1892,8 @@ private:
     uint32_t nextSpawnId_ = 1;
     uint32_t nextMoveGroupId_ = 1;
     int difficulty_ = 2;
+    SkirmishVictory victoryCondition_ =
+        SkirmishVictory::Conquest;
     int victoryState_ = -1;
     bool conquestEnabled_ = false;
     float conquestCheckTime_ = 0.0f;

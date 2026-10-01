@@ -13,6 +13,7 @@
 #include "../src/core/scenario.h"
 #include "../src/engine/assets.h"
 #include "../src/engine/ai_script.h"
+#include "../src/engine/frontend.h"
 #include "../src/engine/game.h"
 #include "../src/render/soft_renderer.h"
 
@@ -59,6 +60,7 @@ static int usage() {
             "  swgbtool test-combat <DataDir> [out.png]\n"
             "  swgbtool ai-script <entry.per>\n"
             "  swgbtool test-ai <DataDir> <AiDir>\n"
+            "  swgbtool test-skirmish <DataDir>\n"
             "  swgbtool mp3 <file.mp3>\n");
     return 2;
 }
@@ -7219,6 +7221,232 @@ static int cmdTestAi(
     return 0;
 }
 
+static int cmdTestSkirmish(const char *dataDir) {
+    std::string err;
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    if (!assets.init(dataDir, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    int failures = 0;
+    auto report = [&](const char *name, bool ok,
+                      const std::string &detail) {
+        printf(
+            "%s %s %s\n",
+            ok ? "PASS" : "FAIL",
+            name, detail.c_str());
+        if (!ok) ++failures;
+    };
+
+    SkirmishSettings settings;
+    settings.seed = 0x1234ABCDu;
+    settings.mapSize = 96;
+    settings.playerCivilization = 7;
+    settings.computerCivilization = 5;
+    settings.difficulty = 4;
+    settings.personality = AiPersonality::Classic;
+    settings.allied = true;
+    settings.mapStyle = SkirmishMapStyle::Grasslands;
+    settings.startingResources = 1000;
+    settings.populationCap = 150;
+    settings.victory = SkirmishVictory::CommandCenter;
+
+    Game game(assets);
+    if (!game.initSkirmish(settings, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    const bool settingsApplied =
+        game.civilizationForPlayerForTesting(1) == 7 &&
+        game.civilizationForPlayerForTesting(2) == 5 &&
+        game.difficultyForTesting() == 4 &&
+        game.populationLimitForTesting(1) == 150.0f &&
+        game.populationLimitForTesting(2) == 150.0f &&
+        game.resource(1, 0) == 1000.0f &&
+        game.resource(2, 3) == 1000.0f &&
+        game.diplomacyForTesting(1, 2) == 0 &&
+        game.diplomacyForTesting(2, 1) == 0 &&
+        game.victoryConditionForTesting() ==
+            SkirmishVictory::CommandCenter;
+    report(
+        "lobby-settings", settingsApplied,
+        "civilizations=" +
+            std::to_string(
+                game.civilizationForPlayerForTesting(1)) +
+            "/" +
+            std::to_string(
+                game.civilizationForPlayerForTesting(2)) +
+            " resources=" +
+            std::to_string((int)game.resource(1, 0)) +
+            " population=" +
+            std::to_string(
+                (int)game.populationLimitForTesting(1)));
+
+    settings.allied = false;
+    settings.playerCivilization = 3;
+    settings.computerCivilization = 3;
+    settings.mapStyle = SkirmishMapStyle::Grasslands;
+    game.initSkirmish(settings, &err);
+    const uint64_t grassHash = game.mapHashForTesting();
+    const size_t objectCount = game.activeObjectCount();
+    Game same(assets);
+    same.initSkirmish(settings, &err);
+    const bool deterministic =
+        grassHash == same.mapHashForTesting() &&
+        objectCount == same.activeObjectCount();
+    settings.seed++;
+    Game varied(assets);
+    varied.initSkirmish(settings, &err);
+    const bool seedVaries =
+        grassHash != varied.mapHashForTesting();
+    settings.seed--;
+    settings.mapStyle = SkirmishMapStyle::Archipelago;
+    Game islands(assets);
+    islands.initSkirmish(settings, &err);
+    const bool styleVaries =
+        grassHash != islands.mapHashForTesting();
+    report(
+        "map-determinism-variation",
+        deterministic && seedVaries && styleVaries,
+        "grass=" + std::to_string(grassHash) +
+            " islands=" +
+            std::to_string(
+                islands.mapHashForTesting()));
+
+    bool fair = true;
+    std::string resourceDetail;
+    for (int resource = 0; resource < 4;
+         ++resource) {
+        const int player =
+            islands
+                .reachableStartingResourceCountForTesting(
+                    1, resource);
+        const int computer =
+            islands
+                .reachableStartingResourceCountForTesting(
+                    2, resource);
+        fair =
+            fair && player > 0 &&
+            computer > 0 &&
+            std::abs(player - computer) <= 4;
+        resourceDetail +=
+            (resourceDetail.empty() ? "" : ",") +
+            std::to_string(player) + "/" +
+            std::to_string(computer);
+    }
+    const bool shore =
+        islands.shorelineShipyardSiteForTesting(1) &&
+        islands.shorelineShipyardSiteForTesting(2);
+    report(
+        "map-fairness-reachability",
+        fair && shore,
+        "reachable=" + resourceDetail +
+            " shipyards=" +
+            std::to_string((int)shore));
+
+    settings.mapStyle = SkirmishMapStyle::CompactIslands;
+    settings.seed = 0x5A17u;
+    Game compact(assets);
+    compact.initSkirmish(settings, &err);
+    const bool compactWater =
+        compact.terrainAtForTesting(48, 20) == 22 &&
+        compact.terrainAtForTesting(42, 20) == 2 &&
+        compact.terrainAtForTesting(53, 20) == 2;
+    report(
+        "compact-map-selectable",
+        compactWater,
+        "center=" +
+            std::to_string(
+                compact.terrainAtForTesting(48, 20)));
+
+    const uint64_t restartHash =
+        compact.mapHashForTesting();
+    const size_t restartObjects =
+        compact.activeObjectCount();
+    compact.eliminatePlayerForTesting(1);
+    compact.queueInstructionForTesting("STALE");
+    const bool dirtied =
+        compact.victoryStateForTesting() == 0 &&
+        compact.instructionCountForResetTesting() > 0;
+    compact.initSkirmish(settings, &err);
+    const bool reset =
+        dirtied &&
+        compact.victoryStateForTesting() == -1 &&
+        compact.instructionCountForResetTesting() == 0 &&
+        compact.projectileCountForResetTesting() == 0 &&
+        compact.activeObjectCount() == restartObjects &&
+        compact.mapHashForTesting() == restartHash &&
+        compact.selectedObjectCount() == 0;
+    report(
+        "repeated-match-reset", reset,
+        "objects=" +
+            std::to_string(
+                compact.activeObjectCount()) +
+            " outcome=" +
+            std::to_string(
+                compact.victoryStateForTesting()));
+
+    Frontend frontend;
+    InputState input;
+    input.menuActivate = true;
+    frontend.update(input, -1);
+    frontend.update(input, -1);
+    input = {};
+    input.menuDown = true;
+    for (int row = 0; row < 11; ++row)
+        frontend.update(input, -1);
+    input = {};
+    input.menuActivate = true;
+    const FrontendAction start =
+        frontend.update(input, -1);
+    frontend.loadingFinished(true);
+    input = {};
+    input.pausePressed = true;
+    frontend.update(input, -1);
+    input = {};
+    input.menuDown = true;
+    frontend.update(input, -1);
+    input = {};
+    input.menuActivate = true;
+    const FrontendAction restart =
+        frontend.update(input, -1);
+    frontend.loadingFinished(true);
+    frontend.update({}, 1);
+    input = {};
+    input.menuActivate = true;
+    const FrontendAction outcomeRestart =
+        frontend.update(input, 1);
+    frontend.loadingFinished(true);
+    frontend.update({}, 0);
+    input = {};
+    input.menuDown = true;
+    frontend.update(input, 0);
+    input = {};
+    input.menuActivate = true;
+    const FrontendAction outcomeMenu =
+        frontend.update(input, 0);
+    const bool navigation =
+        start == FrontendAction::StartSkirmish &&
+        restart == FrontendAction::RestartMatch &&
+        outcomeRestart ==
+            FrontendAction::RestartMatch &&
+        outcomeMenu ==
+            FrontendAction::ReturnToMainMenu &&
+        frontend.screen() ==
+            FrontendScreen::MainMenu;
+    report(
+        "post-match-navigation", navigation,
+        "actions=" +
+            std::to_string((int)start) + "/" +
+            std::to_string((int)restart) + "/" +
+            std::to_string((int)outcomeRestart) +
+            "/" +
+            std::to_string((int)outcomeMenu));
+
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) return usage();
     const char *cmd = argv[1];
@@ -7293,6 +7521,8 @@ int main(int argc, char **argv) {
         argc >= 4)
         return cmdTestAi(
             argv[2], argv[3]);
+    if (!strcmp(cmd, "test-skirmish"))
+        return cmdTestSkirmish(argv[2]);
     if (!strcmp(cmd, "mp3")) return cmdMp3(argv[2]);
     return usage();
 }

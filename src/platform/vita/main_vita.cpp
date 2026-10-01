@@ -3,6 +3,7 @@
 #include "../../core/cpx.h"
 #include "../../core/scenario.h"
 #include "../../engine/assets.h"
+#include "../../engine/frontend.h"
 #include "../../engine/game.h"
 #include "../../render/gl_renderer.h"
 #include "vita_audio.h"
@@ -19,6 +20,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <unordered_set>
 
 // Leave enough of the 256 MiB game partition for the executable, runtime
 // modules and allocations made before main(). A 256 MiB newlib heap exhausts
@@ -29,14 +31,11 @@ namespace {
 
 const char *kRoot = "ux0:data/swgb";
 const char *kDataDir = "ux0:data/swgb/Data";
-const char *kAiPath =
-    "ux0:data/swgb/AI/Computer Expanded.per";
 const char *kCampaignPath = "ux0:data/swgb/Campaign/xcam3.cpx";
 const char *kScenarioSoundDir = "ux0:data/swgb/Sound/Scenario";
 const char *kMusicDir = "ux0:data/swgb/Music";
 const char *kTerrainSoundDir = "ux0:data/swgb/Sound/Terrain";
 const int kScreenW = 960, kScreenH = 544;
-constexpr bool kUseCompactTestMap = true;
 
 FILE *g_log = nullptr;
 
@@ -111,35 +110,8 @@ int main() {
         }
         logf("assets loaded in %llu ms", (unsigned long long)((sceKernelGetProcessTimeWide() - t0) / 1000));
 
-        swgb::Scenario scenario;
-        if (!kUseCompactTestMap) {
-            auto campaign = swgb::CpxArchive::open(
-                kCampaignPath, &err);
-            if (!campaign) {
-                errorScreen(
-                    err +
-                    " (copy XCAM3.CPX to ux0:data/swgb/Campaign)");
-                sceKernelExitProcess(0);
-                return 0;
-            }
-            std::vector<uint8_t> scx;
-            if (!campaign->read(1, scx, &err) ||
-                !scenario.load(scx, &err)) {
-                errorScreen(err);
-                sceKernelExitProcess(0);
-                return 0;
-            }
-            logf("scenario %s loaded: %ux%u, %u units, player data %.2f",
-                 scenario.originalFilename.c_str(),
-                 (unsigned)scenario.map.width,
-                 (unsigned)scenario.map.height,
-                 (unsigned)scenario.units.size(),
-                 scenario.playerDataVersion);
-        } else {
-            logf("compact gameplay test map selected");
-        }
-
         swgb::Game game(assets);
+        swgb::Frontend frontend;
         game.setLogger([](const std::string &s) { logf("%s", s.c_str()); });
         swgb::VitaAudio audio(
             kScenarioSoundDir, kMusicDir, kTerrainSoundDir);
@@ -176,27 +148,91 @@ int main() {
             [&audio]() {
                 audio.playOiiaEffect();
             });
-        const bool initialized =
-            kUseCompactTestMap
-                ? game.initCompactTestMap(
-                      0x5A17u, 96, &err)
-                : game.initScenario(scenario, &err);
-        if (!initialized) {
-            errorScreen(err);
-            sceKernelExitProcess(0);
-            return 0;
-        }
-        std::string aiError;
-        if (!game.loadAiScript(
-                2, kAiPath,
-                {"DIFFICULTY-MODERATE",
-                 "LAND-SATELLITES-MAP"},
-                &aiError))
+        bool campaignMatch = false;
+        swgb::Scenario campaignScenario;
+        bool campaignLoaded = false;
+
+        const auto loadCampaign = [&]() {
+            if (campaignLoaded) return true;
+            auto campaign = swgb::CpxArchive::open(
+                kCampaignPath, &err);
+            if (!campaign) {
+                err +=
+                    " (copy XCAM3.CPX to ux0:data/swgb/Campaign)";
+                return false;
+            }
+            std::vector<uint8_t> scx;
+            if (!campaign->read(1, scx, &err) ||
+                !campaignScenario.load(scx, &err))
+                return false;
+            campaignLoaded = true;
             logf(
-                "AI player 2 disabled: %s "
-                "(copy the game's AI folder to "
-                "ux0:data/swgb/AI)",
-                aiError.c_str());
+                "scenario %s loaded: %ux%u, %u units",
+                campaignScenario.originalFilename.c_str(),
+                (unsigned)campaignScenario.map.width,
+                (unsigned)campaignScenario.map.height,
+                (unsigned)campaignScenario.units.size());
+            return true;
+        };
+        const auto startSkirmish = [&]() {
+            audio.resetSession();
+            const swgb::SkirmishSettings &settings =
+                frontend.settings();
+            if (!game.initSkirmish(settings, &err))
+                return false;
+            const char *personality =
+                settings.personality ==
+                        swgb::AiPersonality::Classic
+                    ? "Computer Classic.per"
+                    : "Computer Expanded.per";
+            const std::string aiPath =
+                std::string("ux0:data/swgb/AI/") +
+                personality;
+            static constexpr const char *difficulties[] = {
+                "DIFFICULTY-HARDEST",
+                "DIFFICULTY-HARD",
+                "DIFFICULTY-MODERATE",
+                "DIFFICULTY-EASY",
+                "DIFFICULTY-EASIEST",
+            };
+            std::unordered_set<std::string> defines{
+                difficulties[std::max(
+                    0, std::min(4, settings.difficulty))],
+                "POPULATION-CAP-" +
+                    std::to_string(settings.populationCap),
+            };
+            if (settings.victory ==
+                swgb::SkirmishVictory::Conquest)
+                defines.insert("VICTORY-CONQUEST");
+            if (settings.mapStyle ==
+                    swgb::SkirmishMapStyle::Archipelago ||
+                settings.mapStyle ==
+                    swgb::SkirmishMapStyle::CompactIslands)
+                defines.insert(
+                    settings.allied
+                        ? "TEAM-LAND-SATELLITES-MAP"
+                        : "LAND-SATELLITES-MAP");
+            if (!game.loadAiScript(
+                    2, aiPath, defines, &err)) {
+                err =
+                    "AI personality could not be loaded: " +
+                    err +
+                    " (copy the original AI folder)";
+                return false;
+            }
+            campaignMatch = false;
+            return true;
+        };
+        const auto startCampaign = [&]() {
+            audio.resetSession();
+            if (!loadCampaign())
+                return false;
+            if (!game.initScenario(
+                    campaignScenario, &err))
+                return false;
+            campaignMatch = true;
+            return true;
+        };
 
         SceCtrlData pad{}, prev{};
         SceTouchData touch{};
@@ -224,8 +260,6 @@ int main() {
             uint32_t pressed = pad.buttons & ~prev.buttons;
             uint32_t released = prev.buttons & ~pad.buttons;
             prev = pad;
-            if (pad.buttons & SCE_CTRL_START) break;
-
             swgb::InputState in;
             in.screenW = kScreenW;
             in.screenH = kScreenH;
@@ -240,6 +274,8 @@ int main() {
             in.menuRight = (pressed & SCE_CTRL_RIGHT) != 0;
             in.menuActivate = (pressed & SCE_CTRL_CROSS) != 0;
             in.menuBack = (pressed & SCE_CTRL_CIRCLE) != 0;
+            in.pausePressed =
+                (pressed & SCE_CTRL_START) != 0;
             in.actionTabLeft =
                 (pressed & SCE_CTRL_LTRIGGER) != 0;
             in.actionTabRight =
@@ -343,9 +379,63 @@ int main() {
                 touching = false;
             }
 
+            const swgb::FrontendAction action =
+                frontend.update(
+                    in, game.victoryStateForTesting());
+            if (action ==
+                    swgb::FrontendAction::StartSkirmish ||
+                action ==
+                    swgb::FrontendAction::StartCampaign ||
+                action ==
+                    swgb::FrontendAction::RestartMatch) {
+                frontend.render(
+                    renderer, kScreenW, kScreenH);
+                vglSwapBuffers(GL_FALSE);
+                err.clear();
+                bool started = false;
+                if (action ==
+                    swgb::FrontendAction::StartSkirmish)
+                    started = startSkirmish();
+                else if (action ==
+                         swgb::FrontendAction::StartCampaign)
+                    started = startCampaign();
+                else
+                    started =
+                        campaignMatch
+                            ? startCampaign()
+                            : startSkirmish();
+                frontend.loadingFinished(
+                    started, started ? std::string() : err);
+                unitSoundChoice = 0;
+                touching = false;
+                touchMoved = false;
+                touchBox = false;
+                stickBoxArmed = false;
+                stickBoxMoved = false;
+                if (!started)
+                    game.clearMatch();
+            } else if (
+                action ==
+                swgb::FrontendAction::ReturnToMainMenu) {
+                audio.resetSession();
+                game.clearMatch();
+                unitSoundChoice = 0;
+                touching = false;
+                touchMoved = false;
+                touchBox = false;
+                stickBoxArmed = false;
+                stickBoxMoved = false;
+            } else if (
+                action ==
+                swgb::FrontendAction::Quit) {
+                break;
+            }
+
             // Sprite cache budget: vglMemFree(VGL_MEM_ALL) reports 0 here, so
             // use the per-pool figures; keep ~24 MB of GPU memory spare.
-            if (now - budgetT >= 1000000) {
+            if (frontend.screen() ==
+                    swgb::FrontendScreen::Gameplay &&
+                now - budgetT >= 1000000) {
                 budgetT = now;
                 const size_t freeBytes = vglMemFree(VGL_MEM_VRAM) + vglMemFree(VGL_MEM_RAM) +
                                          vglMemFree(VGL_MEM_PHYCONT);
@@ -357,9 +447,17 @@ int main() {
                 game.setTextureBudget(budget);
             }
             const uint64_t t0 = sceKernelGetProcessTimeWide();
-            game.update(dt, in);
+            if (frontend.screen() ==
+                swgb::FrontendScreen::Gameplay)
+                game.update(dt, in);
             const uint64_t t1 = sceKernelGetProcessTimeWide();
-            game.render(renderer, kScreenW, kScreenH);
+            if (frontend.screen() ==
+                swgb::FrontendScreen::Gameplay)
+                game.render(
+                    renderer, kScreenW, kScreenH);
+            else
+                frontend.render(
+                    renderer, kScreenW, kScreenH);
             const uint64_t t2 = sceKernelGetProcessTimeWide();
             vglSwapBuffers(GL_FALSE);
             const uint64_t t3 = sceKernelGetProcessTimeWide();

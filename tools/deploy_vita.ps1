@@ -142,8 +142,15 @@ if ($LanguageData) {
 }
 if ($AiData) {
     Ftp-MkDir "ux0:/data/swgb/AI"
-    foreach ($file in Get-ChildItem -LiteralPath $AiDir -File -Filter *.per) {
-        Ftp-Put $file.FullName "ux0:/data/swgb/AI/$($file.Name)"
+    foreach ($file in Get-ChildItem -LiteralPath $AiDir -File -Filter *.per -Recurse) {
+        $relative = $file.FullName.Substring($AiDir.TrimEnd('\').Length + 1) -replace '\\', '/'
+        $segments = $relative.Split('/')
+        $remoteDir = "ux0:/data/swgb/AI"
+        for ($index = 0; $index -lt $segments.Length - 1; $index++) {
+            $remoteDir += "/$($segments[$index])"
+            Ftp-MkDir $remoteDir
+        }
+        Ftp-Put $file.FullName "ux0:/data/swgb/AI/$relative"
     }
 }
 if ($Vpk) { Ftp-Put (Join-Path $repo "build-vita\swgb.vpk") "ux0:/data/swgb/swgb.vpk" }

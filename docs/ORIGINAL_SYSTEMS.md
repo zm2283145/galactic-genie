@@ -30,6 +30,72 @@ build and test on Vita.
 | Civilization technology trees | Each DAT civilization's `techTreeId` effect; type-102 disabled-technology commands | Verified and covered |
 | Air/naval transports | DAT `AVAIL-*` technologies and Airbase/Shipyard train locations | Verified and covered |
 | Compact island map | Shipyard terrain `1/4`, side terrain `2/35`, and DAT movement restrictions | Covered |
+| Skirmish setup and random-map launch | Preset fields at `0x443440`; seeded generation at `0x4940f0`; AI defines at `0x57eff0` | Verified and covered |
+| Match-to-menu transition | Cleanup and `"Main Menu"` transition at `0x45f916` | Verified and covered |
+
+## Skirmish setup, random maps, and match lifecycle
+
+Research for the native setup flow used the GOG Clone Campaigns executable
+`battlegrounds_x1.exe` (2,813,952 bytes, SHA-256
+`30fac6f443391e1e3a8f29887f85f4c5061ca9e12397a4b50db1ffda0d633761`)
+and `genie_x1.dat` (SHA-256
+`9d2917c6c67e9df7af656459486f8e102406ad4a7299e7d0a85daac75c9c4b7d`).
+Addresses below are image virtual addresses for the executable's preferred
+`0x400000` base.
+
+The preset serializer at `0x443440` reads separate fields from the setup
+object and emits `m_bDifficulty`, `m_bResources`, and `m_dPopulation` at
+`0x443487`, `0x4434bf`, and `0x4434f2`. Their lock flags are adjacent but
+independent. This is evidence that these are match configuration, not UI-only
+state. The native frontend therefore keeps civilization, opponent
+civilization, difficulty, personality, diplomacy/team, map, resources,
+population, victory, and seed in one immutable `SkirmishSettings` value and
+applies the value when the simulation is rebuilt.
+
+The random-map entry at `0x4940f0` reads the configured seed at global setup
+offset `+0x48`. A value of `-1` obtains a random value at `0x632bdd`; the
+chosen value is stored at `+0x50`, logged through `"Random Map Seed = %d"` at
+`0x494137`, and passed to the random source at `0x632bd3` before generation.
+The post-generation random value is logged at `0x49420a`. The sibling entry at
+`0x494250` repeats the same seed contract. The reimplementation consequently
+accepts an explicit 32-bit seed, produces byte-identical terrain/elevation for
+the same settings, and uses a changed seed or map style to produce a different
+map.
+
+The setup-to-AI bridge at `0x57eff0` translates match fields into script
+defines. Its victory switch begins at `0x57f069`; conquest pushes
+`VICTORY-CONQUEST` at `0x57f087`. The difficulty switch begins at `0x57f0ed`
+and pushes `DIFFICULTY-EASIEST` through `DIFFICULTY-HARDEST` at
+`0x57f0fe`-`0x57f11a`. Population-cap defines follow at `0x57f12a`. The
+original data installation supplies `Computer Expanded.per` and
+`Computer Classic.per`; both remain selectable and are loaded, rather than
+being approximated by a native personality. Classic recursively loads its
+`Computer Classic` subdirectory, so Vita deployment preserves the original AI
+directory hierarchy.
+
+The in-match transition at `0x45f8e6` releases match-facing state, calls the
+world cleanup paths through `0x5e5720` and `0x478770`, and then passes the
+literal `"Main Menu"` to the screen transition at `0x45f924`. A nearby branch
+at `0x45f987` performs the same menu transition. The native lifecycle follows
+that ownership boundary: returning to the menu or restarting clears objects,
+AI programs/groups, path caches, fog, triggers, instructions, projectiles,
+remains, queues, selection/cursor modes, outcome state, and queued/active
+session audio before creating the next match.
+
+Generated-map contract:
+
+- `Grasslands` is connected land with deterministic DAT terrain variation.
+- `Archipelago` creates separated land masses, shallow/deep ocean, and shore
+  rings. Both starts have a DAT-valid Shipyard site: the complete footprint is
+  water terrain `1/4` with adjacent shore terrain `2/35`.
+- `Compact Two Islands` retains the existing full-height channel, deep center,
+  and shore columns as a selectable regression map.
+- Both players receive equal food, carbon, ore, and nova patches. Host
+  validation checks that ordinary workers have a route to every resource
+  class and that both island starts have a valid Shipyard footprint.
+- Command Center victory uses the selected condition directly; Conquest keeps
+  the existing last-hostile-assets contract. Unimplemented original victory
+  modes are not presented as working choices.
 
 ## Compact island match
 
