@@ -1183,6 +1183,11 @@ public:
         uint32_t converterId) const;
     float conversionChargeForTesting(
         uint32_t converterId) const;
+    float conversionPowerPercentForTesting(
+        uint32_t converterId) const;
+    int convertCommandIconForTesting() const;
+    int carriedHolocronGraphicForTesting(
+        uint32_t carrierId) const;
     bool objectStealthedForTesting(
         uint32_t spawnId) const;
     bool objectDetectedForTesting(
@@ -1548,6 +1553,10 @@ private:
     void resetVisibility();
     void updateVisibility();
     void updateMinimapTexture(Renderer &renderer);
+    void drawFogOverlay(
+        Renderer &renderer, int screenW,
+        int screenH, float originX,
+        float originY);
     bool handleMinimapInput(const InputState &input);
     void clampCamera();
     void syncControlGroups();
@@ -1646,6 +1655,8 @@ private:
     bool canAttackGround(
         const Object &source) const;
     const dat::Task *conversionTask(
+        const Object &converter) const;
+    float conversionChargeFraction(
         const Object &converter) const;
     bool canConvert(
         const Object &converter,
@@ -2050,6 +2061,7 @@ private:
     std::array<std::vector<uint8_t>, 17> exploredTiles_;
     std::array<std::vector<uint8_t>, 17> visibleTiles_;
     float visibilityTime_ = 0.0f;
+    uint64_t visibilityGeneration_ = 0;
     std::vector<uint8_t> cornerElevation_;
     std::vector<uint8_t> tileElevation_;
     std::vector<uint8_t> tileSlope_;
@@ -2243,6 +2255,18 @@ private:
     std::vector<uint8_t> minimapPixels_;
     int minimapTextureSize_ = 0;
     float minimapRefreshTime_ = 0;
+    Texture *fogTexture_ = nullptr;
+    Renderer *fogRenderer_ = nullptr;
+    std::vector<uint8_t> fogPixels_;
+    int fogTextureWidth_ = 0;
+    int fogTextureHeight_ = 0;
+    float fogOriginX_ = 0.0f;
+    float fogOriginY_ = 0.0f;
+    float fogZoom_ = 0.0f;
+    int fogPlayer_ = -1;
+    uint64_t fogVisibilityGeneration_ =
+        UINT64_MAX;
+    bool fogForceExplore_ = false;
     bool minimapDragging_ = false;
     SkirmishSettings currentSkirmishSettings_{};
     bool generatedMatch_ = false;

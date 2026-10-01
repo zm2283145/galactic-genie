@@ -7593,14 +7593,34 @@ static int cmdTestInterface(const char *dataDir) {
             settings.mapSize *
                 Game::kTileHalfH) <
             0.1f;
+    renderer.beginFrame(
+        960, 544, 1.0f,
+        0, 0, 0);
     game.render(renderer, 960, 544);
+    const int fogDrawCalls =
+        renderer.drawCalls();
+    game.setVisibilityCheatsForTesting(
+        false, true);
+    renderer.beginFrame(
+        960, 544, 1.0f,
+        0, 0, 0);
+    game.render(renderer, 960, 544);
+    const int clearDrawCalls =
+        renderer.drawCalls();
+    game.setVisibilityCheatsForTesting(
+        false, false);
+    const bool boundedFogDraws =
+        fogDrawCalls <=
+            clearDrawCalls + 1 &&
+        fogDrawCalls < 800;
     const bool fogAndAlerts =
         exploredBefore > 0 &&
         exploredBefore <
             (size_t)settings.mapSize *
                 settings.mapSize &&
         game.minimapAlertCountForTesting() > 0 &&
-        renderer.drawCalls() > 0;
+        fogDrawCalls > 0 &&
+        boundedFogDraws;
     report(
         "minimap-fog-navigation-alerts",
         minimapNavigation && fogAndAlerts,
@@ -7609,6 +7629,10 @@ static int cmdTestInterface(const char *dataDir) {
             " alerts=" +
             std::to_string(
                 game.minimapAlertCountForTesting()) +
+            " draws=" +
+            std::to_string(fogDrawCalls) +
+            "/" +
+            std::to_string(clearDrawCalls) +
             " camera=" +
             std::to_string(camera[0]) + "," +
             std::to_string(camera[1]));
@@ -8525,7 +8549,13 @@ static int cmdTestMajorMechanics(
         const bool issued =
             game.issueConversionForTesting(
                 converter, target);
+        const float initialPower =
+            game.conversionPowerPercentForTesting(
+                converter);
         step(game, 4.5f);
+        const float depletedPower =
+            game.conversionPowerPercentForTesting(
+                converter);
         const bool converted =
             target &&
             game.objectPlayer(target) == 1 &&
@@ -8548,11 +8578,25 @@ static int cmdTestMajorMechanics(
                 immunityConverter, temple) &&
             !game.issueConversionForTesting(
                 immunityConverter, holocron);
+        step(game, 10.0f);
+        const float rechargedPower =
+            game.conversionPowerPercentForTesting(
+                converter);
         report(
             "conversion-lifecycle",
             converter && target && issued &&
                 converted && rechargeBlocks &&
                 immuneTargets &&
+                std::abs(
+                    initialPower -
+                    100.0f) < 0.01f &&
+                depletedPower >= 0.0f &&
+                depletedPower < 10.0f &&
+                std::abs(
+                    rechargedPower -
+                    100.0f) < 0.01f &&
+                game.convertCommandIconForTesting() ==
+                    14 &&
                 game.invariantsForTesting(),
             "owner=" +
                 std::to_string(
@@ -8560,7 +8604,19 @@ static int cmdTestMajorMechanics(
                 " recharge=" +
                 std::to_string(
                     game.conversionChargeForTesting(
-                        converter)));
+                        converter)) +
+                " power=" +
+                std::to_string(
+                    initialPower) +
+                "->" +
+                std::to_string(
+                    depletedPower) +
+                "->" +
+                std::to_string(
+                    rechargedPower) +
+                " icon=" +
+                std::to_string(
+                    game.convertCommandIconForTesting()));
     }
 
     {
@@ -8622,7 +8678,12 @@ static int cmdTestMajorMechanics(
         step(game, 0.3f);
         const bool carried =
             game.carriedHolocronForTesting(
-                carrier) == holocron;
+                carrier) == holocron &&
+            game.carriedHolocronGraphicForTesting(
+                carrier) == 5200;
+        const int carriedGraphic =
+            game.carriedHolocronGraphicForTesting(
+                carrier);
         const bool deposit =
             game.issueHolocronOrderForTesting(
                 carrier, temple);
@@ -8664,6 +8725,9 @@ static int cmdTestMajorMechanics(
                         1)) +
                 " nova=" +
                 std::to_string(novaGain) +
+                " graphic=" +
+                std::to_string(
+                    carriedGraphic) +
                 " dropped=" +
                 std::to_string(dropped));
     }

@@ -101,14 +101,18 @@ during the same chord to assign the current ordered local selection. Recalling a
 centers its first unit. The Options screen provides live master/music/dialogue/effects levels
 and a Left-Handed preset that swaps the camera/cursor sticks and X/O gameplay roles.
 
-Jedi and Sith with the original action-104 task expose **Convert** on their Commands page.
-Choose it, then target a currently visible eligible enemy. Conversion uses the DAT work/recharge
-times, Force Influence and Concentration restrictions, Faith in the Force resistance, and Stamina
-recharge modifier. Converters drop a carried Holocron before changing ownership. Eligible Force
-users can context-command a visible Holocron, then context-command a friendly Temple to secure it.
-The carrier has a gold world marker; discovered Holocrons remain on the world/minimap under explored
-fog, while undiscovered or carried Holocrons are not exposed. Each secured Holocron generates the
-civilization's DAT resource-191 Nova rate.
+Jedi and Sith with the original action-104 task expose **Convert** with command-sheet frame 14 on
+their Commands page. Choose it, then target a currently visible eligible enemy. Conversion uses the
+DAT work/recharge times, Force Influence and Concentration restrictions, Faith in the Force
+resistance, and Stamina recharge modifier. The localized Force Power gauge starts at 100%, empties
+after a successful conversion, and recharges before Convert becomes available again. Converters
+drop a carried Holocron before changing ownership. Eligible Force users can context-command a
+visible Holocron, then context-command a friendly Temple to secure it. A carried Holocron uses its
+original graphic and floats in front of the carrier without replacing the carrier's animation.
+Discovered Holocrons remain on the world/minimap under explored fog, while undiscovered or carried
+Holocrons are not exposed. Each secured Holocron generates the civilization's DAT resource-191 Nova
+rate. Vita fog presentation is a cached screen-space overlay rather than per-row rectangle fan-out,
+keeping its render cost to one draw while preserving the existing visibility state.
 
 The skirmish lobby offers the original **Standard**, **Conquest**, **Time Limit**, and **Score**
 victory choices plus the existing Command Center compatibility mode. Standard combines military

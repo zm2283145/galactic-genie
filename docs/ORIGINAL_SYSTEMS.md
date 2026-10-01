@@ -38,8 +38,8 @@ build and test on Vita.
 | Control groups | `groupnum.shp` string at `0x689920`, referenced at `0x42745d` | Verified and covered |
 | Pause/options/audio | Pause request path at `0x4359a9`; sound/music controls at `0x42701f`/`0x427247` | Verified and covered |
 | Save/load | `"Save Game Screen"` constructor at `0x5286f0` | Native generated-skirmish format covered |
-| Jedi/Sith conversion | DAT action 104; strings 4125/4925; resources 27/35/77/87/178/179/193 | Implemented and covered; exact original probability formula unresolved |
-| Holocrons | unit 285; action 132 pickup/action 136 Temple delivery; resource 191; `puprelic.wav` xref `0x5e66db` | Implemented and covered |
+| Jedi/Sith conversion | DAT action 104; strings 4125/4925 and 42027/43027; command constructor `0x50301d`; resources 27/35/77/87/178/179/193 | Implemented and covered; exact original probability formula unresolved |
+| Holocrons | unit 285, graphic 5200/SLP 2252; action 132 pickup/action 136 Temple delivery; resource 191; `puprelic.wav` xref `0x5e66db` | Implemented and covered |
 | Victory selection | setup field `+0x218`, switch `0x57f069`, strings 4327/4321/4329/4330/4331 | Standard/Conquest/Time/Score implemented; Custom remains scenario-defined |
 | Stealth/detection | resources 56/58; detector trait bit 8; strings 43209/43210 | Implemented; original reveal persistence unresolved |
 | Aircraft-specific targeting | action-7 validator `0x5b9930`, class filter `0x41c530`, aircraft classes 43/48/59/62/63/64 | Verified and covered; no fuel mechanic evidenced |
@@ -141,7 +141,18 @@ Sith Apprentice 180 and Sith Master 115 are representative class-50,
 trait-32 Temple units. Both have action 104 with `workValue1=4` and
 `workValue2=10`; the Master uses `targetDiplomacy=2`, while the Apprentice
 uses 0. Localized string 4125 names Convert, 4925 supplies its help, and
-43027 states that conversion consumes full Force Power and must recharge.
+42027 names the Force Power gauge. String 43027 states that it must be at
+100 percent before another conversion and that a successful conversion
+consumes the charge.
+
+The executable's Convert command constructor at `0x50301d` pushes help
+string 4925, panel action `0x1d`, and command-sheet frame `0x0e`. Frame 14
+of original interface SLP 50721 is therefore the Convert icon; frame 5 is
+explicitly marked unused in the original sheet. The selected Force user's
+gauge is derived from action 104's recharge duration: ready is 100 percent,
+a successful conversion resets it to 0 percent, and the existing Stamina
+multiplier accelerates its return to 100 percent. Convert remains visible
+but is dimmed and unavailable while this charge is incomplete.
 
 The technology/resource contract is:
 
@@ -174,8 +185,8 @@ reference. Production queues stay with the converted completed building;
 foundations are explicitly ineligible.
 
 Unresolved evidence is not filled with a guessed random formula. The exact
-original success-probability/RNG function, complete immunity table, command
-icon frame, and conversion cursor frame remain unproven. `unconv.txt` in the
+original success-probability/RNG function, complete immunity table, and
+conversion cursor frame remain unproven. `unconv.txt` in the
 local installation is Expanded Fronts data and is not treated as a complete
 Clone Campaigns immunity table. Hero-mode targets are conservatively immune
 until executable evidence establishes per-record behavior. Meditation's
@@ -185,8 +196,11 @@ native deterministic implementation does not use an original random roll.
 ### Holocron lifecycle
 
 Holocron 285 is `OBJ-HOLOCRON`, class 28, language ID 5502, with 30 HP, LOS 7,
-and selection sound 542. Base Force-user headers contain action 132 targeting
-unit 285; the carried-state task uses action 136 targeting Temple 104. Temple
+selection sound 542, standing graphic 5200, walking graphic 5201, and the
+single-frame original SLP 2252 (`41x40`, hotspot `22,30`). Base Force-user
+headers contain action 132 targeting unit 285; those tasks have no proceeding,
+working, carrying, or gathering graphic. The carried-state task uses action
+136 targeting Temple 104. Temple
 104 is class 18 with 2,500 HP, LOS 5, zero ordinary garrison capacity, cost
 180 carbon/25 nova, and build time 60. Holocron delivery therefore has its own
 relationship and does not pretend to consume normal garrison capacity.
@@ -208,8 +222,12 @@ require five valid instances.
 A Holocron is not disclosed until ordinary sight discovers it. Discovery
 persists in explored world/minimap presentation, but `FORCEEXPLORE` alone does
 not mark undiscovered Holocrons and native AI never targets one without
-current sight. Action-132 carriers pick up exactly one, receive a world marker
-and pickup sound, and deliver it to a friendly completed Temple. Death,
+current sight. Action-132 carriers pick up exactly one, retain their own
+standing/walking animation, and draw the original Holocron graphic at the
+carrier anchor with foreground sort bias so it floats visibly in front.
+The old procedural gold cross and carrier-graphic substitution are not part
+of the DAT contract. Pickup also plays the original sound before delivery to
+a friendly completed Temple. Death,
 conversion, invalid garrison/transport state, or loss of carrier eligibility
 drops it. Temple destruction ejects all secured Holocrons; Temple ownership
 changes transfer them. The authoritative carrier/Temple links and trickle
@@ -781,6 +799,9 @@ action `0x24`, and help 4936; Follow uses frame 8, action `0x25`, and help
 4937. Attack Ground remains frame 60/action `0x17`. The Vita presentation
 keeps those original icons and localized strings in one command grid so the
 five commands remain accessible without shrinking their touch targets.
+Convert is constructed separately at `0x50301d` with frame 14/action `0x1d`
+and help 4925. Its icon is shown disabled with the live Force Power percentage
+until the selected Force user reaches 100 percent.
 
 Patrol alternates between the unit's order-time position and the selected
 point, temporarily engaging enemies permitted by its stance before resuming.
@@ -798,6 +819,17 @@ starting slots instead of depending on later wandering to separate them.
 While a formation is marching, every member that is following its moving slot
 retains the Walk state even when it consumes that frame's short slot path; the
 standing graphic is not substituted between frames.
+
+## Fog-of-war rendering
+
+World visibility remains the tile-authoritative explored/currently-visible
+state described above. The presentation samples that state into a bounded
+quarter-resolution screen-space RGBA texture and draws one overlay quad.
+The texture is regenerated only when visibility, camera origin, zoom, player,
+screen dimensions, or exploration-cheat state changes. This preserves the
+existing smooth tile-boundary interpolation and elevation correction while
+removing the former row-run rectangle fan-out that issued thousands of
+individual overlay draws per frame on Vita.
 
 ## Combat targeting and building approach
 

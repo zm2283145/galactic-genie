@@ -343,6 +343,9 @@ Game::~Game() {
     if (minimapTexture_ && minimapRenderer_)
         minimapRenderer_->destroyTexture(
             minimapTexture_);
+    if (fogTexture_ && fogRenderer_)
+        fogRenderer_->destroyTexture(
+            fogTexture_);
 }
 
 void Game::resetMatchState() {
@@ -370,6 +373,7 @@ void Game::resetMatchState() {
     for (auto &tiles : visibleTiles_)
         tiles.clear();
     visibilityTime_ = 0.0f;
+    visibilityGeneration_++;
     cornerElevation_.clear();
     tileElevation_.clear();
     tileSlope_.clear();
@@ -1795,6 +1799,7 @@ void Game::resetVisibility() {
     for (Object &object : objects_)
         object.discoveredByPlayers = 0;
     visibilityTime_ = 0.0f;
+    visibilityGeneration_++;
 }
 
 void Game::updateVisibility() {
@@ -1873,6 +1878,7 @@ void Game::updateVisibility() {
                 object.discoveredByPlayers |=
                     1u << player;
     }
+    visibilityGeneration_++;
 }
 
 bool Game::tileExplored(
@@ -3210,6 +3216,39 @@ float Game::conversionChargeForTesting(
                : 0.0f;
 }
 
+float Game::conversionPowerPercentForTesting(
+    uint32_t converterId) const {
+    const Object *converter =
+        findObject(converterId);
+    return converter
+               ? conversionChargeFraction(
+                     *converter) *
+                     100.0f
+               : 0.0f;
+}
+
+int Game::convertCommandIconForTesting() const {
+    return unitCommandIcon(
+        UnitCommand::Convert);
+}
+
+int Game::carriedHolocronGraphicForTesting(
+    uint32_t carrierId) const {
+    const Object *carrier =
+        findObject(carrierId);
+    if (!carrier ||
+        !carrier->carriedHolocronId)
+        return -1;
+    const Object *holocron =
+        findObject(
+            carrier->carriedHolocronId);
+    if (!holocron || !holocron->active ||
+        !holocron->unit)
+        return -1;
+    return holocron->unit
+        ->standingGraphic[0];
+}
+
 uint32_t Game::spawnHolocronForTesting(
     float x, float y) {
     const dat::Unit *unit =
@@ -3615,6 +3654,25 @@ const dat::Task *Game::conversionTask(
         if (task.actionType == 104)
             return &task;
     return nullptr;
+}
+
+float Game::conversionChargeFraction(
+    const Object &converter) const {
+    const dat::Task *task =
+        conversionTask(converter);
+    if (!task)
+        return 0.0f;
+    const float duration =
+        std::max(
+            0.1f, task->workValue2);
+    return std::max(
+        0.0f,
+        std::min(
+            1.0f,
+            1.0f -
+                converter
+                        .conversionRecharge /
+                    duration));
 }
 
 bool Game::canConvert(
@@ -5735,7 +5793,7 @@ int Game::unitCommandIcon(
     case UnitCommand::AttackGround:
         return (int)kCommandAttackGroundIcon;
     case UnitCommand::Convert:
-        return 5;
+        return 14;
     }
     return 3;
 }
@@ -5868,6 +5926,35 @@ void Game::executeUnitCommand(
         playInterfaceFeedback(
             kInterfaceButtonSound);
         return;
+    }
+    if (command == UnitCommand::Convert) {
+        float highestCharge = 0.0f;
+        bool ready = false;
+        for (const Object *unit :
+             selectedObjectsInOrder(true)) {
+            if (!conversionTask(*unit))
+                continue;
+            const float charge =
+                conversionChargeFraction(*unit);
+            highestCharge =
+                std::max(
+                    highestCharge, charge);
+            ready = ready ||
+                    charge >= 0.9999f;
+        }
+        if (!ready) {
+            statusMessage_ =
+                "FORCE POWER RECHARGING - " +
+                std::to_string(
+                    (int)std::lround(
+                        highestCharge *
+                        100.0f)) +
+                "%";
+            statusTime_ = 3.0f;
+            playInterfaceFeedback(
+                kInterfaceButtonSound);
+            return;
+        }
     }
     if (command ==
         UnitCommand::AttackGround) {
@@ -20776,6 +20863,217 @@ void Game::updateMinimapTexture(
             minimapPixels_.data());
 }
 
+void Game::drawFogOverlay(
+    Renderer &renderer, int screenW,
+    int screenH, float originX,
+    float originY) {
+    constexpr int sampleSize = 4;
+    const int textureWidth =
+        (screenW + sampleSize - 1) /
+        sampleSize;
+    const int textureHeight =
+        (screenH + sampleSize - 1) /
+        sampleSize;
+    if (textureWidth <= 0 ||
+        textureHeight <= 0)
+        return;
+    if (fogRenderer_ != &renderer ||
+        fogTextureWidth_ != textureWidth ||
+        fogTextureHeight_ !=
+            textureHeight) {
+        if (fogTexture_ && fogRenderer_)
+            fogRenderer_->destroyTexture(
+                fogTexture_);
+        fogTexture_ = nullptr;
+        fogRenderer_ = &renderer;
+        fogTextureWidth_ = textureWidth;
+        fogTextureHeight_ = textureHeight;
+        fogPixels_.assign(
+            (size_t)textureWidth *
+                textureHeight * 4,
+            0);
+        fogVisibilityGeneration_ =
+            UINT64_MAX;
+    }
+    const bool dirty =
+        !fogTexture_ ||
+        fogOriginX_ != originX ||
+        fogOriginY_ != originY ||
+        fogZoom_ != zoom_ ||
+        fogPlayer_ != localPlayer_ ||
+        fogForceExplore_ !=
+            forceExploreCheat_ ||
+        fogVisibilityGeneration_ !=
+            visibilityGeneration_;
+    if (dirty) {
+        const auto tileDarkness =
+            [&](int x, int y) -> float {
+                if (x < 0 || y < 0 ||
+                    x >= mapSize_ ||
+                    y >= mapSize_)
+                    return 255.0f;
+                if (tileVisible(
+                        localPlayer_, x, y))
+                    return 0.0f;
+                return tileExplored(
+                           localPlayer_, x, y)
+                           ? 138.0f
+                           : 255.0f;
+            };
+        const auto fogAt =
+            [&](float screenX,
+                float screenY) -> uint8_t {
+                const float projectedX =
+                    originX +
+                    screenX / zoom_;
+                const float projectedY =
+                    originY +
+                    screenY / zoom_;
+                float worldX = 0.0f;
+                float worldY = 0.0f;
+                float adjustedY =
+                    projectedY;
+                for (int pass = 0;
+                     pass < 2; pass++) {
+                    worldX =
+                        (projectedX /
+                             kTileHalfW +
+                         adjustedY /
+                             kTileHalfH) *
+                        0.5f;
+                    worldY =
+                        (adjustedY /
+                             kTileHalfH -
+                         projectedX /
+                             kTileHalfW) *
+                        0.5f;
+                    if (worldX < 0.0f ||
+                        worldY < 0.0f ||
+                        worldX >= mapSize_ ||
+                        worldY >= mapSize_)
+                        break;
+                    adjustedY =
+                        projectedY +
+                        elevationAt(
+                            worldX, worldY) *
+                            assets_.dat()
+                                .terrainBlock
+                                .elevHeight;
+                }
+                if (worldX < 0.0f ||
+                    worldY < 0.0f ||
+                    worldX >= mapSize_ ||
+                    worldY >= mapSize_)
+                    return 255;
+                const float gridX =
+                    worldX - 0.5f;
+                const float gridY =
+                    worldY - 0.5f;
+                const int x =
+                    (int)std::floor(gridX);
+                const int y =
+                    (int)std::floor(gridY);
+                float fx = gridX - x;
+                float fy = gridY - y;
+                fx = fx * fx *
+                     (3.0f - 2.0f * fx);
+                fy = fy * fy *
+                     (3.0f - 2.0f * fy);
+                const float top =
+                    tileDarkness(x, y) *
+                        (1.0f - fx) +
+                    tileDarkness(
+                        x + 1, y) *
+                        fx;
+                const float bottom =
+                    tileDarkness(
+                        x, y + 1) *
+                        (1.0f - fx) +
+                    tileDarkness(
+                        x + 1, y + 1) *
+                        fx;
+                const int alpha =
+                    (int)std::lround(
+                        top *
+                            (1.0f - fy) +
+                        bottom * fy);
+                return (uint8_t)
+                    std::max(
+                        0,
+                        std::min(
+                            255, alpha));
+            };
+        for (int py = 0;
+             py < textureHeight; py++) {
+            const float screenY =
+                std::min(
+                    screenH - 0.5f,
+                    (py + 0.5f) *
+                        sampleSize);
+            for (int px = 0;
+                 px < textureWidth; px++) {
+                const float screenX =
+                    std::min(
+                        screenW - 0.5f,
+                        (px + 0.5f) *
+                            sampleSize);
+                int alpha =
+                    fogAt(
+                        screenX, screenY);
+                alpha =
+                    std::min(
+                        255,
+                        (alpha + 4) & ~7);
+                const size_t offset =
+                    ((size_t)py *
+                         textureWidth +
+                     px) *
+                    4;
+                fogPixels_[offset] = 0;
+                fogPixels_[offset + 1] = 0;
+                fogPixels_[offset + 2] = 0;
+                fogPixels_[offset + 3] =
+                    (uint8_t)alpha;
+            }
+        }
+        if (fogTexture_ &&
+            !renderer.updateTexture(
+                fogTexture_,
+                fogPixels_.data())) {
+            renderer.destroyTexture(
+                fogTexture_);
+            fogTexture_ = nullptr;
+        }
+        if (!fogTexture_)
+            fogTexture_ =
+                renderer.createTexture(
+                    textureWidth,
+                    textureHeight,
+                    fogPixels_.data());
+        if (!fogTexture_) {
+            log(
+                "fog overlay texture allocation failed");
+            return;
+        }
+        fogOriginX_ = originX;
+        fogOriginY_ = originY;
+        fogZoom_ = zoom_;
+        fogPlayer_ = localPlayer_;
+        fogForceExplore_ =
+            forceExploreCheat_;
+        fogVisibilityGeneration_ =
+            visibilityGeneration_;
+    }
+    renderer.draw(
+        fogTexture_,
+        {0.0f, 0.0f,
+         screenW / zoom_,
+         screenH / zoom_,
+         0.0f, 0.0f,
+         (float)textureWidth,
+         (float)textureHeight});
+}
+
 void Game::drawGraphicNow(Renderer &r, int graphicId, float sx, float sy, float facing, float t, int player) {
     g_draws.clear();
     drawGraphic(r, graphicId, sx, sy, facing, t, player, 0, 0, true, 0, 0);
@@ -21064,21 +21362,6 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             else if (visualUnit->walkingGraphic >= 0)
                 gid = visualUnit->walkingGraphic;
         }
-        if (o.carriedHolocronId &&
-            o.unit->id >= 0 &&
-            (size_t)o.unit->id <
-                assets_.dat()
-                    .unitHeaders.size())
-            for (const dat::Task &task :
-                 assets_.dat()
-                     .unitHeaders[
-                         (size_t)o.unit->id]
-                     .tasks)
-                if (task.actionType == 132 &&
-                    task.carryingGraphic >= 0) {
-                    gid = task.carryingGraphic;
-                    break;
-                }
         if (o.state == State::Attack &&
             o.unit->attackGraphic >= 0)
             gid = o.unit->attackGraphic;
@@ -21184,6 +21467,40 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 o.player > 0 &&
                     o.unit->type != dat::UT_Building,
                 powerState, graphicFrameOverride);
+        }
+        if (o.carriedHolocronId) {
+            const Object *holocron =
+                findObject(
+                    o.carriedHolocronId);
+            if (holocron &&
+                holocron->active &&
+                holocron->unit) {
+                int holocronGraphic =
+                    o.state == State::Walk &&
+                            holocron->unit
+                                    ->walkingGraphic >=
+                                0
+                        ? holocron->unit
+                              ->walkingGraphic
+                        : holocron->unit
+                              ->standingGraphic[0];
+                holocronGraphic =
+                    civilizationGraphic(
+                        holocronGraphic,
+                        holocron->player);
+                drawGraphic(
+                    r, holocronGraphic,
+                    sx, sy, 0.0f,
+                    o.animTime,
+                    holocron->player,
+                    0, 0, false,
+                    viewW, viewH,
+                    std::min(
+                        graphicSortLayer(gid),
+                        20),
+                    120, sy,
+                    o.spawnId, false);
+            }
         }
         // Garrison indicator (0x55ec20): the building's own garrisonGraphic
         // overlay while anything is inside (not the animal nursery, 319).
@@ -21841,157 +22158,11 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         r.fillRect(sx + pulse, sy - pulse, 2 / zoom_, pulse * 2, 255, 255, 0, 220);
     }
 
-    for (const Object &carrier : objects_) {
-        if (!carrier.active ||
-            carrier.hidden ||
-            !carrier.draw ||
-            !carrier.carriedHolocronId ||
-            !objectCurrentlyVisibleToPlayer(
-                carrier, localPlayer_))
-            continue;
-        float sx = 0.0f, sy = 0.0f;
-        objectScreenPosition(
-            carrier, screenW, screenH,
-            sx, sy);
-        const float invZoom =
-            1.0f / zoom_;
-        sx *= invZoom;
-        sy = sy * invZoom -
-             32.0f * invZoom;
-        const float size =
-            4.0f * invZoom;
-        r.fillRect(
-            sx - size, sy - size,
-            size * 2.0f, size * 2.0f,
-            248, 221, 72, 230);
-        r.fillRect(
-            sx - size * 0.5f,
-            sy - size * 1.5f,
-            size, size * 3.0f,
-            255, 246, 168, 245);
-    }
-
     if (localPlayer_ > 0 &&
-        !forceSightCheat_) {
-        auto tileDarkness =
-            [&](int x, int y) -> float {
-            if (x < 0 || y < 0 ||
-                x >= mapSize_ || y >= mapSize_)
-                return 255.0f;
-            if (tileVisible(
-                    localPlayer_, x, y))
-                return 0.0f;
-            return tileExplored(
-                       localPlayer_, x, y)
-                       ? 138.0f
-                       : 255.0f;
-        };
-        auto fogAt =
-            [&](float screenX,
-                float screenY) -> uint8_t {
-            const float projectedX =
-                ox + screenX / zoom_;
-            const float projectedY =
-                oy + screenY / zoom_;
-            float worldX = 0.0f;
-            float worldY = 0.0f;
-            float adjustedY = projectedY;
-            for (int pass = 0; pass < 2;
-                 pass++) {
-                worldX =
-                    (projectedX / kTileHalfW +
-                     adjustedY / kTileHalfH) *
-                    0.5f;
-                worldY =
-                    (adjustedY / kTileHalfH -
-                     projectedX / kTileHalfW) *
-                    0.5f;
-                if (worldX < 0.0f ||
-                    worldY < 0.0f ||
-                    worldX >= mapSize_ ||
-                    worldY >= mapSize_)
-                    break;
-                adjustedY =
-                    projectedY +
-                    elevationAt(worldX, worldY) *
-                         assets_.dat()
-                             .terrainBlock
-                             .elevHeight;
-            }
-            if (worldX < 0.0f ||
-                worldY < 0.0f ||
-                worldX >= mapSize_ ||
-                worldY >= mapSize_)
-                return 255;
-            const float gridX = worldX - 0.5f;
-            const float gridY = worldY - 0.5f;
-            const int x = (int)std::floor(gridX);
-            const int y = (int)std::floor(gridY);
-            float fx = gridX - x;
-            float fy = gridY - y;
-            fx = fx * fx *
-                 (3.0f - 2.0f * fx);
-            fy = fy * fy *
-                 (3.0f - 2.0f * fy);
-            const float top =
-                tileDarkness(x, y) *
-                    (1.0f - fx) +
-                tileDarkness(x + 1, y) * fx;
-            const float bottom =
-                tileDarkness(x, y + 1) *
-                    (1.0f - fx) +
-                tileDarkness(x + 1, y + 1) *
-                    fx;
-            const int alpha = (int)std::lround(
-                top * (1.0f - fy) +
-                bottom * fy);
-            return (uint8_t)std::max(
-                0, std::min(255, alpha));
-        };
-        constexpr int sampleSize = 4;
-        for (int screenY = 0;
-             screenY < screenH;
-             screenY += sampleSize) {
-            int runStart = 0;
-            int runAlpha = -1;
-            for (int screenX = 0;
-                 screenX <= screenW;
-                 screenX += sampleSize) {
-                int alpha = -1;
-                if (screenX < screenW) {
-                    alpha = fogAt(
-                         std::min(
-                             screenW - 0.5f,
-                             screenX +
-                                 sampleSize * 0.5f),
-                         std::min(
-                             screenH - 0.5f,
-                             screenY +
-                                 sampleSize * 0.5f));
-                    alpha =
-                         std::min(
-                             255,
-                             (alpha + 4) & ~7);
-                }
-                if (alpha == runAlpha)
-                    continue;
-                if (runAlpha > 0)
-                    r.fillRect(
-                         runStart / zoom_,
-                         screenY / zoom_,
-                         (screenX - runStart) /
-                             zoom_,
-                         std::min(
-                             sampleSize,
-                             screenH - screenY) /
-                             zoom_,
-                         0, 0, 0,
-                         (uint8_t)runAlpha);
-                runStart = screenX;
-                runAlpha = alpha;
-            }
-        }
-    }
+        !forceSightCheat_)
+        drawFogOverlay(
+            r, screenW, screenH,
+            ox, oy);
 
     for (const Object &object : objects_) {
         if (!object.active || object.hidden || !object.draw || !object.selected) continue;
@@ -22503,6 +22674,73 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 4.0f * invZoom,
                 244, 190, 43, 255);
         }
+        const bool showsForcePower =
+            !panelMixedUnits &&
+            conversionTask(
+                *panelObject) != nullptr;
+        if (showsForcePower) {
+            const float charge =
+                conversionChargeFraction(
+                    *panelObject);
+            std::string label =
+                assets_.localizedString(
+                    42027);
+            if (label.empty())
+                label = "Force Power";
+            if (label.size() > 18)
+                label.resize(18);
+            const float gaugeY =
+                panelY +
+                68.0f * invZoom;
+            const float gaugeX =
+                infoX +
+                104.0f * invZoom;
+            const float gaugeWidth =
+                136.0f * invZoom;
+            drawBitmapText(
+                r, {label},
+                infoX, gaugeY,
+                0.9f * invZoom,
+                194, 220, 240);
+            r.fillRect(
+                gaugeX, gaugeY,
+                gaugeWidth,
+                10.0f * invZoom,
+                0, 0, 0, 255);
+            r.fillRect(
+                gaugeX +
+                    1.0f * invZoom,
+                gaugeY +
+                    1.0f * invZoom,
+                (gaugeWidth -
+                 2.0f * invZoom) *
+                    charge,
+                8.0f * invZoom,
+                charge >= 0.9999f
+                    ? 80
+                    : 55,
+                charge >= 0.9999f
+                    ? 212
+                    : 135,
+                235, 255);
+            drawBitmapText(
+                r,
+                {std::to_string(
+                     (int)std::lround(
+                         charge * 100.0f)) +
+                 "%"},
+                infoX +
+                    247.0f * invZoom,
+                gaugeY,
+                0.9f * invZoom,
+                charge >= 0.9999f
+                    ? 210
+                    : 165,
+                charge >= 0.9999f
+                    ? 245
+                    : 205,
+                255);
+        }
         }
 
         std::string combatLine;
@@ -22655,10 +22893,23 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 statRows.push_back({resourceIcon[type], text, 43201 + slotForResource[type]});
             }
         }
+        const bool forcePowerRow =
+            !panelMixedUnits &&
+            conversionTask(
+                *panelObject) != nullptr;
+        const float statTextY =
+            panelY +
+            (forcePowerRow
+                 ? 88.0f
+                 : 67.0f) *
+                invZoom;
+        const float statIconY =
+            statTextY -
+            4.0f * invZoom;
         if (!combatLine.empty())
             drawBitmapText(
                 r, {combatLine}, infoX,
-                panelY + 67.0f * invZoom,
+                statTextY,
                 1.4f * invZoom,
                 190, 210, 220);
         else if (!statRows.empty()) {
@@ -22670,7 +22921,8 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 const float rowRight = rowX + 30.0f * invZoom + textWidth(row.text, 1.4f * invZoom);
                 const float cx = cursorX_ * invZoom, cy = cursorY_ * invZoom;
                 if (cursorVisible_ && row.help >= 0 && cx >= rowX && cx < rowRight &&
-                    cy >= panelY + 60.0f * invZoom && cy < panelY + 84.0f * invZoom) {
+                    cy >= statIconY - 3.0f * invZoom &&
+                    cy < statTextY + 17.0f * invZoom) {
                     hoveredHelp = row.help;
                     hoveredX = rowX;
                 }
@@ -22678,11 +22930,11 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                     const SpriteFrame &icon = itemIcons->frames[(size_t)row.icon];
                     const float size = 18.0f * invZoom;
                     const float scale = std::min(size / icon.w, size / icon.h);
-                    r.draw(icon.tex, {rowX, panelY + 63.0f * invZoom, icon.w * scale,
+                    r.draw(icon.tex, {rowX, statIconY, icon.w * scale,
                                       icon.h * scale, icon.u, icon.v, icon.u + icon.w,
                                       icon.v + icon.h});
                 }
-                drawBitmapText(r, {row.text}, rowX + 22.0f * invZoom, panelY + 67.0f * invZoom,
+                drawBitmapText(r, {row.text}, rowX + 22.0f * invZoom, statTextY,
                                1.4f * invZoom, 230, 235, 235);
                 rowX += 30.0f * invZoom + textWidth(row.text, 1.4f * invZoom);
             }
@@ -23799,6 +24051,64 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                          icon.u, icon.v,
                          icon.u + icon.w,
                          icon.v + icon.h});
+                }
+                const bool conversionRecharging =
+                    unitCommandOption &&
+                    option <
+                        unitCommandOptions.size() &&
+                    unitCommandOptions[option] ==
+                        UnitCommand::Convert &&
+                    conversionChargeFraction(
+                        *subject) < 0.9999f;
+                if (conversionRecharging) {
+                    const float charge =
+                        conversionChargeFraction(
+                            *subject);
+                    r.fillRect(
+                        (x + 2.0f) * invZoom,
+                        (y + 2.0f) * invZoom,
+                        (kActionMenuIconSize -
+                         4.0f) *
+                            invZoom,
+                        (kActionMenuIconSize -
+                         4.0f) *
+                            invZoom,
+                        0, 0, 0, 150);
+                    r.fillRect(
+                        (x + 4.0f) * invZoom,
+                        (y +
+                         kActionMenuIconSize -
+                         8.0f) *
+                            invZoom,
+                        (kActionMenuIconSize -
+                         8.0f) *
+                            invZoom,
+                        5.0f * invZoom,
+                        20, 28, 36, 255);
+                    r.fillRect(
+                        (x + 4.0f) * invZoom,
+                        (y +
+                         kActionMenuIconSize -
+                         8.0f) *
+                            invZoom,
+                        (kActionMenuIconSize -
+                         8.0f) *
+                            charge * invZoom,
+                        5.0f * invZoom,
+                        55, 150, 230, 255);
+                    drawBitmapText(
+                        r,
+                        {std::to_string(
+                             (int)std::lround(
+                                 charge *
+                                 100.0f)) +
+                         "%"},
+                        (x + 8.0f) *
+                            invZoom,
+                        (y + 14.0f) *
+                            invZoom,
+                        0.85f * invZoom,
+                        210, 230, 245);
                 }
                 const bool locked =
                     technology &&
