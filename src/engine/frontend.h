@@ -7,6 +7,7 @@
 #include "skirmish.h"
 
 #include <cstddef>
+#include <array>
 #include <functional>
 #include <string>
 #include <vector>
@@ -85,6 +86,29 @@ public:
         const SpriteFrame *frame) {
         originalMenuBackground_ = frame;
     }
+    void setOriginalBriefingDialog(
+        const SpriteFrame *frame) {
+        originalBriefingDialog_ = frame;
+    }
+    void setOriginalMenuDecoration(
+        const SpriteFrame *logo,
+        const SpriteFrame *button,
+        const SpriteFrame *selectedButton) {
+        originalMenuLogo_ = logo;
+        originalMenuButton_ = button;
+        originalMenuSelectedButton_ =
+            selectedButton;
+    }
+    void setOriginalCampaignIcon(
+        size_t campaign,
+        const SpriteFrame *normal,
+        const SpriteFrame *selected) {
+        if (campaign >=
+            originalCampaignIcons_.size())
+            return;
+        originalCampaignIcons_[campaign] = {
+            normal, selected};
+    }
     void setDataStatus(
         size_t campaigns, size_t missions,
         bool optionalMedia) {
@@ -159,6 +183,15 @@ public:
 private:
     const SpriteFrame *originalMenuBackground_ =
         nullptr;
+    const SpriteFrame *originalBriefingDialog_ =
+        nullptr;
+    const SpriteFrame *originalMenuLogo_ = nullptr;
+    const SpriteFrame *originalMenuButton_ = nullptr;
+    const SpriteFrame *originalMenuSelectedButton_ =
+        nullptr;
+    std::array<
+        std::array<const SpriteFrame *, 2>, 6>
+        originalCampaignIcons_{};
     void moveSelection(int direction, size_t count);
     void adjustLobbyValue(int direction);
     void refreshLobbyPreview();

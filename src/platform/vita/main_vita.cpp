@@ -21,6 +21,7 @@
 #include <vitaGL.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdarg>
 #include <cstdio>
@@ -332,16 +333,127 @@ int main() {
                 "SETTINGS WERE CORRUPT; DEFAULTS RESTORED");
         }
         frontend.setUserSettings(userSettings);
-        const swgb::SpriteFrame *originalMenu =
-            assets.interfaceFrame(50189, 0, 50589);
-        if (originalMenu) {
-            frontend.setOriginalMenuBackground(originalMenu);
-            logf(
-                "original Clone Campaigns menu background loaded");
-        } else {
-            logf(
-                "original menu background unavailable; using native fallback");
+        frontend.setOriginalMenuDecoration(
+            assets.interfaceFrame(50189, 49, 50589),
+            assets.interfaceFrame(50688, 4, 50589),
+            assets.interfaceFrame(50688, 6, 50589));
+        constexpr std::array<size_t, 6>
+            campaignIconFrames{{1, 5, 9, 13, 17, 29}};
+        for (size_t campaign = 0;
+             campaign < campaignIconFrames.size();
+             ++campaign) {
+            const size_t frame =
+                campaignIconFrames[campaign];
+            frontend.setOriginalCampaignIcon(
+                campaign,
+                assets.interfaceFrame(
+                    53014, frame, 53016),
+                assets.interfaceFrame(
+                    53014, frame + 1, 53016));
         }
+        int frontendBackgroundSlp = -1;
+        int frontendBackgroundPalette = -1;
+        int frontendDialogSlp = -1;
+        int frontendDialogPalette = -1;
+        auto campaignThemeNumber = [&]() {
+            if (frontend.selectedCampaign() >=
+                catalog.campaigns().size())
+                return 1;
+            const std::string &archive =
+                catalog.campaigns()[
+                    frontend.selectedCampaign()]
+                    .archiveName;
+            for (int number :
+                 {1, 2, 3, 4, 5, 8})
+                if (archive.find(
+                        std::to_string(number)) !=
+                    std::string::npos)
+                    return number;
+            return 1;
+        };
+        auto refreshOriginalFrontendArt = [&]() {
+            int backgroundSlp = -1;
+            int backgroundPalette = -1;
+            int dialogSlp = -1;
+            int dialogPalette = -1;
+            switch (frontend.screen()) {
+            case swgb::FrontendScreen::Title:
+            case swgb::FrontendScreen::MainMenu:
+            case swgb::FrontendScreen::SinglePlayer:
+            case swgb::FrontendScreen::Options:
+            case swgb::FrontendScreen::DataStatus:
+            case swgb::FrontendScreen::Confirm:
+            case swgb::FrontendScreen::Outcome:
+                backgroundSlp = 50189;
+                backgroundPalette = 50589;
+                break;
+            case swgb::FrontendScreen::CampaignBrowser:
+                backgroundSlp = 53014;
+                backgroundPalette = 53016;
+                break;
+            case swgb::FrontendScreen::CampaignMissions:
+            case swgb::FrontendScreen::CampaignBriefing: {
+                const int theme =
+                    campaignThemeNumber();
+                backgroundSlp = 53100 + theme;
+                backgroundPalette = 53110 + theme;
+                if (frontend.screen() ==
+                    swgb::FrontendScreen::
+                        CampaignBriefing) {
+                    dialogSlp =
+                        theme == 8
+                            ? 53164
+                            : 53160 + theme;
+                    dialogPalette =
+                        theme == 8
+                            ? 53114
+                            : backgroundPalette;
+                }
+                break;
+            }
+            default:
+                break;
+            }
+            if (backgroundSlp !=
+                    frontendBackgroundSlp ||
+                backgroundPalette !=
+                    frontendBackgroundPalette) {
+                const swgb::SpriteFrame *next =
+                    backgroundSlp >= 0
+                        ? assets.interfaceFrame(
+                              backgroundSlp, 0,
+                              backgroundPalette)
+                        : nullptr;
+                frontend.setOriginalMenuBackground(next);
+                if (frontendBackgroundSlp >= 0)
+                    assets.releaseInterfaceFrame(
+                        frontendBackgroundSlp, 0,
+                        frontendBackgroundPalette);
+                frontendBackgroundSlp = backgroundSlp;
+                frontendBackgroundPalette =
+                    backgroundPalette;
+            }
+            if (dialogSlp != frontendDialogSlp ||
+                dialogPalette !=
+                    frontendDialogPalette) {
+                const swgb::SpriteFrame *next =
+                    dialogSlp >= 0
+                        ? assets.interfaceFrame(
+                              dialogSlp, 0,
+                              dialogPalette)
+                        : nullptr;
+                frontend.setOriginalBriefingDialog(next);
+                if (frontendDialogSlp >= 0)
+                    assets.releaseInterfaceFrame(
+                        frontendDialogSlp, 0,
+                        frontendDialogPalette);
+                frontendDialogSlp = dialogSlp;
+                frontendDialogPalette = dialogPalette;
+            }
+        };
+        refreshOriginalFrontendArt();
+        logf(
+            "original widescreen frontend art initialized");
         assets.setBuildsPerFrame(3);
         swgb::MatchSaveMetadata savedMetadata;
         std::string saveProbeError;
@@ -1021,6 +1133,7 @@ int main() {
                 budget = std::max<size_t>(32u * 1024u * 1024u, std::min<size_t>(budget, 160u * 1024u * 1024u));
                 game.setTextureBudget(budget);
             }
+            refreshOriginalFrontendArt();
             const uint64_t t0 = sceKernelGetProcessTimeWide();
             if (frontend.screen() ==
                 swgb::FrontendScreen::Gameplay)
@@ -1045,12 +1158,14 @@ int main() {
             swapUs += t3 - t2;
             frames++;
             if (now - statT >= 5000000) {
-                logf("fps=%.1f ms upd/rnd/swap=%.1f/%.1f/%.1f draws=%d quads=%d sprites=%d sheets=%u tex=%.1fMB "
+                logf("fps=%.1f ms upd/rnd/swap=%.1f/%.1f/%.1f draws=%d quads=%d sprites=%d vis=%d sheets=%u tex=%.1fMB "
                      "builds=%u free vram/ram/phy=%.1f/%.1f/%.1fMB menu=%d sel=%u zoom=%.2f",
                      frames * 1e6 / (double)(now - statT),
                      frames ? updateUs / 1000.0 / frames : 0.0, frames ? renderUs / 1000.0 / frames : 0.0,
                      frames ? swapUs / 1000.0 / frames : 0.0, renderer.drawCalls(), renderer.quads(),
-                     game.stats().sprites, (unsigned)assets.sheetCount(),
+                     game.stats().sprites,
+                     game.stats().visibilityChecks,
+                     (unsigned)assets.sheetCount(),
                      assets.textureBytes() / 1048576.0,
                      (unsigned)(assets.buildCount() - lastBuilds),
                      vglMemFree(VGL_MEM_VRAM) / 1048576.0, vglMemFree(VGL_MEM_RAM) / 1048576.0,

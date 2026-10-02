@@ -15,6 +15,19 @@ constexpr float kMenuTop = 154.0f;
 constexpr float kMenuRow = 46.0f;
 constexpr float kLobbyTop = 91.0f;
 constexpr float kLobbyRow = 28.0f;
+constexpr float kOriginalMenuTop = 120.0f;
+constexpr float kOriginalMenuRow = 48.0f;
+constexpr float kOriginalMissionTop = 108.0f;
+constexpr float kOriginalMissionRow = 43.0f;
+constexpr std::array<std::array<float, 2>, 6>
+    kCampaignIconPositions{{
+        {{368.0f, 82.0f}},
+        {{540.0f, 150.0f}},
+        {{548.0f, 300.0f}},
+        {{368.0f, 362.0f}},
+        {{190.0f, 300.0f}},
+        {{184.0f, 150.0f}},
+    }};
 
 void centeredText(
     Renderer &renderer, const std::string &value,
@@ -511,8 +524,14 @@ FrontendAction Frontend::update(
 
     if (screen_ == FrontendScreen::MainMenu) {
         constexpr size_t count = 6;
+        const float scaleY =
+            input.screenH > 0
+                ? input.screenH / 600.0f
+                : 1.0f;
         const size_t touched =
-            rowFromPointer(input, kMenuTop, kMenuRow, count);
+            rowFromPointer(
+                input, kOriginalMenuTop * scaleY,
+                kOriginalMenuRow * scaleY, count);
         if (touched < count) selection_ = touched;
         if (input.menuUp) moveSelection(-1, count);
         if (input.menuDown) moveSelection(1, count);
@@ -547,8 +566,14 @@ FrontendAction Frontend::update(
 
     if (screen_ == FrontendScreen::SinglePlayer) {
         constexpr size_t count = 4;
+        const float scaleY =
+            input.screenH > 0
+                ? input.screenH / 600.0f
+                : 1.0f;
         const size_t touched =
-            rowFromPointer(input, kMenuTop, kMenuRow, count);
+            rowFromPointer(
+                input, kOriginalMenuTop * scaleY,
+                kOriginalMenuRow * scaleY, count);
         if (touched < count) selection_ = touched;
         if (input.menuUp) moveSelection(-1, count);
         if (input.menuDown) moveSelection(1, count);
@@ -592,8 +617,31 @@ FrontendAction Frontend::update(
     if (screen_ == FrontendScreen::CampaignBrowser) {
         const size_t count =
             catalog_ ? catalog_->campaigns().size() : 0;
-        const size_t touched =
-            rowFromPointer(input, 132, 50, count);
+        size_t touched = count;
+        if (input.pointerTap &&
+            input.screenW > 0 && input.screenH > 0) {
+            const float logicalX =
+                input.pointerX * 800.0f /
+                input.screenW;
+            const float logicalY =
+                input.pointerY * 600.0f /
+                input.screenH;
+            for (size_t index = 0;
+                 index < std::min(
+                     count,
+                     kCampaignIconPositions.size());
+                 ++index) {
+                const auto &position =
+                    kCampaignIconPositions[index];
+                if (logicalX >= position[0] &&
+                    logicalX < position[0] + 63.0f &&
+                    logicalY >= position[1] &&
+                    logicalY < position[1] + 57.0f) {
+                    touched = index;
+                    break;
+                }
+            }
+        }
         if (touched < count) selection_ = touched;
         if (input.menuUp) moveSelection(-1, count);
         if (input.menuDown) moveSelection(1, count);
@@ -619,8 +667,16 @@ FrontendAction Frontend::update(
                 : nullptr;
         const size_t count =
             campaign ? campaign->missions.size() : 0;
+        const float scaleY =
+            input.screenH > 0
+                ? input.screenH / 600.0f
+                : 1.0f;
         const size_t touched =
-            rowFromPointer(input, 120, 43, count);
+            rowFromPointer(
+                input,
+                kOriginalMissionTop * scaleY,
+                kOriginalMissionRow * scaleY,
+                count);
         if (touched < count) selection_ = touched;
         if (input.menuUp) moveSelection(-1, count);
         if (input.menuDown) moveSelection(1, count);
@@ -659,8 +715,25 @@ FrontendAction Frontend::update(
 
     if (screen_ == FrontendScreen::CampaignBriefing) {
         constexpr size_t count = 2;
-        const size_t touched =
-            rowFromPointer(input, 438, 44, count);
+        size_t touched = count;
+        if (input.pointerTap &&
+            input.screenW > 0 && input.screenH > 0) {
+            const float logicalX =
+                input.pointerX * 800.0f /
+                input.screenW;
+            const float logicalY =
+                input.pointerY * 600.0f /
+                input.screenH;
+            if (logicalY >= 458.0f &&
+                logicalY < 500.0f) {
+                if (logicalX >= 228.0f &&
+                    logicalX < 415.0f)
+                    touched = 0;
+                else if (logicalX >= 428.0f &&
+                         logicalX < 615.0f)
+                    touched = 1;
+            }
+        }
         if (touched < count) selection_ = touched;
         if (input.menuLeft || input.menuUp)
             moveSelection(-1, count);
@@ -1077,41 +1150,121 @@ void Frontend::render(
     if (originalMenuBackground_ &&
         originalMenuBackground_->tex &&
         screen_ != FrontendScreen::Loading) {
-        const float scale =
-            std::min(
-                screenW /
-                    (float)originalMenuBackground_->w,
-                screenH /
-                    (float)originalMenuBackground_->h);
-        const float width =
-            originalMenuBackground_->w * scale;
-        const float height =
-            originalMenuBackground_->h * scale;
-        const float x = (screenW - width) * 0.5f;
-        const float y = (screenH - height) * 0.5f;
         renderer.draw(
             originalMenuBackground_->tex,
             Quad{
-                x, y, width, height,
+                0, 0, (float)screenW, (float)screenH,
                 originalMenuBackground_->u,
                 originalMenuBackground_->v,
                 originalMenuBackground_->u +
                     originalMenuBackground_->w,
                 originalMenuBackground_->v +
                     originalMenuBackground_->h});
-        renderer.fillRect(
-            0, 0, (float)screenW, (float)screenH,
-            0, 0, 0, 92);
     }
-    renderer.fillRect(
-        0, 0, (float)screenW, 82,
-        8, 24, 43, 255);
-    renderer.fillRect(
-        0, 80, (float)screenW, 2,
-        202, 168, 74, 255);
-    renderer.fillRect(
-        0, 82, (float)screenW, 7,
-        23, 55, 79, 255);
+    const bool originalLayout =
+        originalMenuBackground_ &&
+        (screen_ == FrontendScreen::MainMenu ||
+         screen_ == FrontendScreen::SinglePlayer ||
+         screen_ == FrontendScreen::CampaignBrowser ||
+         screen_ == FrontendScreen::CampaignMissions ||
+         screen_ == FrontendScreen::CampaignBriefing);
+    if (!originalLayout) {
+        renderer.fillRect(
+            0, 0, (float)screenW, 82,
+            8, 24, 43, 255);
+        renderer.fillRect(
+            0, 80, (float)screenW, 2,
+            202, 168, 74, 255);
+        renderer.fillRect(
+            0, 82, (float)screenW, 7,
+            23, 55, 79, 255);
+    }
+    const float originalScaleX =
+        screenW / 800.0f;
+    const float originalScaleY =
+        screenH / 600.0f;
+    const auto drawOriginalFrame =
+        [&](const SpriteFrame *frame,
+            float x, float y,
+            float width = -1.0f,
+            float height = -1.0f) {
+            if (!frame || !frame->tex) return;
+            if (width < 0.0f) width = frame->w;
+            if (height < 0.0f) height = frame->h;
+            renderer.draw(
+                frame->tex,
+                Quad{
+                    x * originalScaleX,
+                    y * originalScaleY,
+                    width * originalScaleX,
+                    height * originalScaleY,
+                    frame->u, frame->v,
+                    frame->u + frame->w,
+                    frame->v + frame->h});
+        };
+    const auto drawOriginalText =
+        [&](const std::string &value,
+            float x, float y, float scale,
+            uint8_t red, uint8_t green,
+            uint8_t blue) {
+            drawUiText(
+                renderer, {value},
+                x * originalScaleX,
+                y * originalScaleY,
+                scale * originalScaleY,
+                red, green, blue);
+        };
+    const auto centerOriginalText =
+        [&](const std::string &value,
+            float centerX, float y,
+            float scale, uint8_t red,
+            uint8_t green, uint8_t blue) {
+            const float actualScale =
+                scale * originalScaleY;
+            drawUiText(
+                renderer, {value},
+                centerX * originalScaleX -
+                    uiTextWidth(
+                        value, actualScale) *
+                        0.5f,
+                y * originalScaleY,
+                actualScale,
+                red, green, blue);
+        };
+    const auto drawOriginalList =
+        [&](const std::string &title,
+            const std::vector<std::string> &entries) {
+            drawOriginalFrame(
+                originalMenuLogo_, 0, 0,
+                142, 61);
+            centerOriginalText(
+                title, 590, 19, 1.22f,
+                215, 226, 233);
+            for (size_t index = 0;
+                 index < entries.size(); ++index) {
+                const float y =
+                    kOriginalMenuTop +
+                    index * kOriginalMenuRow;
+                drawOriginalFrame(
+                    index == selection_
+                        ? originalMenuSelectedButton_
+                        : originalMenuButton_,
+                    414, y - 11, 32, 32);
+                drawOriginalText(
+                    entries[index],
+                    454, y, 1.18f,
+                    index == selection_ ? 255 : 190,
+                    index == selection_ ? 226 : 210,
+                    index == selection_ ? 122 : 222);
+            }
+            const std::string footer =
+                message_.empty()
+                    ? "X: SELECT    O: BACK"
+                    : message_;
+            drawOriginalText(
+                footer, 414, 531, 0.72f,
+                167, 193, 211);
+        };
 
     const auto drawMenu =
         [&](const std::string &title,
@@ -1171,8 +1324,8 @@ void Frontend::render(
         renderer.fillRect(
             230, 321, 360, 4, 222, 183, 76, 255);
     } else if (screen_ == FrontendScreen::MainMenu) {
-        drawMenu(
-            text(9201, "GALACTIC BATTLEGROUNDS"),
+        drawOriginalList(
+            text(11241, "MAIN MENU"),
             {text(9202, "SINGLE PLAYER"),
              text(9203, "MULTIPLAYER") + " - UNAVAILABLE",
              text(9206, "SCENARIO EDITOR"),
@@ -1180,7 +1333,7 @@ void Frontend::render(
              text(9209, "CREDITS / DATA STATUS"),
              text(9207, "EXIT")});
     } else if (screen_ == FrontendScreen::SinglePlayer) {
-        drawMenu(
+        drawOriginalList(
             text(9202, "SINGLE PLAYER"),
             {text(11242, "CAMPAIGNS"),
              text(9226, "SKIRMISH"),
@@ -1188,19 +1341,39 @@ void Frontend::render(
                  (continueAvailable_ ? "" : " - NONE"),
              text(11241, "MAIN MENU")});
     } else if (screen_ == FrontendScreen::CampaignBrowser) {
-        std::vector<std::string> entries;
+        centerOriginalText(
+            text(11242, "CAMPAIGNS"),
+            400, 18, 1.3f,
+            215, 226, 233);
         if (catalog_)
-            for (const CampaignInfo &campaign :
-                 catalog_->campaigns())
-                entries.push_back(campaign.title);
-        drawMenu(
-            text(11242, "CAMPAIGNS"), entries, 132, 50);
-        if (catalog_ && selection_ < catalog_->campaigns().size())
+            for (size_t index = 0;
+                 index < std::min(
+                     catalog_->campaigns().size(),
+                     originalCampaignIcons_.size());
+                 ++index) {
+                const auto &position =
+                    kCampaignIconPositions[index];
+                drawOriginalFrame(
+                    originalCampaignIcons_[index][
+                        index == selection_ ? 1 : 0],
+                    position[0], position[1],
+                    63, 57);
+            }
+        if (catalog_ &&
+            selection_ < catalog_->campaigns().size()) {
+            centerOriginalText(
+                catalog_->campaigns()[selection_].title,
+                400, 455, 1.1f,
+                255, 226, 122);
             wrappedText(
                 renderer,
                 catalog_->campaigns()[selection_].description,
-                185, 465, 0.72f, 100, 3,
+                50 * originalScaleX,
+                485 * originalScaleY,
+                0.66f * originalScaleY,
+                105, 3,
                 151, 177, 199);
+        }
     } else if (screen_ == FrontendScreen::CampaignMissions) {
         const CampaignInfo *campaign =
             catalog_ &&
@@ -1223,63 +1396,107 @@ void Frontend::render(
                     campaign->missions[i].title +
                     (unlocked ? "" : " [LOCKED]"));
             }
-        drawMenu(
+        centerOriginalText(
             campaign ? campaign->title : "CAMPAIGN",
-            entries, 120, 43);
-        centeredText(
-            renderer,
+            400, 18, 1.3f,
+            215, 226, 233);
+        for (size_t index = 0;
+             index < entries.size(); ++index) {
+            const float y =
+                kOriginalMissionTop +
+                index * kOriginalMissionRow;
+            if (index == selection_)
+                renderer.fillRect(
+                    54 * originalScaleX,
+                    (y - 7) * originalScaleY,
+                    405 * originalScaleX,
+                    31 * originalScaleY,
+                    18, 38, 53, 205);
+            drawOriginalText(
+                entries[index], 72, y, 0.92f,
+                index == selection_ ? 255 : 190,
+                index == selection_ ? 226 : 210,
+                index == selection_ ? 122 : 222);
+        }
+        centerOriginalText(
             std::string("DIFFICULTY: ") +
-                difficultyName(
-                    profile_ ? profile_->difficulty : 2) +
-                "   L/R CHANGE   L TRIGGER: " +
-                (profile_ && profile_->developmentAccess
-                     ? "DEVELOPMENT ACCESS ON"
-                     : "SEQUENTIAL PROGRESSION"),
-            493, 0.85f, screenW, 151, 177, 199);
+                    difficultyName(
+                        profile_
+                            ? profile_->difficulty
+                            : 2) +
+                    "   L/R CHANGE   " +
+                    (profile_ &&
+                             profile_->developmentAccess
+                         ? "DEVELOPMENT ACCESS"
+                         : "SEQUENTIAL PROGRESSION"),
+            400, 531, 0.68f,
+            151, 177, 199);
     } else if (screen_ ==
                FrontendScreen::CampaignBriefing) {
         const CampaignMission *mission =
             selectedCampaignMission();
-        centeredText(
-            renderer,
+        drawOriginalFrame(
+            originalBriefingDialog_,
+            150, 98, 499, 404);
+        centerOriginalText(
             mission ? mission->title : "MISSION BRIEFING",
-            25, 2.2f, screenW, 235, 213, 145);
-        panel(renderer, 70, 101, 820, 316);
+            399, 116, 1.12f,
+            225, 231, 234);
         if (mission) {
-            drawUiText(
-                renderer,
-                {mission->faction + "   |   " +
-                 std::to_string(mission->mapSize) + "x" +
-                 std::to_string(mission->mapSize) +
-                 "   |   " +
-                 difficultyName(
-                     profile_ ? profile_->difficulty : 2)},
-                92, 122, 1.0f, 151, 190, 218);
+            drawOriginalText(
+                mission->faction + "   |   " +
+                    std::to_string(mission->mapSize) +
+                    "x" +
+                    std::to_string(mission->mapSize) +
+                    "   |   " +
+                    difficultyName(
+                        profile_
+                            ? profile_->difficulty
+                            : 2),
+                220, 158, 0.72f,
+                151, 190, 218);
             wrappedText(
-                renderer, mission->description,
-                92, 156, 0.88f, 98, 10,
+                renderer,
+                mission->description,
+                220 * originalScaleX,
+                190 * originalScaleY,
+                0.68f * originalScaleY,
+                70, 9,
                 214, 222, 228);
             if (!mission->objectives.empty()) {
-                drawUiText(
-                    renderer, {"OBJECTIVES"}, 92, 330,
-                    1.0f, 235, 213, 145);
+                drawOriginalText(
+                    "OBJECTIVES", 220, 338,
+                    0.75f, 235, 213, 145);
                 wrappedText(
-                    renderer, mission->objectives,
-                    92, 356, 0.78f, 105, 3,
+                    renderer,
+                    mission->objectives,
+                    220 * originalScaleX,
+                    360 * originalScaleY,
+                    0.61f * originalScaleY,
+                    73, 4,
                     187, 206, 220);
             }
         }
         std::vector<std::string> entries{
             "BEGIN MISSION", "BACK TO CAMPAIGN"};
         for (size_t i = 0; i < entries.size(); ++i) {
-            const float y = 438 + i * 44;
-            if (i == selection_)
+            const float x = i ? 444.0f : 244.0f;
+            if (i == selection_) {
                 renderer.fillRect(
-                    280, y - 8, 400, 36,
-                    30, 72, 102, 255);
-            centeredText(
-                renderer, entries[i], y, 1.25f,
-                screenW,
+                    (x - 16) * originalScaleX,
+                    458 * originalScaleY,
+                    171 * originalScaleX,
+                    32 * originalScaleY,
+                    31, 61, 70, 225);
+                renderer.fillRect(
+                    (x - 16) * originalScaleX,
+                    458 * originalScaleY,
+                    4 * originalScaleX,
+                    32 * originalScaleY,
+                    219, 181, 76, 255);
+            }
+            drawOriginalText(
+                entries[i], x, 467, 0.78f,
                 i == selection_ ? 255 : 196,
                 i == selection_ ? 231 : 211,
                 i == selection_ ? 159 : 225);

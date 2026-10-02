@@ -88,10 +88,22 @@ screen as SLP 50189 and its dedicated JASC palette as resource 50589. Interface
 theme records are authoritative for palette selection: record 50089 maps
 `xmain` 50189 to `xmain` 50589. Rendering full-screen interface sheets with the
 global gameplay palette 50500 produces valid geometry with incorrect colors, so
-the asset path now supports explicit per-screen palettes. The Vita frontend
-keeps only frame 0 pinned (about 2.4 MiB as an atlas) and fits its original 4:3
-art within the 960x544 display; native menu controls and text remain the
-fallback when the resource is unavailable.
+the asset path supports explicit per-screen palettes. The main frontend also
+uses frame 49 of SLP 50189 for the original logo and frames 4/6 of SLP 50688 for
+the normal/selected control state. Original 800x600 coordinates are scaled
+independently on X and Y to fill all 960x544 Vita pixels rather than
+letterboxing the 4:3 art.
+
+Campaign-root record 53015 maps background SLP 53014, palette 53016, and
+campaign selector states from the same SLP (base frames 1, 5, 9, 13, 17, and
+29; the following frame is the focused state). Campaign records 53121-53125
+and 53128 map backgrounds 53101-53105/53108 and palettes
+53111-53115/53118. Their briefing records 53141-53145 map dialog backgrounds
+53161-53165. Record 53128 explicitly sets `popup_dialog_sin` to record 53144,
+so XCAM8 reuses SLP 53164 and palette 53114 rather than referring to a
+nonexistent SLP 53168. The Vita frontend loads only the active full-screen
+frame and active briefing frame, releases them on screen changes, and keeps
+only the small shared logo/control/campaign selectors pinned.
 
 Campaign scenario files preserve pregame/victory/loss cinematic string fields,
 but all 43 installed XCAM entries leave those fields empty. The available
@@ -931,8 +943,12 @@ Engine contract:
 
 - Every player has a transient currently-visible tile grid and a persistent
   explored tile grid. Active, ungarrisoned units and buildings reveal a
-  circular area using their researched DAT line of sight; allied players share
-  those revealers.
+  circular area using their researched DAT line of sight. Technology 61,
+  `Holonet Transceiver` (`REVEAL-ALLY`), applies effect 46 command type 1 to
+  set player resource/attribute 50 to 1. Only a receiving player with that
+  attribute merges mutually allied exploration, current sight, object
+  visibility, and detector coverage; ordinary alliance alone does not reveal
+  allies through fog.
 - Visibility is simulation state, not merely a dark screen overlay. Enemy
   objects cannot be selected or automatically acquired outside current sight.
   Enemy projectiles and remains are likewise hidden. Static gatherable nodes

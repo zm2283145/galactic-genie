@@ -56,6 +56,7 @@ struct InputState {
 struct FrameStats {
     int sprites = 0;
     int tiles = 0;
+    int visibilityChecks = 0;
 };
 
 struct MovementStats {
@@ -1671,6 +1672,7 @@ private:
         const Object &object, int player) const;
     bool objectVisibleToPlayer(
         const Object &object, int player) const;
+    bool hasSharedVision(int player) const;
     bool isStealthed(
         const Object &object) const;
     bool isDetector(

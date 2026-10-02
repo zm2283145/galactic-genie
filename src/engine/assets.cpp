@@ -384,6 +384,10 @@ const SpriteFrame *Assets::blendMask(int mode, int mask, int slope) {
 }
 
 const SpriteFrame *Assets::buildSlopeBlendMask(int mode, int mask, int slope, uint32_t key) {
+    if (buildsThisFrame_ >=
+        maximumBuildsPerFrame_)
+        return nullptr;
+    ++buildsThisFrame_;
     if (!blendomatic_ || (size_t)mode >= blendomatic_->modes().size() ||
         (size_t)mask >= blendomatic_->modes()[(size_t)mode].masks.size()) {
         slopeBlendMasks_[key] = nullptr;
@@ -588,6 +592,22 @@ const SpriteFrame *Assets::interfaceFrame(
     sheets_[key] = std::move(sheet);
     sheetUse_[key] = terrainGeneration_;
     return result;
+}
+
+void Assets::releaseInterfaceFrame(
+    int32_t slpId, size_t frame,
+    int32_t paletteId) {
+    if (frame > 0xFFFF) return;
+    const uint64_t key =
+        (3ull << 62) |
+        ((uint64_t)(uint16_t)slpId << 32) |
+        ((uint64_t)(uint16_t)paletteId << 16) |
+        (uint16_t)frame;
+    auto sheet = sheets_.find(key);
+    if (sheet == sheets_.end()) return;
+    destroySheet(sheet->second);
+    sheets_.erase(sheet);
+    sheetUse_.erase(key);
 }
 
 const SpriteSheet *Assets::terrainSheet(int32_t slpId) {

@@ -39,8 +39,10 @@ The goal is a playable SWGB: Clone Campaigns reimplementation on the PS Vita, ru
   missions and runs 79 bounded difficulty-relevant simulations with zero unsupported stock-used
   trigger types.
 - Per-player fog of war is implemented from researched DAT line of sight.
-  Current visibility moves with units while exploration persists; allied
-  players share sight. Unexplored terrain is shrouded, explored terrain is
+  Current visibility moves with units while exploration persists; mutually
+  allied players share exploration, live sight, object visibility, and
+  detector coverage only after the receiving player researches the original
+  Holonet Transceiver technology (DAT player attribute 50). Unexplored terrain is shrouded, explored terrain is
   dimmed through smoothly interpolated isometric masks, and enemy units,
   attacks, selection, and automatic targeting require current sight. Static
   resource nodes and discovered buildings remain known after exploration.

@@ -4402,12 +4402,37 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
         const bool playerOnly =
             !g.tileExploredForTesting(2, 5, 5) &&
             !g.tileVisibleForTesting(2, 5, 5);
+        g.setVisibilityCheatsForTesting(
+            false, false);
+        g.setDiplomacyForTesting(1, 2, 0);
+        g.setDiplomacyForTesting(2, 1, 0);
+        const uint32_t ally =
+            g.spawnObjectForTesting(
+                3, 460, 2, 60.5f, 60.5f);
+        g.updateVisibilityForTesting();
+        const bool allyHiddenWithoutHolonet =
+            !g.tileExploredForTesting(1, 60, 60) &&
+            !g.tileVisibleForTesting(1, 60, 60) &&
+            !g.objectVisibleForTesting(1, ally);
+        const bool holonetResearched =
+            g.researchTechnologyForTesting(1, 61);
+        g.updateVisibilityForTesting();
+        const bool allySharedWithHolonet =
+            g.tileExploredForTesting(1, 60, 60) &&
+            g.tileVisibleForTesting(1, 60, 60) &&
+            g.objectVisibleForTesting(1, ally);
+        const bool receiverResearchRequired =
+            !g.tileVisibleForTesting(2, 90, 90);
         report(
             "fog-of-war-state",
             initiallyVisible && persisted &&
                 hiddenEnemy && discovered &&
                 buildingMemory && exploreOnly &&
-                forceSight && playerOnly,
+                forceSight && playerOnly &&
+                allyHiddenWithoutHolonet &&
+                holonetResearched &&
+                allySharedWithHolonet &&
+                receiverResearchRequired,
             "initial=" +
                 std::to_string(initiallyVisible) +
                 " persistent=" +
@@ -4424,7 +4449,16 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
                 " sight=" +
                 std::to_string(forceSight) +
                 " local-only=" +
-                std::to_string(playerOnly));
+                std::to_string(playerOnly) +
+                " ally-hidden=" +
+                std::to_string(
+                    allyHiddenWithoutHolonet) +
+                " holonet=" +
+                std::to_string(
+                    allySharedWithHolonet) +
+                " receiver-only=" +
+                std::to_string(
+                    receiverResearchRequired));
     }
     // 16) AI gatherers know only resources their own player has explored.
     {
@@ -8106,6 +8140,76 @@ static int cmdTestInterface(const char *dataDir) {
                   std::to_string(originalMenu->h)
             : "resource unavailable");
 
+    bool campaignInterfaceResources = true;
+    for (int theme : {1, 2, 3, 4, 5, 8}) {
+        const SpriteFrame *background =
+            assets.interfaceFrame(
+                53100 + theme, 0,
+                53110 + theme);
+        const SpriteFrame *briefing =
+            assets.interfaceFrame(
+                theme == 8
+                    ? 53164
+                    : 53160 + theme,
+                0,
+                theme == 8
+                    ? 53114
+                    : 53110 + theme);
+        campaignInterfaceResources =
+            campaignInterfaceResources &&
+            background &&
+            background->w == 800 &&
+            background->h == 600 &&
+            briefing &&
+            briefing->w == 499 &&
+            briefing->h == 404;
+    }
+    const SpriteFrame *campaignRoot =
+        assets.interfaceFrame(
+            53014, 0, 53016);
+    const SpriteFrame *menuLogo =
+        assets.interfaceFrame(
+            50189, 49, 50589);
+    const SpriteFrame *menuButton =
+        assets.interfaceFrame(
+            50688, 4, 50589);
+    const SpriteFrame *selectedMenuButton =
+        assets.interfaceFrame(
+            50688, 6, 50589);
+    campaignInterfaceResources =
+        campaignInterfaceResources &&
+        campaignRoot &&
+        campaignRoot->w == 800 &&
+        campaignRoot->h == 600 &&
+        menuLogo && menuLogo->w == 142 &&
+        menuLogo->h == 61 &&
+        menuButton && selectedMenuButton &&
+        menuButton->w == 39 &&
+        menuButton->h == 39;
+    report(
+        "original-campaign-interface-resources",
+        campaignInterfaceResources,
+        "root/backgrounds 800x600; briefings 499x404");
+
+    Frontend originalFrontend;
+    originalFrontend.setOriginalMenuBackground(
+        originalMenu);
+    originalFrontend.setOriginalMenuDecoration(
+        menuLogo, menuButton,
+        selectedMenuButton);
+    originalFrontend.showMainMenu();
+    originalFrontend.render(
+        renderer, 960, 544);
+    const bool widescreenOriginalFrontend =
+        renderer.pixels().size() ==
+            960u * 544u * 4u &&
+        renderer.drawCalls() >= 8;
+    report(
+        "original-frontend-vita-widescreen",
+        widescreenOriginalFrontend,
+        std::to_string(renderer.drawCalls()) +
+            " draws at 960x544");
+
     bool transforms = true;
     float maximumError = 0.0f;
     for (int mapSize : {48, 96, 192}) {
@@ -9397,6 +9501,15 @@ static int cmdTestMajorMechanics(
                 1, stealthUnit);
         game.setDiplomacyForTesting(
             1, 3, 0);
+        game.setDiplomacyForTesting(
+            3, 1, 0);
+        game.updateVisibilityForTesting();
+        const bool alliedDetectorHidden =
+            !game.objectDetectedForTesting(
+                1, stealthUnit);
+        const bool holonetResearched =
+            game.researchTechnologyForTesting(
+                1, 61);
         game.updateVisibilityForTesting();
         const bool alliedDetectorReveal =
             game.objectDetectedForTesting(
@@ -9466,12 +9579,14 @@ static int cmdTestMajorMechanics(
                 stealthEnabled && concealed &&
                 concealedConversionBlocked &&
                 hostileDetectorHidden &&
+                alliedDetectorHidden &&
+                holonetResearched &&
                 alliedDetectorReveal &&
                 revealedConversionAllowed &&
                 revealed && concealedAgain &&
                 cheatReveal &&
                 attackBreaksStealth,
-            "concealed/convert-blocked/hostile/allied/convert/revealed/reset/cheat/attack=" +
+            "concealed/convert-blocked/hostile/allied-hidden/holonet/allied/convert/revealed/reset/cheat/attack=" +
                 std::to_string(concealed) +
                 "/" +
                 std::to_string(
@@ -9479,6 +9594,12 @@ static int cmdTestMajorMechanics(
                 "/" +
                 std::to_string(
                     hostileDetectorHidden) +
+                "/" +
+                std::to_string(
+                    alliedDetectorHidden) +
+                "/" +
+                std::to_string(
+                    holonetResearched) +
                 "/" +
                 std::to_string(
                     alliedDetectorReveal) +
@@ -10527,6 +10648,77 @@ static int cmdTestCampaign(
             960u * 544u * 4u,
         std::to_string(renderer.drawCalls()) +
             " bounded draws");
+
+    bool breakingBreadBounded = false;
+    size_t maximumBuilds = 0;
+    int maximumVisibilityChecks = 0;
+    for (size_t campaignIndex = 0;
+         campaignIndex < catalog.campaigns().size() &&
+         !breakingBreadBounded;
+         ++campaignIndex) {
+        const CampaignInfo &campaign =
+            catalog.campaigns()[campaignIndex];
+        if (campaign.archiveName.find("XCAM3") ==
+            std::string::npos)
+            continue;
+        for (size_t missionIndex = 0;
+             missionIndex < campaign.missions.size();
+             ++missionIndex) {
+            if (campaign.missions[missionIndex].entry != 2)
+                continue;
+            Scenario scenario;
+            if (!catalog.loadScenario(
+                    campaignIndex, missionIndex,
+                    scenario, &err))
+                break;
+            Game game(assets);
+            if (!game.initScenario(
+                    scenario, &err,
+                    campaign.archiveName,
+                    campaign.missions[missionIndex].entry,
+                    2, aiDirectory.string()))
+                break;
+            game.setZoom(0.9067f);
+            assets.setBuildsPerFrame(3);
+            bool budgetHeld = true;
+            for (int frame = 0; frame < 90;
+                 ++frame) {
+                const size_t buildsBefore =
+                    assets.buildCount();
+                game.render(
+                    renderer, 960, 544);
+                const size_t frameBuilds =
+                    assets.buildCount() -
+                    buildsBefore;
+                maximumBuilds =
+                    std::max(
+                        maximumBuilds,
+                        frameBuilds);
+                maximumVisibilityChecks =
+                    std::max(
+                        maximumVisibilityChecks,
+                        game.stats()
+                            .visibilityChecks);
+                budgetHeld =
+                    budgetHeld &&
+                    frameBuilds <= 3;
+            }
+            breakingBreadBounded =
+                budgetHeld &&
+                maximumVisibilityChecks < 2500;
+            break;
+        }
+    }
+    assets.setBuildsPerFrame(
+        std::numeric_limits<size_t>::max());
+    report(
+        "breaking-bread-vita-frame-bounds",
+        breakingBreadBounded,
+        "builds=" +
+            std::to_string(maximumBuilds) +
+            " visibility-checks=" +
+            std::to_string(
+                maximumVisibilityChecks));
 
     bool transitions = discovered;
     if (discovered) {

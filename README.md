@@ -92,11 +92,15 @@ set it Closed, Human, or Computer, then choose its unique color, civilization, A
 difficulty, team, and allied-victory participation. X on the seed row advances to a safely bounded
 32-bit randomized seed; left/right provides exact seed adjustment. The cached minimap preview and
 hash update immediately when the map, size, player count, or seed changes. The main
-menu presents the original Clone Campaigns background and exposes Single Player, visibly
-unavailable Multiplayer, the native Scenario Editor,
-Options, Credits/Data Status, and Exit. Campaign browsing uses the original localized language
-tables and discovered XCAM contents rather than a hardcoded mission. L toggles sequential versus
-development mission access in the mission browser.
+menu uses the original Clone Campaigns background, logo, control art, item order, and
+right-side layout, non-uniformly scaled from the original 800x600 coordinates to fill
+the Vita's complete 960x544 widescreen display. It exposes Single Player, visibly
+unavailable Multiplayer, the native Scenario Editor, Options, Credits/Data Status,
+and Exit. Campaign browsing uses the original campaign-root art and planet selectors;
+mission and briefing screens use the selected campaign's original background,
+palette, and briefing-dialog frame with localized XCAM content. Only the current
+full-screen/dialog frame remains resident. L toggles sequential versus development
+mission access in the mission browser.
 
 START pauses an active match. The shared pause framework can resume, show campaign objectives or
 skirmish status, save/load, restart, adjust options, surrender, and return to the campaign browser
@@ -132,7 +136,10 @@ original graphic and floats in front of the carrier without replacing the carrie
 Discovered Holocrons remain on the world/minimap under explored fog, while undiscovered or carried
 Holocrons are not exposed. Each secured Holocron generates the civilization's DAT resource-191 Nova
 rate. Vita fog presentation is a cached screen-space overlay rather than per-row rectangle fan-out,
-keeping its render cost to one draw while preserving the existing visibility state.
+keeping its render cost to one draw while preserving the existing visibility state. Allies retain
+separate exploration, live sight, object visibility, and detector coverage until the viewing player
+researches original technology 61, **Holonet Transceiver**, whose DAT effect sets
+`REVEAL-ALLY`/player attribute 50.
 
 The skirmish lobby supports 2-8 local simulation participants (exactly one local Human and at least one
 hostile Computer), unique colors, free-for-all or fixed/mixed teams, and per-AI difficulty and

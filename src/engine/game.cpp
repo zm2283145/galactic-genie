@@ -69,6 +69,7 @@ constexpr size_t kStanceActiveIcons[4] = {53, 52, 51, 54};
 constexpr int kStanceNameStrings[4] = {4133, 4134, 4122, 4135};
 constexpr int kStanceHelpStrings[4] = {4933, 4934, 4922, 4935};
 constexpr int kShieldWallTech = 484;
+constexpr int kSharedVisionResource = 50;
 constexpr int kBuildingIconSlpBase = 53241;
 constexpr int kUnitIconSlpBase = 53251;
 constexpr int kTechnologyIconSlpBase = 53261;
@@ -1352,10 +1353,6 @@ bool Game::initScenario(
                 // Its detached layer-5 silhouette reads as a second ship over the landed prop.
                 object->drawShadows = part->name != "BLDG-LLAMBDASH";
             }
-            log(
-                "scenario initialization: created " +
-                std::to_string(objects_.size()) +
-                " runtime objects");
             return object ? std::max(1u, object->spawnId) : 0u; // 0: not added
         };
         const bool hidden = source.garrisonedInId >= 0;
@@ -1374,6 +1371,10 @@ bool Game::initScenario(
             }
         }
     }
+    log(
+        "scenario initialization: created " +
+        std::to_string(objects_.size()) +
+        " runtime objects");
     for (Object &object : objects_)
         configureGate(object);
     for (const ScenarioTrigger &trigger : triggers_)
@@ -2262,40 +2263,21 @@ void Game::updateVisibility() {
             (int)std::floor(source.y + radius));
         const float radiusSquared =
             (radius + 0.5f) * (radius + 0.5f);
-        for (int viewer = 1; viewer < 17;
-             viewer++) {
-            if (viewer != source.player) {
-                if ((size_t)viewer >
-                        players_.size() ||
-                    (size_t)source.player >
-                        players_.size() ||
-                    !players_[(size_t)viewer - 1]
-                         .active ||
-                    !players_[
-                         (size_t)source.player - 1]
-                         .active ||
-                    !isFriendlyPlayer(
-                        viewer, source.player) ||
-                    !isFriendlyPlayer(
-                        source.player, viewer))
-                    continue;
+        std::vector<uint8_t> &visible =
+            visibleTiles_[(size_t)source.player];
+        for (int y = minY; y <= maxY; y++)
+            for (int x = minX; x <= maxX;
+                 x++) {
+                const float dx =
+                    x + 0.5f - source.x;
+                const float dy =
+                    y + 0.5f - source.y;
+                if (dx * dx + dy * dy <=
+                    radiusSquared)
+                    visible[(size_t)y *
+                                mapSize_ +
+                            x] = 1;
             }
-            std::vector<uint8_t> &visible =
-                visibleTiles_[(size_t)viewer];
-            for (int y = minY; y <= maxY; y++)
-                for (int x = minX; x <= maxX;
-                     x++) {
-                    const float dx =
-                        x + 0.5f - source.x;
-                    const float dy =
-                        y + 0.5f - source.y;
-                    if (dx * dx + dy * dy <=
-                        radiusSquared)
-                        visible[(size_t)y *
-                                    mapSize_ +
-                                x] = 1;
-                }
-        }
     }
     for (size_t player = 1;
          player < visibleTiles_.size();
@@ -2347,6 +2329,7 @@ bool Game::tileExplored(
                 !players_[
                      (size_t)visionPlayer - 1]
                      .active ||
+                !hasSharedVision(player) ||
                 !isFriendlyPlayer(
                     player, visionPlayer) ||
                 !isFriendlyPlayer(
@@ -2388,6 +2371,7 @@ bool Game::tileVisible(
                 !players_[
                      (size_t)visionPlayer - 1]
                      .active ||
+                !hasSharedVision(player) ||
                 !isFriendlyPlayer(
                     player, visionPlayer) ||
                 !isFriendlyPlayer(
@@ -2409,8 +2393,11 @@ bool Game::objectCurrentlyVisibleToPlayer(
     if (player <= 0 || player >= 17 ||
         !object.active || object.hidden)
         return false;
-    if (object.player == player ||
-        isFriendlyPlayer(player, object.player))
+    if (object.player == player)
+        return true;
+    if (hasSharedVision(player) &&
+        isFriendlyPlayer(player, object.player) &&
+        isFriendlyPlayer(object.player, player))
         return true;
     if (isStealthed(object) &&
         !detectedByPlayer(object, player))
@@ -2487,6 +2474,13 @@ bool Game::isStealthed(
     return master || object.unit->cls == 64;
 }
 
+bool Game::hasSharedVision(int player) const {
+    return player > 0 && player < 17 &&
+           playerAttribute(
+               player, kSharedVisionResource) >
+               0.0f;
+}
+
 bool Game::isDetector(
     const Object &object) const {
     if (!object.active || object.hidden ||
@@ -2517,8 +2511,12 @@ bool Game::detectedByPlayer(
         return true;
     for (const Object &detector : objects_) {
         if (!isDetector(detector) ||
-            !isFriendlyPlayer(
-                player, detector.player))
+            (detector.player != player &&
+             (!hasSharedVision(player) ||
+              !isFriendlyPlayer(
+                  player, detector.player) ||
+              !isFriendlyPlayer(
+                  detector.player, player))))
             continue;
         const float radius =
             std::max(
@@ -22829,6 +22827,13 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     g_draws.clear();
     for (const Object &o : objects_) {
         if (!o.active || o.hidden || !o.draw || o.carcassHidden > 0.0f) continue;
+        float sx, sy;
+        toScreen(o.x, o.y, sx, sy);
+        sy -= elevationAt(o.x, o.y) * assets_.dat().terrainBlock.elevHeight;
+        sx -= ox;
+        sy -= oy;
+        if (sx < -400 || sx > viewW + 400 || sy < -100 || sy > viewH + 500) continue;
+        stats_.visibilityChecks++;
         if (!objectVisibleToPlayer(
                 o, localPlayer_))
             continue;
@@ -22840,12 +22845,6 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             const uint32_t mask = zoom_ < 0.45f ? 3u : 1u;
             if (hash & mask) continue;
         }
-        float sx, sy;
-        toScreen(o.x, o.y, sx, sy);
-        sy -= elevationAt(o.x, o.y) * assets_.dat().terrainBlock.elevHeight;
-        sx -= ox;
-        sy -= oy;
-        if (sx < -400 || sx > viewW + 400 || sy < -100 || sy > viewH + 500) continue;
         const dat::Unit *visualUnit =
             o.state == State::Build
                 ? builderUnit(o)

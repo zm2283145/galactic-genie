@@ -69,6 +69,9 @@ public:
     const SpriteFrame *interfaceFrame(
         int32_t slpId, size_t frame,
         int32_t paletteId);
+    void releaseInterfaceFrame(
+        int32_t slpId, size_t frame,
+        int32_t paletteId);
     const SpriteSheet *terrainSheet(int32_t slpId);
     const SpriteFrame *terrainSlopeFrame(int32_t slpId, int slope, size_t frame,
                                          const std::array<int8_t, 8> &neighbors);
