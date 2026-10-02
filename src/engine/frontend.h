@@ -81,6 +81,10 @@ public:
     void setStringLookup(FrontendStringLookup lookup) {
         strings_ = std::move(lookup);
     }
+    void setOriginalMenuBackground(
+        const SpriteFrame *frame) {
+        originalMenuBackground_ = frame;
+    }
     void setDataStatus(
         size_t campaigns, size_t missions,
         bool optionalMedia) {
@@ -153,6 +157,8 @@ public:
     }
 
 private:
+    const SpriteFrame *originalMenuBackground_ =
+        nullptr;
     void moveSelection(int direction, size_t count);
     void adjustLobbyValue(int direction);
     void refreshLobbyPreview();

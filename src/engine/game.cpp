@@ -1125,6 +1125,7 @@ bool Game::initScenario(
         }
     }
 
+    log("scenario initialization: resetting match state");
     resetMatchState();
     difficulty_ = std::max(0, std::min(4, difficulty));
     if (!campaignArchive.empty()) {
@@ -1246,6 +1247,10 @@ bool Game::initScenario(
         }
     }
     mapSize_ = (int)scenario.map.width;
+    log(
+        "scenario initialization: preparing " +
+        std::to_string(mapSize_) + "x" +
+        std::to_string(mapSize_) + " terrain");
     resetVisibility();
     terrain_.resize(scenario.map.tiles.size());
     // Rotate scenario world coordinates 90 degrees counterclockwise. Transforming
@@ -1288,21 +1293,10 @@ bool Game::initScenario(
         }
     }
     buildTileElevation();
-    std::set<std::pair<int32_t, uint8_t>> canonicalSlopes;
-    for (size_t i = 0; i < terrain_.size(); i++) {
-        const uint8_t slope = tileSlope_[i];
-        if (!slope) continue;
-        const dat::Terrain &draw = drawTerrain(terrains, terrain_[i]);
-        canonicalSlopes.insert({draw.slp, slope});
-    }
-    std::array<int8_t, 8> canonicalNeighbors;
-    canonicalNeighbors.fill(0);
-    for (const auto &entry : canonicalSlopes) {
-        const SpriteSheet *sheet = assets_.terrainSheet(entry.first);
-        const size_t variants = sheet && !sheet->frames.empty() ? 1 : 0;
-        for (size_t frame = 0; frame < variants; frame++)
-            assets_.terrainSlopeFrame(entry.first, entry.second, frame, canonicalNeighbors);
-    }
+    // Slope textures are generated lazily for visible tiles. Prewarming every
+    // terrain/slope pair here made complex campaign missions block the Vita UI
+    // on a static loading card and could consume the remaining atlas budget
+    // before the first frame.
 
     objects_.clear();
     selectionOrder_.clear();
@@ -1328,7 +1322,18 @@ bool Game::initScenario(
     attackAlertMessage_.clear();
     statusTime_ = 0;
     objects_.reserve(scenario.units.size() * 2);
+    log(
+        "scenario initialization: creating " +
+        std::to_string(scenario.units.size()) +
+        " authored objects");
+    size_t processedScenarioUnits = 0;
     for (const ScenarioUnit &source : scenario.units) {
+        ++processedScenarioUnits;
+        if (processedScenarioUnits % 1000 == 0)
+            log(
+                "scenario initialization: processed " +
+                std::to_string(processedScenarioUnits) +
+                " authored objects");
         const int civilization = civilizationFor(source.player);
         const dat::Unit *unit = findUnit(civilization, source.unitId);
         if (!unit) continue;
@@ -1347,6 +1352,10 @@ bool Game::initScenario(
                 // Its detached layer-5 silhouette reads as a second ship over the landed prop.
                 object->drawShadows = part->name != "BLDG-LLAMBDASH";
             }
+            log(
+                "scenario initialization: created " +
+                std::to_string(objects_.size()) +
+                " runtime objects");
             return object ? std::max(1u, object->spawnId) : 0u; // 0: not added
         };
         const bool hidden = source.garrisonedInId >= 0;
@@ -1374,6 +1383,7 @@ bool Game::initScenario(
                     if (Object *object = findObject(spawnId))
                         configureGate(*object);
     rebuildAdjacency();
+    log("scenario initialization: applying technology and visibility state");
     initializeCivilizationRestrictions();
     refreshAllAutomaticTechnologies();
     updateVisibility();
@@ -1409,6 +1419,7 @@ bool Game::initScenario(
         add(source.aiName);
         add(source.aiFilename);
     }
+    log("scenario initialization: loading AI personalities");
     for (size_t index = 0;
          index < players_.size(); ++index) {
         const int player = (int)index + 1;
@@ -1508,6 +1519,7 @@ bool Game::initScenario(
     } else {
         lookAt(mapSize_ * 0.5f, mapSize_ * 0.5f);
     }
+    log("scenario initialization: complete");
     return true;
 }
 

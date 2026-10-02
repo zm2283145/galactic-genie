@@ -64,6 +64,11 @@ public:
     // from the dat's player colour table). Null if the SLP doesn't exist.
     const SpriteSheet *sheet(int32_t slpId, int playerColorBase = 16);
     const SpriteSheet *interfaceSheet(int32_t slpId);
+    const SpriteSheet *interfaceSheet(
+        int32_t slpId, int32_t paletteId);
+    const SpriteFrame *interfaceFrame(
+        int32_t slpId, size_t frame,
+        int32_t paletteId);
     const SpriteSheet *terrainSheet(int32_t slpId);
     const SpriteFrame *terrainSlopeFrame(int32_t slpId, int slope, size_t frame,
                                          const std::array<int8_t, 8> &neighbors);
@@ -83,6 +88,9 @@ public:
     // Starts a terrain preparation pass. Generated slope textures not touched
     // by the current pass may be evicted before a cache miss exceeds budget.
     void beginTerrainFrame(size_t textureBudget);
+    void setBuildsPerFrame(size_t maximum) {
+        maximumBuildsPerFrame_ = maximum;
+    }
 
     size_t textureBytes() const { return textureBytes_; }
     // Sheets built so far (a steadily rising count means cache thrash).
@@ -99,7 +107,10 @@ public:
     size_t sheetCount() const { return sheets_.size() + slopeFrames_.size() + slopeBlendMasks_.size(); }
 
 private:
-    const SpriteSheet *build(ResourceSet &set, int32_t slpId, int playerColorBase, uint64_t key);
+    const SpriteSheet *build(
+        ResourceSet &set, int32_t slpId,
+        int playerColorBase, uint64_t key,
+        const Palette *palette = nullptr);
     struct SlopeFrameKey {
         int32_t slpId;
         uint32_t frame;
@@ -112,7 +123,10 @@ private:
     const SpriteFrame *buildTerrainSlopeFrame(const SlopeFrameKey &key);
     void ensureTerrainCacheSpace(size_t additionalBytes);
     void destroySheet(std::unique_ptr<SpriteSheet> &sheet);
-    std::unique_ptr<SpriteSheet> pack(const std::vector<SlpImage> &imgs, int playerColorBase);
+    std::unique_ptr<SpriteSheet> pack(
+        const std::vector<SlpImage> &imgs,
+        int playerColorBase,
+        const Palette *palette = nullptr);
     bool buildBlendMasks(const Blendomatic &blendomatic, std::string *err);
     const SpriteFrame *buildSlopeBlendMask(int mode, int mask, int slope, uint32_t key);
     void log(const std::string &s) const { if (log_) log_(s); }
@@ -150,6 +164,8 @@ private:
     const SpriteSheet *cachedSheet(uint64_t key);
     void rememberSheet(uint64_t key, const SpriteSheet *sheet);
     size_t buildCount_ = 0;
+    size_t buildsThisFrame_ = 0;
+    size_t maximumBuildsPerFrame_ = SIZE_MAX;
     size_t terrainTextureBudget_ = SIZE_MAX;
     uint64_t terrainGeneration_ = 0;
 };

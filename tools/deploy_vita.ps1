@@ -12,6 +12,7 @@
 #   tools\deploy_vita.ps1 -LanguageData  # copies localized interface strings
 #   tools\deploy_vita.ps1 -AiData        # copies the original .per AI personalities
 #   tools\deploy_vita.ps1 -AllCampaignSoundData # copies dialogue used by all 43 stock missions
+#   tools\deploy_vita.ps1 -CampaignStoryData # copies all original campaign briefing narration
 #   tools\deploy_vita.ps1 -AllRequiredData # uploads and size-verifies the complete required installation
 #   tools\deploy_vita.ps1 -ScenarioImport -ScenarioFile <file.scx> # stages an editor import
 #   tools\deploy_vita.ps1 -PullLog      # downloads ux0:data/swgb/swgb.log to build-vita\swgb.log
@@ -22,6 +23,7 @@ param(
     [string]$CampaignDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Campaign",
     [string]$CampaignArchive = "XCAM3.CPX",
     [string]$SoundDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Sound\Scenario",
+    [string]$CampaignStoryDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Sound\Campaign",
     [string]$MusicDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\MUSIC",
     [string]$TerrainSoundDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Sound\Terrain",
     [string]$AiDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\AI",
@@ -39,6 +41,7 @@ param(
     [switch]$LanguageData,
     [switch]$AiData,
     [switch]$AllCampaignSoundData,
+    [switch]$CampaignStoryData,
     [switch]$AllRequiredData,
     [switch]$Verify,
     [switch]$ScenarioImport,
@@ -60,6 +63,7 @@ if ($AllRequiredData) {
     $LanguageData = $true
     $AiData = $true
     $AllCampaignSoundData = $true
+    $CampaignStoryData = $true
     $Verify = $true
 }
 
@@ -211,6 +215,17 @@ if ($SoundData -or $AllCampaignSoundData) {
     if ($missingSounds.Count -gt 0) {
         Write-Warning ("The original installation does not contain {0} referenced scenario sound(s):`n  {1}" -f
             $missingSounds.Count, ($missingSounds -join "`n  "))
+    }
+}
+if ($CampaignStoryData) {
+    Ftp-MkDir "ux0:/data/swgb/Sound"
+    Ftp-MkDir "ux0:/data/swgb/Sound/Campaign"
+    $campaignStory = Get-ChildItem -LiteralPath $CampaignStoryDir -File -Filter "*.mp3"
+    if (-not $campaignStory.Count) {
+        throw "no campaign story MP3 files found in $CampaignStoryDir"
+    }
+    foreach ($file in $campaignStory) {
+        Ftp-Put $file.FullName "ux0:/data/swgb/Sound/Campaign/$($file.Name.ToLower())"
     }
 }
 if ($OutcomeSoundData) {

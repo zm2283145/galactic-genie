@@ -21,11 +21,13 @@
 #include <vitaGL.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdarg>
 #include <cstdio>
 #include <memory>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 // Leave enough of the 256 MiB game partition for the executable, runtime
 // modules and allocations made before main(). A 256 MiB newlib heap exhausts
@@ -38,6 +40,7 @@ const char *kRoot = "ux0:data/swgb";
 const char *kDataDir = "ux0:data/swgb/Data";
 const char *kCampaignDir = "ux0:data/swgb/Campaign";
 const char *kScenarioSoundDir = "ux0:data/swgb/Sound/Scenario";
+const char *kCampaignSoundDir = "ux0:data/swgb/Sound/Campaign";
 const char *kMusicDir = "ux0:data/swgb/Music";
 const char *kTerrainSoundDir = "ux0:data/swgb/Sound/Terrain";
 const char *kSettingsPath = "ux0:data/swgb/settings.bin";
@@ -75,6 +78,29 @@ bool fileExists(const char *path) {
     if (!file) return false;
     std::fclose(file);
     return true;
+}
+
+std::string campaignNarrationPrefix(
+    const swgb::CampaignMission *mission) {
+    if (!mission) return {};
+    std::string archive = mission->archiveName;
+    std::transform(
+        archive.begin(), archive.end(),
+        archive.begin(),
+        [](unsigned char c) {
+            return (char)std::tolower(c);
+        });
+    const char *prefix = nullptr;
+    if (archive == "xcam1") prefix = "TF";
+    else if (archive == "xcam2") prefix = "GN";
+    else if (archive == "xcam3") prefix = "GE";
+    else if (archive == "xcam4") prefix = "RA";
+    else if (archive == "xcam5") prefix = "WK";
+    else if (archive == "xcam8") prefix = "TU";
+    return prefix
+               ? std::string(prefix) +
+                     std::to_string(mission->entry + 1)
+               : std::string();
 }
 
 void startupCard(
@@ -306,6 +332,17 @@ int main() {
                 "SETTINGS WERE CORRUPT; DEFAULTS RESTORED");
         }
         frontend.setUserSettings(userSettings);
+        const swgb::SpriteFrame *originalMenu =
+            assets.interfaceFrame(50189, 0, 50589);
+        if (originalMenu) {
+            frontend.setOriginalMenuBackground(originalMenu);
+            logf(
+                "original Clone Campaigns menu background loaded");
+        } else {
+            logf(
+                "original menu background unavailable; using native fallback");
+        }
+        assets.setBuildsPerFrame(3);
         swgb::MatchSaveMetadata savedMetadata;
         std::string saveProbeError;
         const bool saveAvailable =
@@ -319,7 +356,8 @@ int main() {
             logf("save probe: %s", saveProbeError.c_str());
         game.setLogger([](const std::string &s) { logf("%s", s.c_str()); });
         swgb::VitaAudio audio(
-            kScenarioSoundDir, kMusicDir, kTerrainSoundDir);
+            kScenarioSoundDir, kCampaignSoundDir,
+            kMusicDir, kTerrainSoundDir);
         audio.setLogger([](const std::string &s) { logf("audio: %s", s.c_str()); });
         std::string audioError;
         if (!audio.start(&audioError)) logf("audio disabled: %s", audioError.c_str());
@@ -441,24 +479,58 @@ int main() {
                 err = "no campaign mission is selected";
                 return false;
             }
+            logf(
+                "campaign load begin: %s entry %u",
+                mission->archiveName.c_str(),
+                (unsigned)mission->entry + 1);
+            const uint64_t campaignLoadStart =
+                sceKernelGetProcessTimeWide();
             if (!catalog.loadScenario(
                     frontend.selectedCampaign(),
                     frontend.selectedMission(),
-                    campaignScenario, &err))
+                    campaignScenario, &err)) {
+                logf(
+                    "campaign archive load failed: %s",
+                    err.c_str());
                 return false;
+            }
+            logf(
+                "campaign archive decoded in %llu ms: %ux%u, %u units, %u triggers",
+                (unsigned long long)(
+                    (sceKernelGetProcessTimeWide() -
+                     campaignLoadStart) /
+                    1000),
+                (unsigned)campaignScenario.map.width,
+                (unsigned)campaignScenario.map.height,
+                (unsigned)campaignScenario.units.size(),
+                (unsigned)campaignScenario.triggers.size());
+            const uint64_t scenarioInitStart =
+                sceKernelGetProcessTimeWide();
             if (!game.initScenario(
                     campaignScenario, &err,
                     mission->archiveName,
                     mission->entry,
                     campaignProfile.difficulty,
-                    "ux0:data/swgb/AI"))
+                    "ux0:data/swgb/AI")) {
+                logf(
+                    "campaign simulation initialization failed after %llu ms: %s",
+                    (unsigned long long)(
+                        (sceKernelGetProcessTimeWide() -
+                         scenarioInitStart) /
+                        1000),
+                    err.c_str());
                 return false;
+            }
             campaignMatch = true;
             frontend.setCampaignMatch(true);
             logf(
-                "campaign %s entry %u loaded: %s, %ux%u, %u units",
+                "campaign %s entry %u loaded in %llu ms: %s, %ux%u, %u units",
                 mission->archiveName.c_str(),
                 (unsigned)mission->entry + 1,
+                (unsigned long long)(
+                    (sceKernelGetProcessTimeWide() -
+                     campaignLoadStart) /
+                    1000),
                 campaignScenario.originalFilename.c_str(),
                 (unsigned)campaignScenario.map.width,
                 (unsigned)campaignScenario.map.height,
@@ -504,6 +576,11 @@ int main() {
         size_t lastBuilds = 0;
         uint64_t statT = last;
         int frames = 0;
+        swgb::FrontendScreen previousFrontendScreen =
+            frontend.screen();
+        std::vector<std::string> campaignNarration;
+        size_t campaignNarrationIndex = 0;
+        float campaignNarrationRemaining = 0;
 
         for (;;) {
             uint64_t now = sceKernelGetProcessTimeWide();
@@ -688,6 +765,42 @@ int main() {
             else
                 action = frontend.update(
                     in, game.victoryStateForTesting());
+            const swgb::FrontendScreen currentFrontendScreen =
+                frontend.screen();
+            if (currentFrontendScreen !=
+                previousFrontendScreen) {
+                if (currentFrontendScreen ==
+                    swgb::FrontendScreen::CampaignBriefing) {
+                    audio.resetSession();
+                    const std::string prefix =
+                        campaignNarrationPrefix(
+                            frontend.selectedCampaignMission());
+                    campaignNarration =
+                        audio.campaignBriefing(prefix);
+                    campaignNarrationIndex = 0;
+                    campaignNarrationRemaining = 0;
+                } else if (previousFrontendScreen ==
+                           swgb::FrontendScreen::CampaignBriefing) {
+                    audio.resetSession();
+                    campaignNarration.clear();
+                }
+                previousFrontendScreen =
+                    currentFrontendScreen;
+            }
+            if (currentFrontendScreen ==
+                    swgb::FrontendScreen::CampaignBriefing &&
+                campaignNarrationIndex <
+                    campaignNarration.size()) {
+                campaignNarrationRemaining -= dt;
+                if (campaignNarrationRemaining <= 0) {
+                    campaignNarrationRemaining =
+                        audio.play(
+                            campaignNarration[
+                                campaignNarrationIndex++]);
+                    if (campaignNarrationRemaining <= 0)
+                        campaignNarrationRemaining = 0.1f;
+                }
+            }
             if (frontend.takeSettingsChanged()) {
                 userSettings =
                     frontend.userSettings();

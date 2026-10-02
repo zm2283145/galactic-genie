@@ -1074,6 +1074,35 @@ void Frontend::render(
     renderer.fillRect(
         0, 0, (float)screenW, (float)screenH,
         2, 6, 15, 255);
+    if (originalMenuBackground_ &&
+        originalMenuBackground_->tex &&
+        screen_ != FrontendScreen::Loading) {
+        const float scale =
+            std::min(
+                screenW /
+                    (float)originalMenuBackground_->w,
+                screenH /
+                    (float)originalMenuBackground_->h);
+        const float width =
+            originalMenuBackground_->w * scale;
+        const float height =
+            originalMenuBackground_->h * scale;
+        const float x = (screenW - width) * 0.5f;
+        const float y = (screenH - height) * 0.5f;
+        renderer.draw(
+            originalMenuBackground_->tex,
+            Quad{
+                x, y, width, height,
+                originalMenuBackground_->u,
+                originalMenuBackground_->v,
+                originalMenuBackground_->u +
+                    originalMenuBackground_->w,
+                originalMenuBackground_->v +
+                    originalMenuBackground_->h});
+        renderer.fillRect(
+            0, 0, (float)screenW, (float)screenH,
+            0, 0, 0, 92);
+    }
     renderer.fillRect(
         0, 0, (float)screenW, 82,
         8, 24, 43, 255);

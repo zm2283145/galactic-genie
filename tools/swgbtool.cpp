@@ -862,6 +862,9 @@ static int cmdScenario(const char *path, int entryNumber) {
     printf("camera player %.1f,%.1f, map %.1f,%.1f\n", scenario.cameraX, scenario.cameraY,
            scenario.mapCameraX, scenario.mapCameraY);
     printf("instructions: %s\n", scenario.instructions.c_str());
+    printf("cinematics: pregame '%s', victory '%s', loss '%s', background '%s'\n",
+           scenario.pregameCinematic.c_str(), scenario.victoryCinematic.c_str(),
+           scenario.lossCinematic.c_str(), scenario.background.c_str());
     for (size_t i = 0; i < 8; i++) {
         const ScenarioPlayer &player = scenario.players[i];
         printf("player %zu: active %d, human %d, civ %u, color %u, camera %.1f,%.1f, resources "
@@ -955,7 +958,10 @@ static int cmdSlp(const char *dataDir, int id, const char *out, int base) {
         return 1;
     }
     const SpriteSheet *sh =
-        id >= 50000 ? a.interfaceSheet(id)
+        id >= 50000
+            ? (base > 255
+                   ? a.interfaceSheet(id, base)
+                   : a.interfaceSheet(id))
                     : a.sheet(id, base);
     if (!sh) sh = a.interfaceSheet(id);
     if (!sh) sh = a.terrainSheet(id);
@@ -8064,6 +8070,41 @@ static int cmdTestInterface(const char *dataDir) {
             name, detail.c_str());
         if (!ok) ++failures;
     };
+
+    const SpriteFrame *originalMenu =
+        assets.interfaceFrame(50189, 0, 50589);
+    bool originalMenuPalette =
+        originalMenu && originalMenu->w == 800 &&
+        originalMenu->h == 600;
+    if (originalMenuPalette) {
+        renderer.beginFrame(
+            800, 600, 1.0f, 0, 0, 0);
+        renderer.draw(
+            originalMenu->tex,
+            Quad{
+                0, 0, 800, 600,
+                originalMenu->u,
+                originalMenu->v,
+                originalMenu->u + 800,
+                originalMenu->v + 600});
+        const std::vector<uint8_t> &pixels =
+            renderer.pixels();
+        const size_t sample =
+            ((size_t)300 * 800 + 300) * 4;
+        originalMenuPalette =
+            sample + 3 < pixels.size() &&
+            pixels[sample] == 27 &&
+            pixels[sample + 1] == 13 &&
+            pixels[sample + 2] == 0 &&
+            pixels[sample + 3] == 255;
+    }
+    report(
+        "original-menu-resource-palette",
+        originalMenuPalette,
+        originalMenu
+            ? std::to_string(originalMenu->w) + "x" +
+                  std::to_string(originalMenu->h)
+            : "resource unavailable");
 
     bool transforms = true;
     float maximumError = 0.0f;

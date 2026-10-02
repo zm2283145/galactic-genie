@@ -83,6 +83,27 @@ The original palette, fonts, cursor sheets, interface sounds, localized
 strings, and existing selection/command art remain runtime-loaded rather than
 copied into this repository.
 
+The installed `INTERFAC.DRS` also provides the original Clone Campaigns main
+screen as SLP 50189 and its dedicated JASC palette as resource 50589. Interface
+theme records are authoritative for palette selection: record 50089 maps
+`xmain` 50189 to `xmain` 50589. Rendering full-screen interface sheets with the
+global gameplay palette 50500 produces valid geometry with incorrect colors, so
+the asset path now supports explicit per-screen palettes. The Vita frontend
+keeps only frame 0 pinned (about 2.4 MiB as an atlas) and fits its original 4:3
+art within the 960x544 display; native menu controls and text remain the
+fallback when the resource is unavailable.
+
+Campaign scenario files preserve pregame/victory/loss cinematic string fields,
+but all 43 installed XCAM entries leave those fields empty. The available
+mission briefing presentation is instead the original `Sound\Campaign` MP3
+corpus. Archive-to-prefix evidence from authored trigger names and installed
+files is XCAM1=`TF`, XCAM2=`GN`, XCAM3=`GE`, XCAM4=`RA`, XCAM5=`WK`, and
+XCAM8=`TU`; the one-based mission number completes the prefix. The briefing
+screen plays those sorted narration clips without delaying scenario
+initialization, then authored `Sound\Scenario` trigger dialogue remains
+authoritative during gameplay. Unsupported IV50 startup AVIs are never used as
+a campaign-load dependency.
+
 The executable installation provides `xlogo1.avi` (3,344,600 bytes, 15 fps,
 Indeo Video 5 `IV50`, SHA-256
 `bca7731fe3f8e267cae3d0b8ce978b621b34f53050f73d3931a64c05d9093a10`)

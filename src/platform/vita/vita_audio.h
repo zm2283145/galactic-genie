@@ -17,12 +17,15 @@ namespace swgb {
 class VitaAudio {
 public:
     VitaAudio(std::string scenarioSoundDir,
+              std::string campaignSoundDir,
               std::string musicDir,
               std::string terrainSoundDir);
     ~VitaAudio();
 
     bool start(std::string *err = nullptr);
     float play(const std::string &name);
+    std::vector<std::string> campaignBriefing(
+        const std::string &prefix) const;
     float playAmbient(const std::string &name);
     bool playEffect(int resourceId, const std::vector<uint8_t> &data);
     void playOiiaEffect();
@@ -43,6 +46,7 @@ private:
     };
 
     std::string scenarioSoundDir_;
+    std::string campaignSoundDir_;
     std::string musicDir_;
     std::string terrainSoundDir_;
     std::function<void(const std::string &)> log_;

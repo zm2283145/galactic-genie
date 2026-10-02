@@ -9,7 +9,7 @@ It is written clean-room style: file formats come from public documentation (ope
 | Area | State |
 |---|---|
 | DRS archives (40/60-byte headers, expansion override order) | done |
-| JASC palettes (interfac.drs 50500) | done |
+| JASC palettes (global 50500 plus original interface-screen palette mappings) | done |
 | SLP 2.0N decoder (all draw commands, player colour, shadows, outlines) | done |
 | `genie_x1.dat` (VER 5.9) full parse, verified byte-exact to EOF | done |
 | Sprite atlas builder (per SLP and player colour) | done |
@@ -22,7 +22,7 @@ It is written clean-room style: file formats come from public documentation (ope
 | Major SWGB mechanics: conversion, Holocrons, stealth/detection, Standard/Conquest/Time/Score/Command Center victory, and aircraft rules | done |
 | Fishing/naval economy: Utility Trawler gathering, Aqua Harvesters, naval construction/repair, island resources, and AI use | done |
 | Vita: renderer, camera controls, original cursors, unit selection/status markers, formation movement, and fog-aware navigable minimap | done |
-| Vita frontend: startup validation, title/main/campaign menus, shared pause/options/objectives, saves, and outcomes | done |
+| Vita frontend: startup validation, original Clone Campaigns menu artwork with native fallback, campaign menus/narration, shared pause/options/objectives, saves, and outcomes | done |
 | Deterministic random maps: 2-8 local-human/AI slots, ten stock-named biome/topology families, preview, validated resources/coasts, and compact-island regression | done |
 | Native scenario editor: templates, map/object/player/trigger tools, validation, atomic recovery, honest SCX import/export, and isolated playtest | done |
 | PC `swgbtool`: data inspection, CPX/SCX listing, and procedural/scenario PNG rendering | done |
@@ -64,6 +64,9 @@ cmake -B build-pc && cmake --build build-pc
    `ux0:data/swgb/Sound/Scenario/`. `tools\deploy_vita.ps1 -SoundData` extracts the names from
    the archive/entry selected by `-CampaignArchive` and `-CampaignEntry` and copies only those files.
    `-AllCampaignSoundData` copies the deduplicated dialogue set referenced by all 43 stock missions.
+   `-CampaignStoryData` copies all 426 original campaign briefing/narration tracks from
+   `Game/Sound/Campaign` to `ux0:data/swgb/Sound/Campaign/`; the briefing screen plays each
+   selected mission's original sequence and remains skippable.
 4. Copy `Game/MUSIC/Track02.ogg` and `Track03.ogg` to `ux0:data/swgb/Music/`, and the WAV files
    from `Game/Sound/Terrain` to `ux0:data/swgb/Sound/Terrain/`. The deployment script options
    `-MusicData` and `-TerrainSoundData` copy these soundtrack and ambience files.
@@ -76,7 +79,8 @@ cmake -B build-pc && cmake --build build-pc
 7. The app writes a log to `ux0:data/swgb/swgb.log`. `tools\deploy_vita.ps1 -PullLog` fetches it.
 
 For a complete installation, `tools\deploy_vita.ps1 -AllRequiredData` uploads the VPK, core data,
-all six campaign archives and available referenced dialogue, unit sounds, soundtrack, terrain
+all six campaign archives, available referenced dialogue, all campaign briefing narration,
+unit sounds, soundtrack, terrain
 ambience, language tables, outcome streams, and original AI personalities. Every uploaded file is
 then checked against its remote byte length. The legacy IV50 intro AVI files remain optional because
 the native skippable startup presentation does not require them.
@@ -88,7 +92,8 @@ set it Closed, Human, or Computer, then choose its unique color, civilization, A
 difficulty, team, and allied-victory participation. X on the seed row advances to a safely bounded
 32-bit randomized seed; left/right provides exact seed adjustment. The cached minimap preview and
 hash update immediately when the map, size, player count, or seed changes. The main
-menu exposes Single Player, visibly unavailable Multiplayer, the native Scenario Editor,
+menu presents the original Clone Campaigns background and exposes Single Player, visibly
+unavailable Multiplayer, the native Scenario Editor,
 Options, Credits/Data Status, and Exit. Campaign browsing uses the original localized language
 tables and discovered XCAM contents rather than a hardcoded mission. L toggles sequential versus
 development mission access in the mission browser.

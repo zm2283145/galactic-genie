@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <dirent.h>
 #include <iterator>
 #include <utility>
 #include <vector>
@@ -44,9 +45,11 @@ std::string normalizedName(const std::string &name) {
 } // namespace
 
 VitaAudio::VitaAudio(std::string scenarioSoundDir,
+                     std::string campaignSoundDir,
                      std::string musicDir,
                      std::string terrainSoundDir)
     : scenarioSoundDir_(std::move(scenarioSoundDir)),
+      campaignSoundDir_(std::move(campaignSoundDir)),
       musicDir_(std::move(musicDir)),
       terrainSoundDir_(std::move(terrainSoundDir)) {}
 
@@ -103,8 +106,13 @@ float VitaAudio::play(const std::string &name) {
 
     auto clip = std::make_shared<AudioClip>();
     std::string err;
-    const std::string path = scenarioSoundDir_ + "/" + key + ".mp3";
+    std::string path = scenarioSoundDir_ + "/" + key + ".mp3";
     if (!loadMp3(path, *clip, &err)) {
+        path = campaignSoundDir_ + "/" + key + ".mp3";
+        err.clear();
+    }
+    if (clip->samples.empty() &&
+        !loadMp3(path, *clip, &err)) {
         log(err);
         return 0;
     }
@@ -120,6 +128,36 @@ float VitaAudio::play(const std::string &name) {
     sceKernelUnlockMutex(mutex_, 1);
     log("playing sound " + name);
     return duration;
+}
+
+std::vector<std::string> VitaAudio::campaignBriefing(
+    const std::string &prefix) const {
+    std::vector<std::string> result;
+    const std::string key = normalizedName(prefix);
+    if (key.empty()) return result;
+    DIR *directory =
+        opendir(campaignSoundDir_.c_str());
+    if (!directory) {
+        log(
+            "campaign narration directory unavailable: " +
+            campaignSoundDir_);
+        return result;
+    }
+    while (dirent *entry = readdir(directory)) {
+        const std::string name =
+            normalizedName(entry->d_name);
+        if (name.size() <= key.size() ||
+            name.compare(0, key.size(), key) != 0 ||
+            name[key.size()] != '_')
+            continue;
+        result.push_back(name);
+    }
+    closedir(directory);
+    std::sort(result.begin(), result.end());
+    log(
+        "campaign narration " + prefix + ": " +
+        std::to_string(result.size()) + " clips");
+    return result;
 }
 
 float VitaAudio::playAmbient(const std::string &name) {

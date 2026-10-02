@@ -76,6 +76,7 @@ void Assets::destroySheet(std::unique_ptr<SpriteSheet> &sheet) {
 
 void Assets::beginTerrainFrame(size_t textureBudget) {
     terrainTextureBudget_ = textureBudget;
+    buildsThisFrame_ = 0;
     terrainGeneration_++;
     if (terrainGeneration_ == 0) {
         terrainGeneration_ = 1;
@@ -116,6 +117,7 @@ void Assets::ensureTerrainCacheSpace(size_t additionalBytes) {
     }
     for (const auto &entry : sheets_) {
         if (!entry.second || !entry.second->bytes) continue;
+        if ((entry.first >> 62) == 3) continue;
         auto used = sheetUse_.find(entry.first);
         const uint64_t generation = used == sheetUse_.end() ? 0 : used->second;
         if (generation != terrainGeneration_)
@@ -501,6 +503,93 @@ const SpriteSheet *Assets::interfaceSheet(int32_t slpId) {
     return built;
 }
 
+const SpriteSheet *Assets::interfaceSheet(
+    int32_t slpId, int32_t paletteId) {
+    if (paletteId == 50500)
+        return interfaceSheet(slpId);
+    const uint64_t key =
+        (1ull << 63) |
+        ((uint64_t)(uint32_t)slpId << 16) |
+        (uint16_t)paletteId;
+    if (const SpriteSheet *hit = cachedSheet(key))
+        return hit;
+    auto it = sheets_.find(key);
+    if (it != sheets_.end()) {
+        sheetUse_[key] = terrainGeneration_;
+        rememberSheet(key, it->second.get());
+        return it->second.get();
+    }
+    std::vector<uint8_t> data;
+    Palette palette;
+    std::string err;
+    if (!interfac_.read(paletteId, data) ||
+        !palette.parse(data, &err)) {
+        log(
+            "interface palette " +
+            std::to_string(paletteId) +
+            (err.empty() ? " not found" : ": " + err));
+        sheets_[key] = nullptr;
+        sheetUse_[key] = terrainGeneration_;
+        return nullptr;
+    }
+    const SpriteSheet *built =
+        build(interfac_, slpId, 16, key, &palette);
+    rememberSheet(key, built);
+    return built;
+}
+
+const SpriteFrame *Assets::interfaceFrame(
+    int32_t slpId, size_t frame,
+    int32_t paletteId) {
+    if (frame > 0xFFFF) return nullptr;
+    const uint64_t key =
+        (3ull << 62) |
+        ((uint64_t)(uint16_t)slpId << 32) |
+        ((uint64_t)(uint16_t)paletteId << 16) |
+        (uint16_t)frame;
+    auto cached = sheets_.find(key);
+    if (cached != sheets_.end())
+        return cached->second &&
+                       !cached->second->frames.empty()
+                   ? &cached->second->frames[0]
+                   : nullptr;
+    std::vector<uint8_t> slpData;
+    std::vector<uint8_t> paletteData;
+    Palette palette;
+    Slp slp;
+    SlpImage image;
+    std::string err;
+    if (!interfac_.read(slpId, slpData) ||
+        !slp.parse(std::move(slpData), &err) ||
+        frame >= slp.frameCount() ||
+        !slp.decode(frame, image, &err) ||
+        !interfac_.read(paletteId, paletteData) ||
+        !palette.parse(paletteData, &err)) {
+        log(
+            "interface frame " +
+            std::to_string(slpId) + ":" +
+            std::to_string(frame) + ": " +
+            (err.empty() ? "resource unavailable" : err));
+        sheets_[key] = nullptr;
+        sheetUse_[key] = terrainGeneration_;
+        return nullptr;
+    }
+    std::vector<SlpImage> images;
+    images.push_back(std::move(image));
+    auto sheet = pack(images, 16, &palette);
+    if (!sheet) {
+        sheets_[key] = nullptr;
+        sheetUse_[key] = terrainGeneration_;
+        return nullptr;
+    }
+    textureBytes_ += sheet->bytes;
+    const SpriteFrame *result =
+        &sheet->frames[0];
+    sheets_[key] = std::move(sheet);
+    sheetUse_[key] = terrainGeneration_;
+    return result;
+}
+
 const SpriteSheet *Assets::terrainSheet(int32_t slpId) {
     uint64_t key = ((uint64_t)(uint32_t)slpId << 16) | 0xFFFF;
     if (const SpriteSheet *hit = cachedSheet(key)) return hit;
@@ -540,7 +629,14 @@ const SpriteFrame *Assets::terrainSlopeFrame(int32_t slpId, int slope, size_t fr
     return buildTerrainSlopeFrame(key);
 }
 
-const SpriteSheet *Assets::build(ResourceSet &set, int32_t slpId, int playerColorBase, uint64_t key) {
+const SpriteSheet *Assets::build(
+    ResourceSet &set, int32_t slpId,
+    int playerColorBase, uint64_t key,
+    const Palette *palette) {
+    if (buildsThisFrame_ >=
+        maximumBuildsPerFrame_)
+        return nullptr;
+    ++buildsThisFrame_;
     buildCount_++;
     std::vector<uint8_t> data;
     if (slpId < 0 || !set.read(slpId, data)) {
@@ -566,7 +662,8 @@ const SpriteSheet *Assets::build(ResourceSet &set, int32_t slpId, int playerColo
         }
     }
 
-    auto sheet = pack(imgs, playerColorBase);
+    auto sheet = pack(
+        imgs, playerColorBase, palette);
     if (!sheet) {
         sheets_[key] = nullptr;
         sheetUse_[key] = terrainGeneration_;
@@ -597,9 +694,11 @@ const SpriteSheet *Assets::build(ResourceSet &set, int32_t slpId, int playerColo
         const uint8_t index = image.kind[(size_t)best0] == PX_PLAYER
                                   ? (uint8_t)(image.index[(size_t)best0] + playerColorBase)
                                   : image.index[(size_t)best0];
-        frame.laserR = palette_.colors[index].r;
-        frame.laserG = palette_.colors[index].g;
-        frame.laserB = palette_.colors[index].b;
+        const Palette &colors =
+            palette ? *palette : palette_;
+        frame.laserR = colors.colors[index].r;
+        frame.laserG = colors.colors[index].g;
+        frame.laserB = colors.colors[index].b;
     }
     textureBytes_ += sheet->bytes;
     const SpriteSheet *res = sheet.get();
@@ -609,6 +708,10 @@ const SpriteSheet *Assets::build(ResourceSet &set, int32_t slpId, int playerColo
 }
 
 const SpriteFrame *Assets::buildTerrainSlopeFrame(const SlopeFrameKey &key) {
+    if (buildsThisFrame_ >=
+        maximumBuildsPerFrame_)
+        return nullptr;
+    ++buildsThisFrame_;
     const int32_t slpId = key.slpId;
     const int slope = key.slope;
     const size_t frame = key.frame;
@@ -715,7 +818,10 @@ const SpriteFrame *Assets::buildTerrainSlopeFrame(const SlopeFrameKey &key) {
     return result;
 }
 
-std::unique_ptr<SpriteSheet> Assets::pack(const std::vector<SlpImage> &imgs, int playerColorBase) {
+std::unique_ptr<SpriteSheet> Assets::pack(
+    const std::vector<SlpImage> &imgs,
+    int playerColorBase,
+    const Palette *palette) {
     const size_t n = imgs.size();
     // Shelf-pack frames into pages. Pages are 1024 wide (wider if a single
     // frame needs it) and at most 2048 tall. 1px padding avoids bleeding.
@@ -773,7 +879,12 @@ std::unique_ptr<SpriteSheet> Assets::pack(const std::vector<SlpImage> &imgs, int
         const Place &pl = place[i];
         const int pw = pageSize[pl.page].first;
         if (imgs[i].width > 0 && imgs[i].height > 0) {
-            colorize(imgs[i], palette_, opt, &pixels[pl.page][((size_t)pl.y * pw + pl.x) * 4], pw);
+            colorize(
+                imgs[i], palette ? *palette : palette_,
+                opt,
+                &pixels[pl.page][
+                    ((size_t)pl.y * pw + pl.x) * 4],
+                pw);
             if (hasOutlines)
                 for (int y = 0; y < imgs[i].height; y++)
                     for (int x = 0; x < imgs[i].width; x++)
