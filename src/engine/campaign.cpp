@@ -95,12 +95,19 @@ std::string lower(std::string value) {
     return value;
 }
 
+// xcamN.cpx (original campaigns) or 1camN.cp1 (Clone Campaigns, which the
+// original lists from "1cam%d").
 bool archiveNumber(
-    const std::string &name, int &number) {
+    const std::string &name, int &number, bool &expansion) {
     const std::string value = lower(name);
-    if (value.size() < 9 ||
-        value.compare(0, 4, "xcam") != 0 ||
-        value.compare(value.size() - 4, 4, ".cpx") != 0)
+    if (value.size() < 9) return false;
+    if (value.compare(0, 4, "xcam") == 0 &&
+        value.compare(value.size() - 4, 4, ".cpx") == 0)
+        expansion = false;
+    else if (value.compare(0, 4, "1cam") == 0 &&
+             value.compare(value.size() - 4, 4, ".cp1") == 0)
+        expansion = true;
+    else
         return false;
     const std::string digits =
         value.substr(4, value.size() - 8);
@@ -130,7 +137,14 @@ struct OriginalCampaignStrings {
     int description = 0;
 };
 
-OriginalCampaignStrings stringIds(int number) {
+OriginalCampaignStrings stringIds(int number, bool expansion) {
+    if (expansion) {
+        switch (number) {
+        case 1: return {35128, 35129, 36128}; // Confederacy
+        case 2: return {35158, 35159, 36158}; // Galactic Republic
+        default: return {};
+        }
+    }
     switch (number) {
     case 1: return {35228, 35229, 36228};
     case 2: return {35258, 35259, 36258};
@@ -182,18 +196,22 @@ bool CampaignCatalog::discover(
                    directory;
         return false;
     }
-    std::vector<std::pair<int, std::string>> paths;
+    // (expansion, number) -> path: the original campaigns first.
+    std::vector<std::pair<std::pair<bool, int>, std::string>> paths;
     while (dirent *entry = readdir(dir)) {
         int number = 0;
-        if (archiveNumber(entry->d_name, number) &&
-            stringIds(number).menu != 0)
+        bool expansion = false;
+        if (archiveNumber(entry->d_name, number, expansion) &&
+            stringIds(number, expansion).menu != 0)
             paths.push_back({
-                number,
+                {expansion, number},
                 joinPath(directory, entry->d_name)});
     }
     closedir(dir);
     std::sort(paths.begin(), paths.end());
-    for (const auto &path : paths) {
+    for (const auto &entryPath : paths) {
+        const std::pair<int, std::string> path{entryPath.first.second, entryPath.second};
+        const bool expansion = entryPath.first.first;
         std::string archiveError;
         auto archive =
             CpxArchive::open(path.second, &archiveError);
@@ -206,8 +224,9 @@ bool CampaignCatalog::discover(
         campaign.archivePath = path.second;
         campaign.archiveName = archive->name();
         campaign.originalNumber = path.first;
+        campaign.expansion = expansion;
         const OriginalCampaignStrings ids =
-            stringIds(path.first);
+            stringIds(path.first, expansion);
         campaign.title =
             strings && ids.menu
                 ? strings(

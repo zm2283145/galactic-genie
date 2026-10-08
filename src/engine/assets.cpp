@@ -297,6 +297,13 @@ void Assets::ensureTerrainCacheSpace(size_t additionalBytes) {
     }
 }
 
+bool Assets::readGamedataText(int32_t id, std::string &text) {
+    std::vector<uint8_t> data;
+    if (!gamedata_.read(id, data)) return false;
+    text.assign(data.begin(), data.end());
+    return true;
+}
+
 bool Assets::init(const std::string &dataDir, std::string *err) {
     struct Want {
         ResourceSet *set;
@@ -324,6 +331,9 @@ bool Assets::init(const std::string &dataDir, std::string *err) {
         {&interfac_, "interfac_x2.drs", false},
         {&sounds_, "sounds_x1.drs", false},
         {&sounds_, "sounds.drs", false},
+        // Standard AI modules (bina 60001-60056) and random map scripts.
+        {&gamedata_, "gamedata_x1.drs", false},
+        {&gamedata_, "gamedata.drs", false},
     };
     for (const Want &w : wants) {
         std::string p = findFileNoCase(dataDir, w.name);

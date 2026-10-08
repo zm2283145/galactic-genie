@@ -36,6 +36,10 @@ struct CampaignInfo {
     std::string title;
     std::string description;
     int originalNumber = 0;
+    // Clone Campaigns expansion campaign (1camN.cp1) rather than one of the
+    // original campaigns (xcamN.cpx); the Single Player menu lists them
+    // separately.
+    bool expansion = false;
     std::vector<CampaignMission> missions;
 };
 

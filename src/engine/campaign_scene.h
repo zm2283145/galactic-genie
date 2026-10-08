@@ -42,7 +42,8 @@ bool parseMediaScript(const std::string &script, std::vector<MediaItem> &items, 
 
 class CampaignScene {
 public:
-    // campaign: the campaign's number (1-5, 8); mission: 1-based.
+    // campaign: the campaign's number (1-5, 8; 101-102 for the Clone
+    // Campaigns 1cam1-1cam2); mission: 1-based.
     bool load(Assets &assets, const std::string &mediaDir, int campaign, int mission,
               bool beginning, std::string *err = nullptr);
     void release(Assets &assets);

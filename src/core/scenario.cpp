@@ -19,6 +19,10 @@ constexpr int32_t kMaxTriggerRecords = 100000;
 
 bool versionAbove(float version, float threshold) { return version > threshold + 0.0001f; }
 
+// Star Wars Galactic Battlegrounds: Clone Campaigns writes player data 1.30
+// (.sc1 in .cp1 campaigns). Its layout follows SWGB 1.22 except where noted.
+bool isCloneCampaignsPlayerData(float version) { return std::fabs(version - 1.30f) < 0.0001f; }
+
 std::string sizedString16(ByteReader &reader) {
     const uint16_t size = reader.u16();
     if (size > reader.remaining()) throw FormatError("scenario string exceeds remaining data");
@@ -176,7 +180,9 @@ void skipPlayerData(ByteReader &reader, Scenario &scenario) {
         reader.skip(kPlayers * (256 + 8 * 4));
     } else {
         size_t resourceFields = versionAbove(version, 1.16f) ? 6 : 4;
-        if (versionAbove(version, 1.23f)) resourceFields++;
+        // Clone Campaigns' player data 1.30 keeps SWGB's six resource fields
+        // (food, carbon, nova, ore, the spare slot, population).
+        if (versionAbove(version, 1.23f) && !isCloneCampaignsPlayerData(version)) resourceFields++;
         for (ScenarioPlayer &player : scenario.players) {
             for (size_t field = 0; field < resourceFields; field++) {
                 const uint32_t value = reader.u32();
@@ -207,7 +213,7 @@ void skipPlayerData(ByteReader &reader, Scenario &scenario) {
         const bool enabled = reader.u32() != 0;
         if (index < kPlayers) scenario.players[index].alliedVictory = enabled;
     }
-    if (versionAbove(version, 1.22f)) reader.u32();
+    if (versionAbove(version, 1.22f) && !isCloneCampaignsPlayerData(version)) reader.u32();
 
     if (versionAbove(version, 1.03f)) {
         std::array<uint32_t, kPlayers> counts{};
@@ -245,7 +251,7 @@ void skipPlayerData(ByteReader &reader, Scenario &scenario) {
         scenario.mapCameraY = scenario.cameraY;
     }
     if (versionAbove(version, 1.2f)) reader.i32();
-    if (versionAbove(version, 1.23f))
+    if (versionAbove(version, 1.23f) && !isCloneCampaignsPlayerData(version))
         for (ScenarioPlayer &player : scenario.players) player.aiType = reader.u8();
 }
 

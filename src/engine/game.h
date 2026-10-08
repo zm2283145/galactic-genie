@@ -160,7 +160,12 @@ struct MatchSaveMetadata {
 
 class Game {
 public:
-    explicit Game(Assets &assets) : assets_(assets) {}
+    explicit Game(Assets &assets) : assets_(assets) {
+        Assets *source = &assets;
+        AiProgram::setBuiltinModuleSource([source](int id, std::string &text) {
+            return source->readGamedataText(id, text);
+        });
+    }
     ~Game();
 
     bool init(uint32_t seed, int mapSize, std::string *err);
@@ -2014,6 +2019,8 @@ private:
                                int screenW, int screenH);
     bool cancelProductionItem(Object &building, size_t index);
     bool openSelectedActionMenu();
+    bool canProduce(const Object &building, const dat::Unit &effective) const;
+    bool canResearch(const Object &building, int technologyId) const;
     std::vector<const dat::Unit *> productionOptions(
         const Object &building) const;
     bool buildingMatchesLocation(
@@ -2167,8 +2174,7 @@ private:
     bool worldSoundAudible(float x, float y) const;
     void updateAmbience(float dt, int screenW, int screenH);
     void updateAi(float dt);
-    void updateAiPlayer(
-        int player, AiPlayerState &state);
+    void updateAiPlayer(int player, AiPlayerState &state, size_t rulesPerSlice);
     void updateAiGatherers(
         int player, AiPlayerState &state);
     void updateAiWorkerShelter(
@@ -2332,6 +2338,32 @@ private:
     std::vector<uint32_t> discoverableObjectIndices_;
     std::vector<uint32_t> minimapObjectIndices_;
     std::vector<uint32_t> screenPickObjectIndices_;
+    // Ids of the objects the last rendered frame showed in the world view
+    // (sorted): the original's Object Visible / Object Not Visible trigger
+    // conditions look the object up in the main view's draw list.
+    struct AiPopulationStats {
+        std::array<float, 17> civilian{}, military{};
+        std::array<int, 17> soldiers{}, militaryRounded{};
+    };
+    const AiPopulationStats &aiPopulationStats() const;
+    mutable AiPopulationStats aiPopulation_;
+    mutable bool aiPopulationValid_ = false;
+    // populationUsed()/populationCapacity() during a fact pass, valid while
+    // the stamp matches (bumped whenever aiPopulationValid_ is cleared).
+    uint64_t aiFactStamp_ = 1;
+    mutable std::array<std::pair<uint64_t, float>, 17> aiUsedMemo_{}, aiCapacityMemo_{};
+    float populationCapacityUncached(int player) const;
+    // aiObjectCount() reuses one player's object indices while a rule's
+    // facts are checked (aiFactPass_); aiCountPlayer_ -1 = not gathered.
+    bool aiFactPass_ = false;
+    mutable int aiCountPlayer_ = -1;
+    mutable std::vector<uint32_t> aiCountIndices_;
+    // can-train producer answers during a fact pass (aiProducerPlayer_ -1 = none).
+    mutable int aiProducerPlayer_ = -1;
+    mutable std::unordered_map<uint32_t, bool> aiProducerMemo_;
+    // aiTechnology() answers by AI symbol (the dat is constant).
+    mutable std::unordered_map<std::string, int> aiTechnologyMemo_;
+    std::vector<uint32_t> onScreenObjectIds_;
     int mobileObjectGridWidth_ = 0;
     float maxMobileCollisionRadius_ = 0;
     std::vector<uint32_t> staticObstructionIndices_;
@@ -2348,6 +2380,10 @@ private:
     };
     mutable std::vector<StoredPathGrid> pathGridStore_;
     std::pair<uint64_t, uint64_t> pathGridSignature(const Object &object) const;
+    TilePathfinder &pathGridFor(const Object &object) const;
+    // Whether the mover's walkable area includes a tile next to (within one
+    // tile of) the footprint centred at x, y: no path search.
+    bool sameAreaNear(const Object &mover, float x, float y, float halfX, float halfY) const;
     mutable uint32_t pathSearches_ = 0;
     // Path cost counters for the Vita frame log (takePathStats resets them).
     mutable uint32_t pathGridBuilds_ = 0;
@@ -2534,6 +2570,18 @@ private:
     bool fullTechTreeCheat_ = false;
     // Researched-tech derived caches (see unitAvailable/effectiveUnitForPlayer).
     uint64_t techGeneration_ = 1;
+    // buildingMatchesLocation() lineages per (player, unit id).
+    struct LineageMemo {
+        uint64_t generation = 0;
+        std::vector<int> ids;
+    };
+    mutable std::unordered_map<uint64_t, LineageMemo> lineageMemo_;
+    // canProduce() answers per (player, producer unit, unit) for a techGeneration_.
+    struct ProduceMemo {
+        uint64_t generation = 0;
+        bool result = false;
+    };
+    mutable std::unordered_map<uint64_t, ProduceMemo> produceMemo_;
     // playerAttribute() results per player, valid for one techGeneration_.
     mutable std::array<std::vector<float>, 17> attributeCache_{};
     mutable std::array<uint64_t, 17> attributeCacheGeneration_{};

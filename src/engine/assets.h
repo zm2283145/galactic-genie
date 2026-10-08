@@ -53,6 +53,8 @@ public:
 
     // dataDir is the game's "Data" folder (contains genie_x1.dat, *.drs).
     bool init(const std::string &dataDir, std::string *err);
+    // Text resource from gamedata_x1.drs / gamedata.drs (AI modules, maps).
+    bool readGamedataText(int32_t id, std::string &text);
     void setLogger(LogFn fn) { log_ = std::move(fn); }
 
     const dat::DatFile &dat() const { return dat_; }
@@ -199,7 +201,7 @@ private:
 
     Renderer *renderer_;
     LogFn log_;
-    ResourceSet graphics_, terrain_, interfac_, sounds_;
+    ResourceSet graphics_, terrain_, interfac_, sounds_, gamedata_;
     Palette palette_;
     dat::DatFile dat_;
     LanguageStrings languageStrings_;

@@ -451,6 +451,9 @@ void Game::resetMatchState() {
     tileSlope_.clear();
     objects_.clear();
     previousPositions_.clear();
+    onScreenObjectIds_.clear();
+    lineageMemo_.clear();
+    produceMemo_.clear();
     objectIndices_.clear();
     projectiles_.clear();
     remains_.clear();
@@ -642,6 +645,9 @@ bool Game::initGenerated(
     attackModeChanges_ = 0;
     objects_.clear();
     previousPositions_.clear();
+    onScreenObjectIds_.clear();
+    lineageMemo_.clear();
+    produceMemo_.clear();
     selectionOrder_.clear();
     actionMenuOpen_ = false;
     actionMenuObjectId_ = 0;
@@ -1367,6 +1373,9 @@ bool Game::initScenario(
 
     objects_.clear();
     previousPositions_.clear();
+    onScreenObjectIds_.clear();
+    lineageMemo_.clear();
+    produceMemo_.clear();
     selectionOrder_.clear();
     actionMenuOpen_ = false;
     actionMenuObjectId_ = 0;
@@ -6296,6 +6305,48 @@ std::vector<const dat::Unit *> Game::productionOptions(
     return options;
 }
 
+// Whether productionOptions(building) holds this (already player-effective)
+// unit, without building the whole list: the AI asks this for every one of
+// its buildings whenever a can-train fact or train action is checked.
+bool Game::canProduce(const Object &building, const dat::Unit &effective) const {
+    if (building.gate || !building.unit) return false;
+    const int civilization = civilizationForPlayer(building.player);
+    const auto &civs = assets_.dat().civs;
+    if (civilization < 0 || (size_t)civilization >= civs.size()) return false;
+    if (isFoodProcessingCenter(building) && !building.underConstruction &&
+        unitAvailable(building.player, 50))
+        if (const dat::Unit *farm =
+                effectiveUnitForPlayer(building.player, findUnit(civilization, 50));
+            farm && farm->id == effective.id)
+            return true;
+    if (effective.disabled || effective.hideInEditor || effective.heroMode ||
+        effective.buttonId == 0 || effective.type < dat::UT_Creatable ||
+        effective.type == dat::UT_Building)
+        return false;
+    // The rest depends only on the player's technologies and the two unit
+    // types, so the answer is kept for a techGeneration_.
+    const uint64_t memoKey = ((uint64_t)(uint32_t)building.player << 40) |
+                             ((uint64_t)(uint16_t)building.unit->id << 16) | (uint16_t)effective.id;
+    ProduceMemo &memo = produceMemo_[memoKey];
+    if (memo.generation == techGeneration_) return memo.result;
+    memo.generation = techGeneration_;
+    memo.result = false;
+    if (!buildingMatchesLocation(building, effective.trainLocationId)) return false;
+    const auto &units = civs[(size_t)civilization].units;
+    const auto sourceMatches = [&](const dat::Unit &source) {
+        if (!source.exists || !unitAvailable(building.player, source.id)) return false;
+        const dat::Unit *unit = effectiveUnitForPlayer(building.player, &source);
+        return unit && unit->id == effective.id;
+    };
+    // The unit's own line first; any other unit upgrading into it after.
+    for (int id : {effective.id, effective.baseId, effective.copyId})
+        if (id >= 0 && (size_t)id < units.size() && sourceMatches(units[(size_t)id]))
+            return memo.result = true;
+    for (const dat::Unit &source : units)
+        if (sourceMatches(source)) return memo.result = true;
+    return false;
+}
+
 bool Game::isFoodProcessingCenter(const Object &building) const {
     return building.unit && building.unit->type == dat::UT_Building &&
            building.unit->name.rfind("BLDG-DROPCHOW", 0) == 0;
@@ -6305,6 +6356,17 @@ bool Game::buildingMatchesLocation(
     const Object &building, int locationId) const {
     if (!building.unit || locationId < 0)
         return false;
+    // The lineage below only grows from these three ids.
+    if (locationId == building.unit->id || locationId == building.unit->baseId ||
+        locationId == building.unit->copyId)
+        return true;
+    // The lineage depends only on the unit and the player's researched
+    // technologies, so it is kept per (player, unit) for a techGeneration_.
+    const uint64_t memoKey =
+        ((uint64_t)(uint32_t)building.player << 32) | (uint32_t)(uint16_t)building.unit->id;
+    LineageMemo &memo = lineageMemo_[memoKey];
+    if (memo.generation == techGeneration_)
+        return std::binary_search(memo.ids.begin(), memo.ids.end(), locationId);
     std::set<int> lineage{
         building.unit->id,
         building.unit->baseId,
@@ -6338,6 +6400,8 @@ bool Game::buildingMatchesLocation(
                     changed = true;
         }
     }
+    memo.generation = techGeneration_;
+    memo.ids.assign(lineage.begin(), lineage.end()); // sorted
     return lineage.count(locationId) != 0;
 }
 
@@ -6607,6 +6671,27 @@ void Game::applyUnitUpgrades(int player) {
     }
     if (pathingChanged)
         rebuildAdjacency();
+}
+
+// Whether researchOptions(building) lists this technology, without building
+// (or invalidating) the building's whole research menu.
+bool Game::canResearch(const Object &building, int technologyId) const {
+    if (building.gate || technologyId < 0 ||
+        (size_t)technologyId >= assets_.dat().techs.size())
+        return false;
+    const int player = building.player;
+    const dat::Tech &technology = assets_.dat().techs[(size_t)technologyId];
+    if (technology.researchTime <= 0 || technology.buttonId == 0 || technology.effectId < 0 ||
+        (technology.civ >= 0 && technology.civ != civilizationForPlayer(player)) ||
+        !buildingMatchesLocation(building, technology.locationId) ||
+        researchedTechs_[(size_t)player].count(technologyId) ||
+        disabledTechs_[(size_t)player].count(technologyId) ||
+        !technologyVisible(player, technology) ||
+        assets_.localizedString(technology.languageDllName).empty())
+        return false;
+    for (const ProductionItem &item : building.productionQueue)
+        if (item.technologyId == technologyId) return false;
+    return true;
 }
 
 const std::vector<int> &Game::researchOptions(
@@ -7316,12 +7401,18 @@ float Game::populationUse(
 }
 
 float Game::populationUsed(int player) const {
+    // Rules ask this many times per pass; nothing changes while facts are
+    // checked, so the answer is kept until the AI step moves on or acts.
+    const bool memo = aiFactPass_ && player >= 0 && (size_t)player < aiUsedMemo_.size();
+    if (memo && aiUsedMemo_[(size_t)player].first == aiFactStamp_)
+        return aiUsedMemo_[(size_t)player].second;
     float used = 0.0f;
     for (const Object &object : prefetched(objects_))
         if (object.active &&
             object.player == player &&
             object.unit)
             used += populationUse(*object.unit);
+    if (memo) aiUsedMemo_[(size_t)player] = {aiFactStamp_, used};
     return used;
 }
 
@@ -7329,6 +7420,15 @@ float Game::populationCapacity(int player) const {
     if (player <= 0 ||
         (size_t)player > players_.size())
         return 0.0f;
+    const bool memo = aiFactPass_ && (size_t)player < aiCapacityMemo_.size();
+    if (memo && aiCapacityMemo_[(size_t)player].first == aiFactStamp_)
+        return aiCapacityMemo_[(size_t)player].second;
+    const float capacity = populationCapacityUncached(player);
+    if (memo) aiCapacityMemo_[(size_t)player] = {aiFactStamp_, capacity};
+    return capacity;
+}
+
+float Game::populationCapacityUncached(int player) const {
     float capacity = 0.0f;
     for (const Object &object : prefetched(objects_)) {
         if (!object.active ||
@@ -14179,11 +14279,9 @@ std::pair<uint64_t, uint64_t> Game::pathGridSignature(const Object &object) cons
 // Long-range path (see pathfinding.h for how it mirrors the original).
 // goalObject/clearance turn the destination into a goal *region* around an
 // object, which is how the original approaches gather/build/attack targets.
-bool Game::findPath(const Object &object, float targetX, float targetY,
-                    std::vector<std::array<float, 2>> &path,
-                    const Object *goalObject, float clearance) const {
-    path.clear();
-    if (mapSize_ <= 0) return false;
+// The pathfinding grid for this mover (terrain restriction, air, player,
+// radius), built on first use and reused until rebuildAdjacency().
+TilePathfinder &Game::pathGridFor(const Object &object) const {
     const bool air = isAirUnit(object);
     const int restriction = object.unit->terrainRestriction;
     const int radiusHundredths =
@@ -14327,6 +14425,34 @@ bool Game::findPath(const Object &object, float targetX, float targetY,
         pathGridCache_.push_back(std::move(entry));
         cache = pathGridCache_.end() - 1;
     }
+    return cache->finder;
+}
+
+bool Game::sameAreaNear(const Object &mover, float x, float y, float halfX, float halfY) const {
+    const TilePathfinder &grid = pathGridFor(mover);
+    // The mover's own tile, or the nearest open tile around it when it stands
+    // against an obstacle.
+    const int moverX = fastFloor(mover.x), moverY = fastFloor(mover.y);
+    int area = grid.component(moverX, moverY);
+    for (int ring = 1; ring <= 2 && area < 0; ++ring)
+        for (int dy = -ring; dy <= ring && area < 0; ++dy)
+            for (int dx = -ring; dx <= ring && area < 0; ++dx)
+                area = grid.component(moverX + dx, moverY + dy);
+    if (area < 0) return false;
+    const int minX = fastFloor(x - halfX) - 1, maxX = fastFloor(x + halfX) + 1;
+    const int minY = fastFloor(y - halfY) - 1, maxY = fastFloor(y + halfY) + 1;
+    for (int tileY = minY; tileY <= maxY; ++tileY)
+        for (int tileX = minX; tileX <= maxX; ++tileX)
+            if (grid.component(tileX, tileY) == area) return true;
+    return false;
+}
+
+bool Game::findPath(const Object &object, float targetX, float targetY,
+                    std::vector<std::array<float, 2>> &path,
+                    const Object *goalObject, float clearance) const {
+    path.clear();
+    if (mapSize_ <= 0) return false;
+    TilePathfinder &finder = pathGridFor(object);
 
     PathGoal goal;
     goal.x = targetX;
@@ -14350,7 +14476,7 @@ bool Game::findPath(const Object &object, float targetX, float targetY,
         }
     } findTimer{findStart, pathFindUs_};
     PathResult result =
-        cache->finder.find(object.x, object.y, goal, tiles, 30000,
+        finder.find(object.x, object.y, goal, tiles, 30000,
                            [&](int x, int y) {
                                return segmentClear(object, object.x, object.y,
                                                    x + 0.5f, y + 0.5f);
@@ -15652,15 +15778,18 @@ bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed
                          object->pathGoalId ==
                              (uint32_t)targetId;
     }
-    case 15: {
+    case 15:
+    case 16: {
+        // The original (condition check at 0x5f1de0, cases 0xe/0xf) asks
+        // whether the object is in the main view's draw list: on screen,
+        // not merely explored or inside someone's line of sight.
         const Object *object = findObject((uint32_t)unitObject);
-        const int viewer =
-            player > 0 ? player
-                       : localPlayer_;
-        return object && object->active &&
-               !object->hidden && object->draw &&
-               objectVisibleToPlayer(
-                   *object, viewer);
+        if (!object || !object->active)
+            return false;
+        const bool onScreen =
+            !object->hidden && object->draw &&
+            std::binary_search(onScreenObjectIds_.begin(), onScreenObjectIds_.end(), object->spawnId);
+        return condition.type == 15 ? onScreen : !onScreen;
     }
     case 17: {
         const int technology =
@@ -15750,7 +15879,7 @@ bool Game::supportsTriggerCondition(int type) {
     case 1: case 3: case 4: case 5:
     case 6: case 8: case 9: case 10:
     case 11: case 12: case 13: case 14:
-    case 15: case 17: case 18: case 19:
+    case 15: case 16: case 17: case 18: case 19:
     case 20: case 21: case 22: case 23:
         return true;
     default:
@@ -16739,25 +16868,61 @@ const dat::Unit *Game::aiUnit(
 
 int Game::aiTechnology(
     const std::string &symbol) const {
+    // The dat never changes, so each symbol's answer is remembered.
+    const auto memo = aiTechnologyMemo_.find(symbol);
+    if (memo != aiTechnologyMemo_.end()) return memo->second;
     const std::string name =
         normalizeAiSymbol(symbol);
-    if (name == "tech-level-2") return 1;
-    if (name == "tech-level-3") return 2;
-    if (name == "tech-level-4") return 3;
-    const auto &technologies =
-        assets_.dat().techs;
-    for (size_t index = 0;
-         index < technologies.size();
-         ++index) {
-        const dat::Tech &technology =
-            technologies[index];
-        if (normalizeAiSymbol(
-                technology.name) == name ||
-            normalizeAiSymbol(
-                technology.name2) == name)
-            return (int)index;
+    int result = -1;
+    if (name == "tech-level-2") result = 1;
+    else if (name == "tech-level-3") result = 2;
+    else if (name == "tech-level-4") result = 3;
+    else {
+        const auto &technologies =
+            assets_.dat().techs;
+        for (size_t index = 0;
+             index < technologies.size();
+             ++index) {
+            const dat::Tech &technology =
+                technologies[index];
+            if (normalizeAiSymbol(
+                    technology.name) == name ||
+                normalizeAiSymbol(
+                    technology.name2) == name) {
+                result = (int)index;
+                break;
+            }
+        }
     }
-    return -1;
+    aiTechnologyMemo_.emplace(symbol, result);
+    return result;
+}
+
+// Population figures of every player, gathered in one pass over the objects
+// while a rule's facts are checked (aiFactPass_); same order and arithmetic
+// as the per-fact loops below.
+const Game::AiPopulationStats &Game::aiPopulationStats() const {
+    if (aiPopulationValid_) return aiPopulation_;
+    aiPopulation_ = AiPopulationStats{};
+    for (const Object &object : prefetched(objects_)) {
+        // Gaia (every tree and deposit) is never asked about.
+        if (object.player <= 0 || !object.active || object.hidden || !object.unit ||
+            object.unit->type == dat::UT_Building ||
+            (size_t)object.player >= aiPopulation_.civilian.size())
+            continue;
+        const size_t player = (size_t)object.player;
+        const bool attacker = canAttack(object);
+        if (isGatherer(object))
+            aiPopulation_.civilian[player] += populationUse(*object.unit);
+        else if (attacker)
+            aiPopulation_.military[player] += populationUse(*object.unit);
+        if (!isWorker(object) && attacker) {
+            aiPopulation_.soldiers[player]++;
+            aiPopulation_.militaryRounded[player] += (int)std::lround(populationUse(*object.unit));
+        }
+    }
+    aiPopulationValid_ = true;
+    return aiPopulation_;
 }
 
 int Game::aiTechLevel(int player) const {
@@ -16784,7 +16949,19 @@ int Game::aiObjectCount(
     const dat::Unit *effective =
         effectiveUnitForPlayer(
             player, &unit);
-    for (const Object &object : prefetched(objects_)) {
+    // While a rule's facts are checked nothing changes, so the player's
+    // objects are gathered once and reused until an action runs.
+    if (aiFactPass_ && aiCountPlayer_ != player) {
+        aiCountIndices_.clear();
+        for (size_t index = 0; index < objects_.size(); ++index)
+            if (objects_[index].player == player && objects_[index].active)
+                aiCountIndices_.push_back((uint32_t)index);
+        aiCountPlayer_ = player;
+    }
+    const bool indexed = aiFactPass_ && aiCountPlayer_ == player;
+    const size_t total = indexed ? aiCountIndices_.size() : objects_.size();
+    for (size_t position = 0; position < total; ++position) {
+        const Object &object = objects_[indexed ? aiCountIndices_[position] : position];
         if (!object.active ||
             object.hidden ||
             object.player != player ||
@@ -17032,6 +17209,15 @@ bool Game::aiBuild(
             });
     if (pendingBuildPlans >= 3)
         return false;
+    // After a placement search fails, this building is not searched for again
+    // for a while (a failed search tries every site around the base). Kept as
+    // an AI timer under a negative id so it is saved with the AI state.
+    const int backoffTimer = -100000 - unit.id;
+    if (player > 0 && (size_t)player < aiPlayers_.size()) {
+        const auto &timers = aiPlayers_[(size_t)player].timers;
+        const auto backoff = timers.find(backoffTimer);
+        if (backoff != timers.end() && backoff->second > 0.0f) return false;
+    }
     const std::string buildSymbol =
         normalizeAiSymbol(
             unit.name2.empty()
@@ -17153,10 +17339,11 @@ bool Game::aiBuild(
         symbol.find("dropmetal") !=
         std::string::npos)
         resourceType = 2;
+    // The nearest known deposit the worker can walk to. Reachability is a
+    // path search, so only the few nearest deposits are tried.
     const Object *resource = nullptr;
-    float resourceDistance =
-        std::numeric_limits<float>::max();
-    if (resourceType >= 0)
+    if (resourceType >= 0) {
+        std::vector<std::pair<float, const Object *>> deposits;
         for (const Object &candidate :
              prefetched(objects_)) {
             if (!isGatherable(candidate) ||
@@ -17165,22 +17352,26 @@ bool Game::aiBuild(
                 candidate.resourceType !=
                     resourceType)
                 continue;
-            if (!canReachObject(
-                    *worker, candidate,
-                    0.1f))
-                continue;
             const float dx =
                 candidate.x - worker->x;
             const float dy =
                 candidate.y - worker->y;
-            const float distance =
-                dx * dx + dy * dy;
-            if (distance <
-                resourceDistance) {
-                resource = &candidate;
-                resourceDistance = distance;
-            }
+            deposits.push_back({dx * dx + dy * dy, &candidate});
         }
+        const size_t tried = std::min<size_t>(deposits.size(), 6);
+        std::partial_sort(deposits.begin(), deposits.begin() + (ptrdiff_t)tried, deposits.end(),
+                          [](const auto &a, const auto &b) {
+                              return a.first < b.first ||
+                                     (a.first == b.first && a.second->spawnId < b.second->spawnId);
+                          });
+        for (size_t index = 0; index < tried && !resource; ++index) {
+            const Object &deposit = *deposits[index].second;
+            if (sameAreaNear(*worker, deposit.x, deposit.y, deposit.unit->collisionSize[0],
+                             deposit.unit->collisionSize[1]) &&
+                canReachObject(*worker, deposit, 0.1f))
+                resource = &deposit;
+        }
+    }
     if (forward) {
         float baseX = worker->x;
         float baseY = worker->y;
@@ -17261,16 +17452,28 @@ bool Game::aiBuild(
     float buildX = 0.0f;
     float buildY = 0.0f;
     bool found = false;
+    // Placement is searched in rings around the site, at most kMaxRadius
+    // tiles out, with a bounded number of reachability path searches: an
+    // unbuildable or unreachable area must not stall the simulation.
+    constexpr int kMaxRadius = 24;
+    constexpr int kMaxReachChecks = 4;
+    int reachChecks = 0;
+    // Sites outside the worker's walkable area are skipped without a path
+    // search; the few that pass are confirmed with one each.
     const auto tryPlacement =
         [&](int offsetX, int offsetY) {
+            if (reachChecks >= kMaxReachChecks)
+                return false;
             float x =
                 centerX + offsetX;
             float y =
                 centerY + offsetY;
             snapBuildingPosition(unit, x, y);
-            if (!placementValid(
+            if (!sameAreaNear(*worker, x, y, unit.collisionSize[0], unit.collisionSize[1]) ||
+                !placementValid(
                     unit, x, y))
                 return false;
+            ++reachChecks;
             Object probe;
             probe.unit = &unit;
             probe.player = player;
@@ -17287,8 +17490,10 @@ bool Game::aiBuild(
         };
     const auto findPlacement =
         [&]() {
+            reachChecks = 0;
             for (int radius = 3;
-                 radius <= mapSize_ && !found;
+                 radius <= std::min(mapSize_, kMaxRadius) && !found &&
+                 reachChecks < kMaxReachChecks;
                  ++radius) {
                 for (int offset = -radius;
                      offset <= radius && !found;
@@ -17309,8 +17514,10 @@ bool Game::aiBuild(
             }
         };
     findPlacement();
+    int otherWorkers = 0;
     if (!found)
         for (Object &candidate : prefetched(objects_)) {
+            if (otherWorkers >= 2) break;
             if (!candidate.active ||
                 candidate.hidden ||
                 candidate.player != player ||
@@ -17321,10 +17528,15 @@ bool Game::aiBuild(
                 &candidate == worker)
                 continue;
             worker = &candidate;
+            ++otherWorkers;
             findPlacement();
             if (found) break;
         }
-    if (!found) return false;
+    if (!found) {
+        if (player > 0 && (size_t)player < aiPlayers_.size())
+            aiPlayers_[(size_t)player].timers[backoffTimer] = 15.0f;
+        return false;
+    }
     for (const dat::ResourceCost &cost :
          unit.costs)
         if (cost.flag && cost.type >= 0 &&
@@ -17379,19 +17591,11 @@ bool Game::aiTrain(
             building.hidden ||
             building.underConstruction ||
             building.player != player ||
+            !building.unit ||
             building.productionQueue.size() >=
                 5)
             continue;
-        const auto &options =
-            productionOptions(building);
-        if (std::find_if(
-                options.begin(),
-                options.end(),
-                [&](const dat::Unit *option) {
-                    return option &&
-                           option->id ==
-                               effective->id;
-                }) != options.end()) {
+        if (canProduce(building, *effective)) {
             producer = &building;
             break;
         }
@@ -17449,12 +17653,7 @@ bool Game::aiResearch(
             building.underConstruction ||
             building.player != player)
             continue;
-        const auto &options =
-            researchOptions(building);
-        if (std::find(
-                options.begin(), options.end(),
-                technologyId) !=
-            options.end()) {
+        if (canResearch(building, technologyId)) {
             researcher = &building;
             break;
         }
@@ -17577,6 +17776,19 @@ bool Game::evaluateAiFactValue(
     if (fact == "population-cap") {
         value = (int)std::floor(
             populationCapacity(player));
+        return true;
+    }
+    if ((fact == "civilian-population" || fact == "military-population" ||
+         fact == "attack-soldier-count" || fact == "soldier-count" ||
+         fact == "defend-soldier-count" || fact == "defend-warboat-count" ||
+         fact == "attack-warboat-count") &&
+        aiFactPass_ && player >= 0 && (size_t)player < aiPopulation_.civilian.size()) {
+        const AiPopulationStats &stats = aiPopulationStats();
+        value = fact == "civilian-population"
+                    ? (int)std::floor(stats.civilian[(size_t)player])
+                : fact == "military-population" || fact == "attack-soldier-count"
+                    ? (int)std::floor(stats.military[(size_t)player])
+                    : stats.soldiers[(size_t)player];
         return true;
     }
     if (fact == "civilian-population" ||
@@ -17768,12 +17980,25 @@ Game::AiTruth Game::evaluateAiCondition(
     if (fact == "and" ||
         fact == "or" ||
         fact == "nor" ||
-        fact == "xor") {
+        fact == "xor" ||
+        fact == "nand" ||
+        fact == "and-list" ||
+        fact == "or-list") {
+        // (or-list N fact...) / (and-list N fact...): the count comes first.
+        const bool list = fact == "and-list" || fact == "or-list";
+        if (fact == "nand") {
+            AiNode conjunctionNode = condition;
+            conjunctionNode.children[0].value = "and";
+            const AiTruth nested = evaluateAiCondition(player, state, conjunctionNode);
+            return nested == AiTruth::True    ? AiTruth::False
+                   : nested == AiTruth::False ? AiTruth::True
+                                              : AiTruth::Unknown;
+        }
         bool unknown = false;
         const bool conjunction =
-            fact == "and";
+            fact == "and" || fact == "and-list";
         int trueCount = 0;
-        for (size_t index = 1;
+        for (size_t index = list ? 2 : 1;
              index < condition.children.size();
              ++index) {
             const AiTruth nested =
@@ -18294,28 +18519,36 @@ Game::AiTruth Game::evaluateAiCondition(
                 populationCapacity(player) +
                     0.001f)
             return AiTruth::False;
+        // Whether some building could take the order; asked by many rules
+        // in one pass, so remembered until an action runs.
+        const uint32_t producerKey = ((uint32_t)player << 16) | (uint16_t)actionUnit->id;
+        if (aiFactPass_) {
+            if (aiProducerPlayer_ != player) {
+                aiProducerMemo_.clear();
+                aiProducerPlayer_ = player;
+            }
+            const auto known = aiProducerMemo_.find(producerKey);
+            if (known != aiProducerMemo_.end())
+                return known->second ? AiTruth::True : AiTruth::False;
+        }
+        bool producer = false;
         for (const Object &building :
              prefetched(objects_)) {
             if (!building.active ||
                 building.hidden ||
                 building.underConstruction ||
                 building.player != player ||
+                !building.unit ||
                 building.productionQueue.size() >=
                     5)
                 continue;
-            const auto &options =
-                productionOptions(building);
-            if (std::find_if(
-                    options.begin(),
-                    options.end(),
-                    [&](const dat::Unit *option) {
-                        return option &&
-                               option->id ==
-                                       actionUnit->id;
-                    }) != options.end())
-                return AiTruth::True;
+            if (canProduce(building, *actionUnit)) {
+                producer = true;
+                break;
+            }
         }
-        return AiTruth::False;
+        if (aiFactPass_) aiProducerMemo_[producerKey] = producer;
+        return producer ? AiTruth::True : AiTruth::False;
     }
 
     size_t comparison = 0;
@@ -18413,6 +18646,8 @@ Game::AiTruth Game::evaluateAiCondition(
                     "players-current-age")
                     actual = aiTechLevel(
                         (int)candidate);
+                else if (aiFactPass_ && candidate < aiPopulation_.civilian.size())
+                    actual = aiPopulationStats().militaryRounded[candidate];
                 else
                     for (const Object &object :
                          prefetched(objects_))
@@ -18450,6 +18685,16 @@ Game::AiTruth Game::evaluateAiCondition(
         return result ? AiTruth::True
                       : AiTruth::False;
     }
+    // Scenarios and campaigns are not random maps: every random-map type
+    // test is false (the stock modules gate map-specific tactics on it).
+    if (fact == "map-type")
+        return AiTruth::False;
+    // AI wall and gate lines are not built here; the modules' wall plans
+    // stay idle instead of being reported every pass.
+    if (fact == "can-build-wall" || fact == "can-build-wall-with-escrow" ||
+        fact == "can-build-gate" || fact == "can-build-gate-with-escrow" ||
+        fact == "can-afford-complete-wall")
+        return AiTruth::False;
     if (state.warnedFacts.insert(fact).second) {
         std::string arguments;
         for (size_t index = 1;
@@ -18816,6 +19061,12 @@ bool Game::executeAiAction(
                 player);
         return true;
     }
+    // Micro-management tuning (ability-to-maintain-distance,
+    // ability-to-dodge-missiles): units here do not kite or dodge, so the
+    // setting has nothing to change. Wall placement is never used (the wall
+    // facts above are false), so enabling it is accepted and has no effect.
+    if (name == "set-difficulty-parameter" || name == "enable-wall-placement")
+        return true;
     if (state.warnedActions.insert(name).second) {
         std::string arguments;
         for (size_t index = 1;
@@ -18838,11 +19089,11 @@ bool Game::executeAiAction(
 }
 
 void Game::updateAiPlayer(
-    int player, AiPlayerState &state) {
+    int player, AiPlayerState &state, size_t rulesPerSlice) {
     if (state.program.rules.empty())
         return;
-    const size_t rulesPerSlice =
-        campaignArchive_.empty() ? 96u : 8u;
+    aiCountPlayer_ = -1; // objects changed since the last slice
+    aiProducerPlayer_ = -1;
     const size_t count =
         state.program.rules.size();
     for (size_t checked = 0;
@@ -18861,6 +19112,15 @@ void Game::updateAiPlayer(
         state.currentRuleLine =
             rule.line;
         bool matches = true;
+        aiFactPass_ = true;
+        // SWGB_TRACE_SLOW_AI=<us> (host tools): report rules and actions
+        // slower than that.
+        static const int traceSlowUs = [] {
+            const char *trace = std::getenv("SWGB_TRACE_SLOW_AI");
+            return trace ? std::max(1, atoi(trace)) : 0;
+        }();
+        const auto factStart = traceSlowUs ? std::chrono::steady_clock::now()
+                                           : std::chrono::steady_clock::time_point{};
         for (const AiNode &condition :
              rule.conditions)
             if (evaluateAiCondition(
@@ -18870,12 +19130,38 @@ void Game::updateAiPlayer(
                 matches = false;
                 break;
             }
+        aiFactPass_ = false;
+        if (traceSlowUs) {
+            const auto factUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now() - factStart)
+                                    .count();
+            if (factUs > traceSlowUs)
+                fprintf(stderr, "slow AI facts %lld us player %d (%s:%d)\n", (long long)factUs, player,
+                        rule.source.c_str(), rule.line);
+        }
         if (!matches) continue;
+        aiCountPlayer_ = -1; // the actions may add, remove or convert objects
+        aiProducerPlayer_ = -1;
+        aiPopulationValid_ = false;
+        ++aiFactStamp_;
         for (const AiNode &action :
-             rule.actions)
+             rule.actions) {
+            const auto actionStart = traceSlowUs ? std::chrono::steady_clock::now()
+                                                 : std::chrono::steady_clock::time_point{};
             executeAiAction(
                 player, state,
                 rule, action);
+            const auto actionUs = traceSlowUs
+                                      ? std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - actionStart)
+                                            .count()
+                                      : 0;
+            if (traceSlowUs && actionUs > traceSlowUs)
+                fprintf(stderr, "%s\n", std::string("slow AI action " + std::to_string(actionUs) + " us: " + action.name() +
+                    (action.children.size() > 1 ? " " + action.children[1].value : "") +
+                    " player " + std::to_string(player) + " (" + rule.source + ":" +
+                    std::to_string(action.line) + ")").c_str());
+        }
     }
 }
 
@@ -20639,13 +20925,20 @@ void Game::updateAiScouting(
             return left.first <
                    right.first;
         });
+    // Unexplored spots the scout cannot walk to are skipped without a path
+    // search, and only the nearest three are tried (each try is one).
+    int attempts = 0;
     for (const auto &destination :
-         destinations)
+         destinations) {
+        if (!sameAreaNear(*scout, destination.second[0], destination.second[1], 0.0f, 0.0f))
+            continue;
         if (issueMove(
                 *scout,
                 destination.second[0],
                 destination.second[1]))
             return;
+        if (++attempts >= 3) return;
+    }
 }
 
 void Game::updateAiWorkerShelter(
@@ -21234,6 +21527,8 @@ void Game::updateAi(float dt) {
     updateStats_.aiScoutingUs = 0;
     updateStats_.aiMaxPlayerUs = 0;
     updateStats_.aiMaxPlayer = -1;
+    aiPopulationValid_ = false; // the world moved since the last step
+    ++aiFactStamp_;
     for (size_t player = 1;
          player < aiPlayers_.size();
          ++player) {
@@ -21255,17 +21550,37 @@ void Game::updateAi(float dt) {
         } else {
             state.ageTime += dt;
         }
-        state.ruleTime -= dt;
-        if (state.ruleTime <= 0.0f) {
-            state.ruleTime = 0.25f;
-            const auto phaseStart =
-                AiClock::now();
-            updateAiPlayer(
-                (int)player, state);
-            updateStats_.aiRulesUs +=
-                elapsedAiUs(
-                    phaseStart,
-                    AiClock::now());
+        if (!campaignArchive_.empty()) {
+            // Campaign personalities load the standard modules (several
+            // hundred rules): every rule is checked once per 2 s, spread
+            // evenly over the simulation steps (ruleTime carries the
+            // fraction of a rule) so no single step checks hundreds.
+            state.ruleTime += dt * (float)state.program.rules.size() / 2.0f;
+            const size_t rules = (size_t)std::max(0.0f, state.ruleTime);
+            state.ruleTime -= (float)rules;
+            if (rules) {
+                const auto phaseStart =
+                    AiClock::now();
+                updateAiPlayer(
+                    (int)player, state, rules);
+                updateStats_.aiRulesUs +=
+                    elapsedAiUs(
+                        phaseStart,
+                        AiClock::now());
+            }
+        } else {
+            state.ruleTime -= dt;
+            if (state.ruleTime <= 0.0f) {
+                state.ruleTime = 0.25f;
+                const auto phaseStart =
+                    AiClock::now();
+                updateAiPlayer(
+                    (int)player, state, 96);
+                updateStats_.aiRulesUs +=
+                    elapsedAiUs(
+                        phaseStart,
+                        AiClock::now());
+            }
         }
         state.economyTime -= dt;
         if (state.economyTime <= 0.0f) {
@@ -21325,8 +21640,17 @@ void Game::updateAi(float dt) {
             state.scoutTime = 3.0f;
             const auto phaseStart =
                 AiClock::now();
-            updateAiScouting(
-                (int)player, state);
+            {
+                static const bool traceScout = std::getenv("SWGB_TRACE_SCOUT") != nullptr;
+                const auto scoutStart = std::chrono::steady_clock::now();
+                updateAiScouting(
+                    (int)player, state);
+                if (traceScout)
+                    fprintf(stderr, "scout player %d %lld us\n", (int)player,
+                            (long long)std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - scoutStart)
+                                .count());
+            }
             updateStats_.aiScoutingUs +=
                 elapsedAiUs(
                     phaseStart,
@@ -24338,6 +24662,7 @@ void Game::renderFrame(Renderer &r, int screenW, int screenH) {
             objectPrepareStart);
     g_draws.clear();
     screenPickObjectIndices_.clear();
+    onScreenObjectIds_.clear();
     // Elevation only lifts a sprite by elevation * elevHeight, so objects far
     // outside the view can be rejected before interpolating it.
     float elevationLiftMin = 0.0f, elevationLiftMax = 0.0f;
@@ -24375,6 +24700,12 @@ void Game::renderFrame(Renderer &r, int screenW, int screenH) {
         if (!objectVisibleToPlayer(
                 o, localPlayer_))
             continue;
+        // On screen for the trigger conditions: the anchor inside the view
+        // (sprites rise above their anchor, so allow more below the view),
+        // and seen now rather than remembered under the fog.
+        if (sx >= -48.0f && sx <= viewW + 48.0f && sy >= -32.0f && sy <= viewH + 128.0f &&
+            objectCurrentlyVisibleToPlayer(o, localPlayer_))
+            onScreenObjectIds_.push_back(o.spawnId);
         if (isInspectable(o) ||
             isGatherable(o))
             screenPickObjectIndices_.push_back(
@@ -25179,6 +25510,7 @@ void Game::renderFrame(Renderer &r, int screenW, int screenH) {
             r.draw(d.tex, d.q);
     }
     stats_.sprites = (int)g_draws.size();
+    std::sort(onScreenObjectIds_.begin(), onScreenObjectIds_.end());
 
     for (size_t unitIndex = 0;
          unitIndex < g_draws.size(); unitIndex++) {

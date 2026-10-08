@@ -885,6 +885,8 @@ static int cmdScenario(const char *path, int entryNumber) {
                player.startingAge);
         for (size_t other = 0; other < 9; other++) printf(" %u", player.diplomacy[other]);
         printf("\n");
+        if (const char *dump = std::getenv("SWGB_DUMP_AI"); dump && atoi(dump) == (int)i + 1)
+            printf("---- personality ----\n%s\n---- end ----\n", player.personality.c_str());
     }
     printf("triggers: %zu, system %.2f, objective state %u\n", scenario.triggers.size(),
            scenario.triggerSystemVersion, scenario.objectiveState);
@@ -1239,6 +1241,25 @@ static int cmdSimulateScenario(const char *dataDir, const char *campaignPath, in
            "contact %.0f rescued %.0f\n",
            game.resource(1, 0), game.resource(1, 1), game.resource(1, 2),
            game.resource(1, 3), game.resource(1, 200), game.resource(1, 201));
+    for (int player = 2; player <= 8; player++) {
+        if (!game.aiLoadedForTesting(player)) continue;
+        printf("  ai player %d: rules %zu missing includes %zu free workers %zu gatherers "
+               "%zu/%zu/%zu/%zu resources %.0f/%.0f/%.0f/%.0f\n",
+               player, game.aiRuleCountForTesting(player),
+               game.aiMissingIncludeCountForTesting(player),
+               game.aiFreeWorkerCountForTesting(player), game.aiGathererCountForTesting(player, 0),
+               game.aiGathererCountForTesting(player, 1), game.aiGathererCountForTesting(player, 2),
+               game.aiGathererCountForTesting(player, 3), game.resource(player, 0),
+               game.resource(player, 1), game.resource(player, 2), game.resource(player, 3));
+        printf("    sn food/carbon/metal/nova %d/%d/%d/%d tech level %d\n",
+               game.aiStrategicNumberForTesting(player, "sn-food-gatherer-percentage"),
+               game.aiStrategicNumberForTesting(player, "sn-carbon-gatherer-percentage"),
+               game.aiStrategicNumberForTesting(player, "sn-metal-gatherer-percentage"),
+               game.aiStrategicNumberForTesting(player, "sn-nova-gatherer-percentage"),
+               game.aiTechLevelForTesting(player));
+        for (const std::string &missing : game.aiMissingIncludesForTesting(player))
+            printf("    missing %s\n", missing.c_str());
+    }
     return 0;
 }
 
@@ -12234,7 +12255,7 @@ static int cmdRenderCampaignMissions(int argc, char **argv) {
     }
     for (size_t c = 0; c < catalog.campaigns().size(); ++c) {
         const CampaignInfo &campaign = catalog.campaigns()[c];
-        const int theme = campaign.originalNumber;
+        const int theme = campaign.expansion ? 100 + campaign.originalNumber : campaign.originalNumber;
         const OriginalMissionLayout *layout = originalMissionLayout(theme);
         CampaignProfile profile;
         profile.developmentAccess = true;
@@ -12245,7 +12266,8 @@ static int cmdRenderCampaignMissions(int argc, char **argv) {
             const std::string &text = assets.localizedString(id);
             return text.empty() ? fallback : text;
         });
-        frontend.setOriginalMenuBackground(assets.interfaceFrame(53100 + theme, 0, 53110 + theme));
+        frontend.setOriginalMenuBackground(
+            assets.interfaceFrame(missionBackgroundSlp(theme), 0, missionPalette(theme)));
         if (layout) applyOriginalMissionLayout(frontend, assets, *layout);
         frontend.selectCampaignMission(c, 1);
         frontend.showScreenForTesting(FrontendScreen::CampaignMissions, 1);
@@ -12256,6 +12278,43 @@ static int cmdRenderCampaignMissions(int argc, char **argv) {
         soft.savePng(out);
         printf("%s: theme %d, %zu missions, layout %s -> %s\n", campaign.title.c_str(), theme,
                campaign.missions.size(), layout ? "yes" : "NO", out.c_str());
+    }
+    // Both campaign selection screens (original, Clone Campaigns).
+    for (const bool clone : {false, true}) {
+        size_t first = catalog.campaigns().size();
+        for (size_t c = 0; c < catalog.campaigns().size(); ++c)
+            if (catalog.campaigns()[c].expansion == clone) { first = c; break; }
+        if (first >= catalog.campaigns().size()) continue;
+        CampaignProfile profile;
+        Frontend frontend;
+        frontend.setCampaignData(&catalog, &profile);
+        frontend.setStringLookup([&](int id, const std::string &fallback) {
+            const std::string &text = assets.localizedString(id);
+            return text.empty() ? fallback : text;
+        });
+        frontend.setOriginalMenuBackground(clone ? assets.interfaceFrame(53222, 0, 53220)
+                                                 : assets.interfaceFrame(53014, 0, 53016));
+        for (size_t c = 0; c < catalog.campaigns().size(); ++c) {
+            const CampaignInfo &campaign = catalog.campaigns()[c];
+            if (campaign.expansion) {
+                const size_t frame = 1 + 4 * (size_t)(campaign.originalNumber - 1);
+                frontend.setOriginalCampaignIcon(c, assets.interfaceFrame(53222, frame, 53220),
+                                                 assets.interfaceFrame(53222, frame + 1, 53220));
+            } else {
+                const int number = campaign.originalNumber;
+                const size_t frame = number == 8 ? 29 : 1 + 4 * (size_t)(number - 1);
+                frontend.setOriginalCampaignIcon(c, assets.interfaceFrame(53014, frame, 53016),
+                                                 assets.interfaceFrame(53014, frame + 1, 53016));
+            }
+        }
+        frontend.selectCampaignMission(first, 0);
+        frontend.showScreenForTesting(FrontendScreen::CampaignBrowser, first);
+        soft.beginFrame(800, 600, 1.0f, 0, 0, 0);
+        frontend.render(soft, 800, 600);
+        soft.endFrame();
+        const std::string out = std::string(argv[4]) + (clone ? "_browser_clone.png" : "_browser.png");
+        soft.savePng(out);
+        printf("campaign selection (%s) -> %s\n", clone ? "Clone Campaigns" : "original", out.c_str());
     }
     return 0;
 }

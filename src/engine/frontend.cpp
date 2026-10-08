@@ -74,6 +74,19 @@ constexpr std::array<OriginalCampaignPlacement, 6>
         {594.0f, 297.0f, 579.0f, 369.0f, 20},
     }};
 
+// Clone Campaigns selection screen (interfac_x1.drs 53231, "1cam_pic_pos"):
+// icon x y, label box x y w.
+constexpr std::array<OriginalCampaignPlacement, 2>
+    kCloneCampaignPlacements{{
+        {194.0f, 272.0f, 230.0f, 383.0f, 16},
+        {525.0f, 272.0f, 560.0f, 383.0f, 16},
+    }};
+
+// Where a campaign's icon and label go on its selection screen, and the
+// number its label shows; nullptr when it has no place there.
+const OriginalCampaignPlacement *campaignPlacement(
+    const CampaignInfo &campaign, size_t &number);
+
 size_t originalCampaignSlot(
     const CampaignInfo &campaign) {
     switch (campaign.originalNumber) {
@@ -85,6 +98,21 @@ size_t originalCampaignSlot(
     case 5: return 5;
     default: return kOriginalCampaignPlacements.size();
     }
+}
+
+const OriginalCampaignPlacement *campaignPlacement(
+    const CampaignInfo &campaign, size_t &number) {
+    if (campaign.expansion) {
+        if (campaign.originalNumber < 1 ||
+            (size_t)campaign.originalNumber > kCloneCampaignPlacements.size())
+            return nullptr;
+        number = (size_t)campaign.originalNumber;
+        return &kCloneCampaignPlacements[(size_t)campaign.originalNumber - 1];
+    }
+    const size_t slot = originalCampaignSlot(campaign);
+    if (slot >= kOriginalCampaignPlacements.size()) return nullptr;
+    number = slot + 1;
+    return &kOriginalCampaignPlacements[slot];
 }
 
 void centeredText(
@@ -684,19 +712,24 @@ FrontendAction Frontend::update(
         } else if (input.menuActivate || touched < count) {
             if (sounds_) sounds_(50300);
             if (selection_ <= 1) {
-                if (!catalog_ ||
-                    catalog_->campaigns().empty()) {
-                    message_ =
-                        "NO VALID ORIGINAL CAMPAIGNS WERE DISCOVERED";
+                // Original Campaigns (xcam) or Clone Campaigns (1cam): the
+                // original opens the same selection screen for either set.
+                const bool clone = selection_ == 1;
+                size_t first = catalog_ ? catalog_->campaigns().size() : 0;
+                for (size_t index = 0; index < first; ++index)
+                    if (catalog_->campaigns()[index].expansion == clone) {
+                        first = index;
+                        break;
+                    }
+                if (!catalog_ || first >= catalog_->campaigns().size()) {
+                    message_ = clone
+                                   ? "NO CLONE CAMPAIGNS WERE DISCOVERED"
+                                   : "NO VALID ORIGINAL CAMPAIGNS WERE DISCOVERED";
                     if (sounds_) sounds_(50303);
                 } else {
+                    cloneCampaigns_ = clone;
                     screen_ = FrontendScreen::CampaignBrowser;
-                    campaignSelection_ =
-                        selection_ == 0
-                            ? 0
-                            : std::min<size_t>(
-                                  3,
-                                  catalog_->campaigns().size() - 1);
+                    campaignSelection_ = first;
                     selection_ = campaignSelection_;
                 }
             } else if (selection_ == 2) {
@@ -744,14 +777,13 @@ FrontendAction Frontend::update(
             for (size_t index = 0;
                  index < count;
                  ++index) {
-                const size_t slot =
-                    originalCampaignSlot(
-                        catalog_->campaigns()[index]);
-                if (slot >=
-                    kOriginalCampaignPlacements.size())
+                if (catalog_->campaigns()[index].expansion != cloneCampaigns_)
                     continue;
-                const auto &placement =
-                    kOriginalCampaignPlacements[slot];
+                size_t number = 0;
+                const OriginalCampaignPlacement *found =
+                    campaignPlacement(catalog_->campaigns()[index], number);
+                if (!found) continue;
+                const auto &placement = *found;
                 const SpriteFrame *frame =
                     index <
                             originalCampaignIcons_
@@ -777,11 +809,19 @@ FrontendAction Frontend::update(
             }
         }
         if (touched < count) selection_ = touched;
-        if (input.menuUp) moveSelection(-1, count);
-        if (input.menuDown) moveSelection(1, count);
+        // Up/down step through this screen's set only.
+        for (int direction : {input.menuUp ? -1 : 0, input.menuDown ? 1 : 0}) {
+            if (!direction || !count) continue;
+            size_t next = selection_;
+            for (size_t step = 0; step < count; ++step) {
+                next = (next + count + (size_t)(direction > 0 ? 1 : count - 1)) % count;
+                if (catalog_->campaigns()[next].expansion == cloneCampaigns_) break;
+            }
+            if (catalog_->campaigns()[next].expansion == cloneCampaigns_) selection_ = next;
+        }
         if (input.menuBack || touchedBack) {
             screen_ = FrontendScreen::SinglePlayer;
-            selection_ = 0;
+            selection_ = cloneCampaigns_ ? 1 : 0;
         } else if ((input.menuActivate || touched < count) &&
                    count) {
             campaignSelection_ = selection_;
@@ -1621,7 +1661,7 @@ void Frontend::render(
         const std::array<std::string, 5>
             entries{{
                 "Original Campaigns",
-                "Expansion Campaigns",
+                "Clone Campaigns",
                 "Standard Game",
                 "Custom Campaign",
                 "Saved Game",
@@ -1639,7 +1679,8 @@ void Frontend::render(
                 54, 3, 201, 216, 228);
     } else if (screen_ == FrontendScreen::CampaignBrowser) {
         centerOriginalText(
-            text(11242, "CAMPAIGNS"),
+            cloneCampaigns_ ? std::string("CLONE CAMPAIGNS")
+                            : text(11242, "CAMPAIGNS"),
             405, 13, 1.3f,
             215, 226, 233);
         centerOriginalText(
@@ -1652,23 +1693,26 @@ void Frontend::render(
                      catalog_->campaigns().size(),
                      originalCampaignIcons_.size());
                  ++index) {
-                const size_t slot =
-                    originalCampaignSlot(
-                        catalog_->campaigns()[index]);
-                if (slot >=
-                    kOriginalCampaignPlacements.size())
+                if (catalog_->campaigns()[index].expansion != cloneCampaigns_)
                     continue;
-                const auto &placement =
-                    kOriginalCampaignPlacements[slot];
+                size_t number = 0;
+                const OriginalCampaignPlacement *found =
+                    campaignPlacement(catalog_->campaigns()[index], number);
+                if (!found) continue;
+                const auto &placement = *found;
                 drawOriginalFrame(
                     originalCampaignIcons_[index][
                         index == selection_ ? 1 : 0],
                     placement.iconX,
                     placement.iconY);
+                // The titles already carry their number ("2: OOM-9").
+                const std::string &title = catalog_->campaigns()[index].title;
+                const size_t colon = title.find(':');
+                const bool numbered = colon != std::string::npos && colon > 0 && colon < 3 &&
+                                      std::all_of(title.begin(), title.begin() + (ptrdiff_t)colon,
+                                                  [](char c) { return c >= '0' && c <= '9'; });
                 std::string label =
-                    std::to_string(slot + 1) +
-                    ": " +
-                    catalog_->campaigns()[index].title;
+                    numbered ? title : std::to_string(number) + ": " + title;
                 std::vector<std::string> lines;
                 size_t start = 0;
                 while (start < label.size() &&

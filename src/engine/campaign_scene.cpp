@@ -168,7 +168,10 @@ bool parseMediaScript(const std::string &script, std::vector<MediaItem> &items, 
 bool CampaignScene::load(Assets &assets, const std::string &mediaDir, int campaign, int mission,
                          bool beginning, std::string *err) {
     release(assets);
-    const std::string base = mediaDir + "/xc" + std::to_string(campaign) + "s" +
+    // Clone Campaigns scenes are 1c<campaign>s<mission> over 1backgrd<campaign>.
+    const bool clone = campaign > 100;
+    const int number = clone ? campaign - 100 : campaign;
+    const std::string base = mediaDir + (clone ? "/1c" : "/xc") + std::to_string(number) + "s" +
                              std::to_string(mission) + (beginning ? "_beg" : "_end");
     std::string script;
     if (!readTextFile(mediaPathNoCase(mediaDir, base.substr(mediaDir.size() + 1) + ".mm"), script)) {
@@ -183,7 +186,7 @@ bool CampaignScene::load(Assets &assets, const std::string &mediaDir, int campai
     auto mediaFile = [&](const std::string &name) {
         return mediaPathNoCase(mediaDir, name);
     };
-    const std::string backgroundName = "xbackgrd" + std::to_string(campaign);
+    const std::string backgroundName = (clone ? "1backgrd" : "xbackgrd") + std::to_string(number);
     const std::string palette = mediaFile(backgroundName + ".pal");
     background_ = assets.fileFrame(mediaFile(backgroundName + ".slp"), 0, palette);
     const std::string pictures = mediaFile(base.substr(mediaDir.size() + 1) + ".slp");

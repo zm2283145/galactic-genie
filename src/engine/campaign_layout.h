@@ -4,6 +4,8 @@
 // x y w h, then the mission title box x y w h, in 800x600 screen pixels).
 // The buttons are frames 1 + 4 * mission (+0 normal, +1 selected,
 // +2 completed, +3 locked) of the campaign background SLP 53100 + n.
+// The Clone Campaigns (themes 101 and 102: 1cam1, 1cam2) use
+// interfac_x1.drs 53226 / 53230 over backgrounds 53225 / 53229.
 #pragma once
 
 #include "assets.h"
@@ -14,6 +16,14 @@
 #include <cstdint>
 
 namespace swgb {
+
+// The mission screen background SLP and its palette for a theme.
+inline int missionBackgroundSlp(int theme) {
+    return theme == 101 ? 53225 : theme == 102 ? 53229 : 53100 + theme;
+}
+inline int missionPalette(int theme) {
+    return theme == 101 ? 53223 : theme == 102 ? 53227 : 53110 + theme;
+}
 
 struct OriginalMissionLayout {
     int theme;
@@ -47,6 +57,14 @@ inline const OriginalMissionLayout *originalMissionLayout(int theme) {
               {377, 149, 103, 103, 362, 265, 133, 60}, {218, 246, 103, 103, 203, 361, 133, 60},
               {51, 291, 92, 124, 36, 425, 122, 60}, {181, 418, 132, 77, 166, 515, 162, 60},
               {355, 380, 103, 103, 340, 496, 133, 60}}}, 7},
+        {101, {{{75, 101, 158, 73, 60, 184, 188, 60}, {332, 86, 130, 93, 317, 194, 160, 60},
+                {58, 235, 111, 103, 44, 363, 141, 60}, {215, 234, 132, 90, 210, 338, 140, 60},
+                {398, 233, 109, 105, 393, 352, 120, 60}, {89, 419, 180, 88, 74, 527, 210, 60},
+                {336, 407, 136, 94, 321, 521, 166, 60}}}, 7},
+        {102, {{{75, 101, 158, 73, 60, 188, 188, 60}, {332, 86, 130, 93, 317, 193, 160, 60},
+                {58, 235, 111, 103, 54, 358, 121, 60}, {215, 234, 132, 90, 210, 338, 142, 60},
+                {398, 233, 109, 105, 393, 350, 119, 60}, {89, 419, 180, 88, 74, 527, 210, 60},
+                {336, 407, 136, 94, 331, 511, 146, 90}}}, 7},
                 };
     for (const OriginalMissionLayout &layout : kLayouts)
         if (layout.theme == theme) return &layout;
@@ -55,8 +73,8 @@ inline const OriginalMissionLayout *originalMissionLayout(int theme) {
 
 inline void applyOriginalMissionLayout(Frontend &frontend, Assets &assets,
                                        const OriginalMissionLayout &layout) {
-    const int slp = 53100 + layout.theme;
-    const int palette = 53110 + layout.theme;
+    const int slp = missionBackgroundSlp(layout.theme);
+    const int palette = missionPalette(layout.theme);
     for (size_t mission = 0; mission < layout.count; ++mission) {
         const auto &row = layout.rows[mission];
         const size_t frame = 1 + mission * 4;

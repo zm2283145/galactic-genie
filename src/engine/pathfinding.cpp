@@ -11,6 +11,38 @@ namespace swgb {
 static const int kDirs[8][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1},
                                 {1, 1}, {-1, 1}, {1, -1}, {-1, -1}};
 
+int TilePathfinder::component(int x, int y) const {
+    if (x < 0 || y < 0 || x >= size_ || y >= size_) return -1;
+    const size_t cells = (size_t)size_ * size_;
+    if (components_.size() != cells) {
+        // Orthogonal steps suffice: a diagonal step needs both of its
+        // orthogonal routes clear, so it never joins two areas on its own.
+        components_.assign(cells, -1);
+        std::vector<int32_t> queue;
+        int32_t label = 0;
+        for (size_t start = 0; start < cells; ++start) {
+            if (components_[start] >= 0 || !passable_[start]) continue;
+            queue.clear();
+            queue.push_back((int32_t)start);
+            components_[start] = label;
+            for (size_t head = 0; head < queue.size(); ++head) {
+                const int32_t index = queue[head];
+                const int cx = index % size_, cy = index / size_;
+                const uint8_t bits = moves_[(size_t)index];
+                for (int d = 0; d < 4; ++d) {
+                    if (!(bits & (1u << d))) continue;
+                    const int32_t next = (cy + kDirs[d][1]) * size_ + cx + kDirs[d][0];
+                    if (components_[(size_t)next] >= 0) continue;
+                    components_[(size_t)next] = label;
+                    queue.push_back(next);
+                }
+            }
+            ++label;
+        }
+    }
+    return components_[(size_t)y * size_ + x];
+}
+
 // Same bits as buildMovesReference(), read straight from edges_: an edge
 // bit is only ever set between two passable tiles, so edge() reduces to the
 // bit and passable() of a step's end tiles is implied by the edges tested.

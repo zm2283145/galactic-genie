@@ -192,6 +192,7 @@ public:
     size_t selectedCampaign() const {
         return campaignSelection_;
     }
+    bool cloneCampaignsShown() const { return cloneCampaigns_; }
     size_t selectedMission() const {
         return missionSelection_;
     }
@@ -199,6 +200,8 @@ public:
         size_t campaign, size_t mission) {
         campaignSelection_ = campaign;
         missionSelection_ = mission;
+        if (catalog_ && campaign < catalog_->campaigns().size())
+            cloneCampaigns_ = catalog_->campaigns()[campaign].expansion;
     }
     const CampaignMission *selectedCampaignMission() const;
     void reportMessage(const std::string &message) {
@@ -250,8 +253,9 @@ private:
     const SpriteFrame *originalMenuButton_ = nullptr;
     const SpriteFrame *originalMenuSelectedButton_ =
         nullptr;
+    // Indexed by catalog campaign: six original and two Clone Campaigns.
     std::array<
-        std::array<const SpriteFrame *, 2>, 6>
+        std::array<const SpriteFrame *, 2>, 8>
         originalCampaignIcons_{};
     std::array<
         std::array<const SpriteFrame *, 3>, 8>
@@ -294,6 +298,9 @@ private:
     size_t lobbyPage_ = 0;
     size_t lobbySlot_ = 0;
     size_t campaignSelection_ = 0;
+    // The campaign selection screen shows the Clone Campaigns (1cam) rather
+    // than the original campaigns (xcam).
+    bool cloneCampaigns_ = false;
     size_t missionSelection_ = 0;
     int outcome_ = -1;
     std::string message_;

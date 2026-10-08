@@ -59,6 +59,7 @@ public:
                 edges_[(size_t)y * size_ + x] = bits;
             }
         buildMoves();
+        components_.clear();
     }
     void build(int size, const std::function<bool(int, int)> &passable) {
         build(size, passable, [](int, int, int) { return true; });
@@ -68,6 +69,11 @@ public:
         return x >= 0 && y >= 0 && x < size_ && y < size_ &&
                passable_[(size_t)y * size_ + x] != 0;
     }
+
+    // Connected area of a tile (tiles joined by find()'s steps share it), or
+    // -1 for a blocked or outside tile. Labelled on first use per grid: a
+    // cheap "can a unit at A ever walk to B" test before a path search.
+    int component(int x, int y) const;
 
     // Finds a tile route from (sx, sy) to the goal region. Waypoints are tile
     // centres, start excluded. maxExpansions bounds the work per search.
@@ -86,6 +92,7 @@ private:
     // (target passable, edge clear, no corner cutting); precomputed by
     // build() from passable_/edges_ exactly as find() used to test per step.
     std::vector<uint8_t> moves_;
+    mutable std::vector<int32_t> components_;
     bool edge(int x, int y, int dx, int dy) const;
     void buildMoves();
     void buildMovesReference(std::vector<uint8_t> &moves) const;

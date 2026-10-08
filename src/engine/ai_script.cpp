@@ -6,6 +6,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <iterator>
 #include <limits>
 #include <sstream>
 
@@ -31,47 +32,28 @@ std::string trim(const std::string &text) {
     return text.substr(begin, end - begin);
 }
 
-bool isBuiltinAiModule(
-    const std::string &name) {
-    static const char *modules[] = {
-        "age-advancement.per", "aggressive.per",
-        "airbase.per", "animal.per",
-        "attack.per", "building-count.per",
-        "carbon.per", "cheats.per",
-        "civ-loads.per", "combat-arm.per",
-        "constants.per", "deathmatch.per",
-        "defensive.per", "difficulty-loads.per",
-        "dip-boomer.per", "dip-bully.per",
-        "dip-feeder.per", "diplomacy.per",
-        "escrow.per", "fishboat.per",
-        "food.per", "fortress.per",
-        "ground.per", "groups.per",
-        "heavy-weapons.per", "homebase.per",
-        "init-goals.per", "jedi-temple.per",
-        "map-loads.per", "map-specs.per",
-        "mech-factory.per",
-        "military-population-hard.per",
-        "military-population.per", "monument.per",
-        "no-diplomacy.per", "nova.per",
-        "ore.per", "population.per",
-        "randomgame.per", "research-center.per",
-        "research.per", "resign.per",
-        "rush.per", "shipyard.per",
-        "sn-gather.per", "sn-homebase.per",
-        "sn-soldiers.per", "spaceport.per",
-        "supplement.per", "tower.per",
-        "troop-center.per", "war-center.per",
-        "warboat-island.per", "warboat.per",
-        "wonder-kill.per", "wonder-rush.per",
-    };
-    const std::string normalized =
-        normalizeAiSymbol(name);
-    return std::find_if(
-               std::begin(modules),
-               std::end(modules),
-               [&](const char *module) {
-                   return normalized == module;
-               }) != std::end(modules);
+// The original's load catalog (FUN_005ff440): data\load\<name> is
+// extracted from gamedata_x1.drs "bina" 60001 + index.
+constexpr const char *kBuiltinAiModules[] = {
+    "age-advancement.per", "aggressive.per", "airbase.per", "animal.per",
+    "attack.per", "building-count.per", "carbon.per", "cheats.per",
+    "civ-loads.per", "combat-arm.per", "constants.per", "deathmatch.per",
+    "defensive.per", "difficulty-loads.per", "dip-boomer.per", "dip-bully.per",
+    "dip-feeder.per", "diplomacy.per", "fishboat.per", "food.per",
+    "fortress.per", "ground.per", "groups.per", "heavy-weapons.per",
+    "homebase.per", "init-goals.per", "jedi-temple.per", "map-loads.per",
+    "map-specs.per", "mech-factory.per", "military-population.per", "monument.per",
+    "no-diplomacy.per", "nova.per", "ore.per", "population.per",
+    "randomgame.per", "research-center.per", "research.per", "rush.per",
+    "shipyard.per", "sn-gather.per", "sn-homebase.per", "sn-soldiers.per",
+    "spaceport.per", "supplement.per", "tower.per", "troop-center.per",
+    "war-center.per", "warboat-island.per", "warboat.per", "wonder-kill.per",
+    "wonder-rush.per", "resign.per", "escrow.per", "military-population-hard.per",
+};
+
+AiProgram::BuiltinModuleSource &builtinModuleSource() {
+    static AiProgram::BuiltinModuleSource source;
+    return source;
 }
 
 std::string directoryOf(const std::string &path) {
@@ -402,13 +384,25 @@ bool parseNode(
 
 std::string normalizeAiSymbol(
     const std::string &symbol) {
-    std::string normalized;
-    normalized.reserve(symbol.size());
-    for (char character : symbol)
-        normalized.push_back(
-            (char)std::tolower(
-                (unsigned char)character));
+    // ASCII lower case (the symbols are ASCII; no locale lookup per char).
+    std::string normalized = symbol;
+    for (char &character : normalized)
+        if (character >= 'A' && character <= 'Z') character = (char)(character - 'A' + 'a');
     return normalized;
+}
+
+void AiProgram::setBuiltinModuleSource(BuiltinModuleSource source) {
+    builtinModuleSource() = std::move(source);
+}
+
+int AiProgram::builtinModuleResource(const std::string &fileName) {
+    std::string normalized = normalizeAiSymbol(fileName);
+    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    const size_t separator = normalized.find_last_of('/');
+    if (separator != std::string::npos) normalized = normalized.substr(separator + 1);
+    for (size_t index = 0; index < std::size(kBuiltinAiModules); ++index)
+        if (normalized == kBuiltinAiModules[index]) return 60001 + (int)index;
+    return -1;
 }
 
 bool AiProgram::load(
@@ -599,8 +593,17 @@ bool AiProgram::processSource(
                     normalized.size() - 4) !=
                     ".per")
                 fileName += ".per";
-            if (isBuiltinAiModule(fileName))
+            if (const int resource = builtinModuleResource(fileName); resource >= 0) {
+                const std::string key = "data/load/" + normalizeAiSymbol(fileName);
+                std::string text;
+                if (!builtinModuleSource() || !loaded_.insert(key).second ||
+                    !builtinModuleSource()(resource, text))
+                    continue;
+                files.push_back(key);
+                if (!processSource(key, directory, text, err))
+                    return false;
                 continue;
+            }
             if (!loadFile(
                     joinPath(
                         directory, fileName),

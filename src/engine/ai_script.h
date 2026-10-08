@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -55,6 +56,15 @@ public:
     std::unordered_map<std::string, int> constants;
     std::vector<std::string> files;
     std::vector<std::string> missingFiles;
+
+    // The original's standard modules ((load "constants"), (load "sn-gather")
+    // ...) are not files in Game\AI: the exe extracts them from
+    // gamedata_x1.drs ("bina" 60001-60056) into data\load. The source of a
+    // module by DRS id; without one the modules are skipped.
+    using BuiltinModuleSource = std::function<bool(int resourceId, std::string &text)>;
+    static void setBuiltinModuleSource(BuiltinModuleSource source);
+    // DRS id of a standard module (e.g. "constants.per" -> 60011), or -1.
+    static int builtinModuleResource(const std::string &fileName);
 
 private:
     std::unordered_set<std::string> defines_;

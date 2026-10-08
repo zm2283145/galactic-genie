@@ -2313,6 +2313,8 @@ bool Game::loadMatch(
     enemyIntelligenceCheat_ =
         enemyIntelligence;
     techGeneration_ = techGeneration;
+    lineageMemo_.clear();
+    produceMemo_.clear();
     attributeCacheGeneration_ = {};
     unitAttributeOps_.clear();
     reseedQueue_ = reseedQueue;

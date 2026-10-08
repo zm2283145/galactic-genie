@@ -388,10 +388,15 @@ int main() {
                                    : localized;
                     },
                     &err);
-                if (valid && catalog.missionCount() != 43) {
+                // The original campaigns must all be there; the Clone
+                // Campaigns (1CAM1/2.CP1) are optional.
+                size_t originalMissions = 0;
+                for (const swgb::CampaignInfo &campaign : catalog.campaigns())
+                    if (!campaign.expansion) originalMissions += campaign.missions.size();
+                if (valid && originalMissions != 43) {
                     err =
                         "expected 43 original XCAM missions; found " +
-                        std::to_string(catalog.missionCount()) +
+                        std::to_string(originalMissions) +
                         " (copy XCAM1/2/3/4/5/8.CPX)";
                     valid = false;
                 }
@@ -416,7 +421,9 @@ int main() {
             }
         }
         swgb::Assets &assets = *assetOwner;
-        runStartupPresentation(renderer);
+        // Unattended test runs (autostart.txt) skip the intro movies.
+        if (!fileExists("ux0:data/swgb/autostart.txt"))
+            runStartupPresentation(renderer);
         {
             SceKernelFreeMemorySizeInfo info{};
             info.size = sizeof info;
@@ -492,6 +499,16 @@ int main() {
         for (size_t campaign = 0;
              campaign < catalog.campaigns().size();
              ++campaign) {
+            if (catalog.campaigns()[campaign].expansion) {
+                // Clone Campaigns screen 53222: frames 1 + 4 * (n - 1).
+                const int number = catalog.campaigns()[campaign].originalNumber;
+                if (number < 1 || number > 2) continue;
+                const size_t cloneFrame = 1 + 4 * (size_t)(number - 1);
+                frontend.setOriginalCampaignIcon(
+                    campaign, assets.interfaceFrame(53222, cloneFrame, 53220),
+                    assets.interfaceFrame(53222, cloneFrame + 1, 53220));
+                continue;
+            }
             size_t frame = 0;
             switch (
                 catalog.campaigns()[campaign]
@@ -553,6 +570,8 @@ int main() {
             if (frontend.selectedCampaign() >=
                 catalog.campaigns().size())
                 return 1;
+            if (catalog.campaigns()[frontend.selectedCampaign()].expansion)
+                return 100 + catalog.campaigns()[frontend.selectedCampaign()].originalNumber;
             const std::string &archive =
                 catalog.campaigns()[
                     frontend.selectedCampaign()]
@@ -583,20 +602,24 @@ int main() {
                     mainMenuPalette;
                 break;
             case swgb::FrontendScreen::CampaignBrowser:
-                backgroundSlp = 53014;
-                backgroundPalette = 53016;
+                // Original campaigns 53014, Clone Campaigns 53222.
+                backgroundSlp = frontend.cloneCampaignsShown() ? 53222 : 53014;
+                backgroundPalette = frontend.cloneCampaignsShown() ? 53220 : 53016;
                 break;
             case swgb::FrontendScreen::CampaignMissions:
             case swgb::FrontendScreen::CampaignBriefing: {
                 const int theme =
                     campaignThemeNumber();
-                backgroundSlp = 53100 + theme;
-                backgroundPalette = 53110 + theme;
+                backgroundSlp = swgb::missionBackgroundSlp(theme);
+                backgroundPalette = swgb::missionPalette(theme);
                 if (frontend.screen() ==
                     swgb::FrontendScreen::
                         CampaignBriefing) {
+                    // Clone Campaigns dialogs: 53271 / 53281 (53270, 53280).
                     dialogSlp =
-                        theme == 8
+                        theme == 101 ? 53271
+                        : theme == 102 ? 53281
+                        : theme == 8
                             ? 53164
                             : 53160 + theme;
                     dialogPalette =
@@ -620,9 +643,9 @@ int main() {
             if (missionTheme != frontendMissionTheme) {
                 if (frontendMissionTheme >= 0) {
                     const int oldSlp =
-                        53100 + frontendMissionTheme;
+                        swgb::missionBackgroundSlp(frontendMissionTheme);
                     const int oldPalette =
-                        53110 + frontendMissionTheme;
+                        swgb::missionPalette(frontendMissionTheme);
                     const size_t oldMissionCount =
                         frontendMissionTheme == 4
                             ? 8
