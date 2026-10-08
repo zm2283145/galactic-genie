@@ -102,6 +102,7 @@ size_t originalCampaignSlot(
 
 const OriginalCampaignPlacement *campaignPlacement(
     const CampaignInfo &campaign, size_t &number) {
+    if (campaign.custom) return nullptr;
     if (campaign.expansion) {
         if (campaign.originalNumber < 1 ||
             (size_t)campaign.originalNumber > kCloneCampaignPlacements.size())
@@ -589,8 +590,21 @@ FrontendAction Frontend::update(
                 profileChanged_ = true;
             }
         }
-        screen_ = FrontendScreen::Outcome;
+        // A won campaign mission plays its closing scene first.
+        screen_ = campaignMatch_ && matchOutcome == 1 ? FrontendScreen::CampaignEpilogue
+                                                      : FrontendScreen::Outcome;
         selection_ = 0;
+        return FrontendAction::None;
+    }
+    if (screen_ == FrontendScreen::CampaignEpilogue) {
+        // The scene is loaded by the platform layer when this screen opens;
+        // without one (or once it ends or is skipped) the outcome menu follows.
+        if (!campaignScene_ || !campaignScene_->loaded() || campaignScene_->finished() ||
+            input.menuActivate || input.menuBack || input.pointerTap) {
+            screen_ = FrontendScreen::Outcome;
+            selection_ = 0;
+        }
+        return FrontendAction::None;
     }
     if (screen_ == FrontendScreen::Title) {
         if (input.menuActivate || input.pointerTap) {
@@ -645,8 +659,27 @@ FrontendAction Frontend::update(
                 screen_ = FrontendScreen::SinglePlayer;
                 selection_ = 0;
             } else if (selection_ == 1) {
-                message_ = "BASIC TRAINING IS NOT YET AVAILABLE";
-                if (sounds_) sounds_(50303);
+                // Basic Training: the original opens the mission screen of
+                // the training campaign (xcam8) straight from the main menu.
+                size_t training = catalog_ ? catalog_->campaigns().size() : 0;
+                for (size_t index = 0; index < training; ++index)
+                    if (!catalog_->campaigns()[index].expansion &&
+                        catalog_->campaigns()[index].originalNumber == 8) {
+                        training = index;
+                        break;
+                    }
+                if (!catalog_ || training >= catalog_->campaigns().size()) {
+                    message_ = "BASIC TRAINING (XCAM8.CPX) WAS NOT FOUND";
+                    if (sounds_) sounds_(50303);
+                } else {
+                    cloneCampaigns_ = false;
+                    customCampaigns_ = false;
+                    campaignSelection_ = training;
+                    missionSelection_ = 0;
+                    missionsFromMainMenu_ = true;
+                    screen_ = FrontendScreen::CampaignMissions;
+                    selection_ = 0;
+                }
             } else if (selection_ == 2) {
                 message_ = "COMMUNITY SERVICES ARE UNAVAILABLE";
                 if (sounds_) sounds_(50303);
@@ -711,23 +744,29 @@ FrontendAction Frontend::update(
             if (sounds_) sounds_(50301);
         } else if (input.menuActivate || touched < count) {
             if (sounds_) sounds_(50300);
-            if (selection_ <= 1) {
-                // Original Campaigns (xcam) or Clone Campaigns (1cam): the
-                // original opens the same selection screen for either set.
+            if (selection_ <= 1 || selection_ == 3) {
+                // Original Campaigns (xcam), Clone Campaigns (1cam) or Custom
+                // Campaigns (any other archive in the campaign folder).
                 const bool clone = selection_ == 1;
+                const bool customSet = selection_ == 3;
                 size_t first = catalog_ ? catalog_->campaigns().size() : 0;
-                for (size_t index = 0; index < first; ++index)
-                    if (catalog_->campaigns()[index].expansion == clone) {
+                for (size_t index = 0; index < first; ++index) {
+                    const CampaignInfo &candidate = catalog_->campaigns()[index];
+                    if (customSet ? candidate.custom
+                                  : !candidate.custom && candidate.expansion == clone) {
                         first = index;
                         break;
                     }
+                }
                 if (!catalog_ || first >= catalog_->campaigns().size()) {
-                    message_ = clone
-                                   ? "NO CLONE CAMPAIGNS WERE DISCOVERED"
-                                   : "NO VALID ORIGINAL CAMPAIGNS WERE DISCOVERED";
+                    message_ = customSet ? "NO CUSTOM CAMPAIGNS WERE FOUND IN THE CAMPAIGN FOLDER"
+                               : clone   ? "NO CLONE CAMPAIGNS WERE DISCOVERED"
+                                         : "NO VALID ORIGINAL CAMPAIGNS WERE DISCOVERED";
                     if (sounds_) sounds_(50303);
                 } else {
                     cloneCampaigns_ = clone;
+                    customCampaigns_ = customSet;
+                    missionsFromMainMenu_ = false;
                     screen_ = FrontendScreen::CampaignBrowser;
                     campaignSelection_ = first;
                     selection_ = campaignSelection_;
@@ -737,10 +776,7 @@ FrontendAction Frontend::update(
                 selection_ = 0;
                 lobbyPage_ = 0;
                 refreshLobbyPreview();
-            } else if (selection_ == 3) {
-                message_ =
-                    "CUSTOM CAMPAIGNS ARE NOT YET AVAILABLE";
-                if (sounds_) sounds_(50303);
+            } else if (false) {
             } else {
                 if (!continueAvailable_) {
                     message_ = "NO VALID SAVE IS AVAILABLE";
@@ -777,8 +813,18 @@ FrontendAction Frontend::update(
             for (size_t index = 0;
                  index < count;
                  ++index) {
-                if (catalog_->campaigns()[index].expansion != cloneCampaigns_)
+                if (!inBrowserSet(catalog_->campaigns()[index]))
                     continue;
+                if (customCampaigns_) {
+                    // Custom Campaigns are a list (rows as on the mission list).
+                    const float rowY = kOriginalMissionTop + browserRow(index) * kOriginalMissionRow;
+                    if (logicalX >= 54.0f && logicalX < 459.0f && logicalY >= rowY - 7.0f &&
+                        logicalY < rowY + 24.0f) {
+                        touched = index;
+                        break;
+                    }
+                    continue;
+                }
                 size_t number = 0;
                 const OriginalCampaignPlacement *found =
                     campaignPlacement(catalog_->campaigns()[index], number);
@@ -815,13 +861,13 @@ FrontendAction Frontend::update(
             size_t next = selection_;
             for (size_t step = 0; step < count; ++step) {
                 next = (next + count + (size_t)(direction > 0 ? 1 : count - 1)) % count;
-                if (catalog_->campaigns()[next].expansion == cloneCampaigns_) break;
+                if (inBrowserSet(catalog_->campaigns()[next])) break;
             }
-            if (catalog_->campaigns()[next].expansion == cloneCampaigns_) selection_ = next;
+            if (inBrowserSet(catalog_->campaigns()[next])) selection_ = next;
         }
         if (input.menuBack || touchedBack) {
             screen_ = FrontendScreen::SinglePlayer;
-            selection_ = cloneCampaigns_ ? 1 : 0;
+            selection_ = customCampaigns_ ? 3 : cloneCampaigns_ ? 1 : 0;
         } else if ((input.menuActivate || touched < count) &&
                    count) {
             campaignSelection_ = selection_;
@@ -898,8 +944,14 @@ FrontendAction Frontend::update(
             profileChanged_ = true;
         }
         if (input.menuBack) {
-            screen_ = FrontendScreen::CampaignBrowser;
-            selection_ = campaignSelection_;
+            if (missionsFromMainMenu_) {
+                missionsFromMainMenu_ = false;
+                screen_ = FrontendScreen::MainMenu;
+                selection_ = 1;
+            } else {
+                screen_ = FrontendScreen::CampaignBrowser;
+                selection_ = campaignSelection_;
+            }
         } else if ((input.menuActivate || touched < count) &&
                    campaign && profile_ && count) {
             if (!profile_->isUnlocked(*campaign, selection_)) {
@@ -1679,8 +1731,9 @@ void Frontend::render(
                 54, 3, 201, 216, 228);
     } else if (screen_ == FrontendScreen::CampaignBrowser) {
         centerOriginalText(
-            cloneCampaigns_ ? std::string("CLONE CAMPAIGNS")
-                            : text(11242, "CAMPAIGNS"),
+            customCampaigns_ ? text(9229, "Custom Campaign")
+            : cloneCampaigns_ ? std::string("CLONE CAMPAIGNS")
+                              : text(11242, "CAMPAIGNS"),
             405, 13, 1.3f,
             215, 226, 233);
         centerOriginalText(
@@ -1693,8 +1746,20 @@ void Frontend::render(
                      catalog_->campaigns().size(),
                      originalCampaignIcons_.size());
                  ++index) {
-                if (catalog_->campaigns()[index].expansion != cloneCampaigns_)
+                if (!inBrowserSet(catalog_->campaigns()[index]))
                     continue;
+                if (customCampaigns_) {
+                    const float y = kOriginalMissionTop + browserRow(index) * kOriginalMissionRow;
+                    if (index == selection_)
+                        renderer.fillRect(54 * originalScaleX, (y - 7) * originalScaleY,
+                                          405 * originalScaleX, 31 * originalScaleY, 18, 38, 53, 205);
+                    drawOriginalText(catalog_->campaigns()[index].title + "  (" +
+                                         std::to_string(catalog_->campaigns()[index].missions.size()) +
+                                         " missions)",
+                                     72, y, 0.92f, index == selection_ ? 255 : 190,
+                                     index == selection_ ? 226 : 210, index == selection_ ? 122 : 222);
+                    continue;
+                }
                 size_t number = 0;
                 const OriginalCampaignPlacement *found =
                     campaignPlacement(catalog_->campaigns()[index], number);
@@ -1929,6 +1994,12 @@ void Frontend::render(
             profile_ && profile_->developmentAccess ? "ALL MISSIONS OPEN"
                                                     : "SEQUENTIAL PROGRESSION",
             600, 494, 0.5f, 151, 177, 199);
+    } else if (screen_ == FrontendScreen::CampaignEpilogue &&
+               campaignScene_ && campaignScene_->loaded()) {
+        campaignScene_->render(renderer, screenW, screenH, [&](int id) {
+            return strings_ ? strings_(id, std::string()) : std::string();
+        });
+        drawOriginalText("X  CONTINUE", 24, 6, 0.55f, 205, 214, 222);
     } else if (screen_ == FrontendScreen::CampaignBriefing &&
                campaignScene_ && campaignScene_->loaded()) {
         campaignScene_->render(renderer, screenW, screenH, [&](int id) {

@@ -40,6 +40,8 @@ struct CampaignInfo {
     // original campaigns (xcamN.cpx); the Single Player menu lists them
     // separately.
     bool expansion = false;
+    // Any other campaign archive in the folder (Custom Campaigns).
+    bool custom = false;
     std::vector<CampaignMission> missions;
 };
 

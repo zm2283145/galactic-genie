@@ -850,6 +850,52 @@ static const char *conditionName(int type) {
     return type >= 0 && (size_t)type < sizeof(names) / sizeof(names[0]) ? names[type] : "Unknown";
 }
 
+// audit-triggers <file.cpx|.cp1>...: every trigger condition/effect type the
+// archives use, with the ones the runtime does not support.
+static int cmdAuditTriggers(int argc, char **argv) {
+    std::map<int, int> conditions, effects;
+    std::map<int, std::set<std::string>> conditionWhere, effectWhere;
+    for (int a = 2; a < argc; ++a) {
+        std::string err;
+        auto archive = CpxArchive::open(argv[a], &err);
+        if (!archive) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+        for (size_t i = 0; i < archive->entries().size(); ++i) {
+            std::vector<uint8_t> bytes;
+            Scenario scenario;
+            if (!archive->read(i, bytes, &err) || !scenario.load(bytes, &err)) {
+                fprintf(stderr, "error: %s %zu: %s\n", argv[a], i + 1, err.c_str());
+                return 1;
+            }
+            const std::string where = archive->name() + ":" + std::to_string(i + 1);
+            for (const ScenarioTrigger &trigger : scenario.triggers) {
+                for (const ScenarioCondition &condition : trigger.conditions) {
+                    conditions[condition.type]++;
+                    conditionWhere[condition.type].insert(where);
+                }
+                for (const ScenarioEffect &effect : trigger.effects) {
+                    effects[effect.type]++;
+                    effectWhere[effect.type].insert(where);
+                }
+            }
+        }
+    }
+    int unsupported = 0;
+    for (const auto &[type, count] : conditions) {
+        const bool ok = Game::supportsTriggerCondition(type);
+        unsupported += !ok;
+        printf("condition %2d: %5d uses %s%s\n", type, count, ok ? "" : "UNSUPPORTED in ",
+               ok ? "" : (*conditionWhere[type].begin()).c_str());
+    }
+    for (const auto &[type, count] : effects) {
+        const bool ok = Game::supportsTriggerEffect(type);
+        unsupported += !ok;
+        printf("effect    %2d: %5d uses %s%s\n", type, count, ok ? "" : "UNSUPPORTED in ",
+               ok ? "" : (*effectWhere[type].begin()).c_str());
+    }
+    printf("%d unsupported types\n", unsupported);
+    return unsupported ? 1 : 0;
+}
+
 static int cmdScenario(const char *path, int entryNumber) {
     Scenario scenario;
     std::string err;
@@ -10728,6 +10774,12 @@ static int cmdTestCampaign(
     input.menuBack = true;
     frontend.update(input, -1);
     frontend.update({}, 1);
+    // The won mission's closing scene comes first; with no scene loaded the
+    // outcome menu follows on the next update.
+    const bool epilogueFirst = frontend.screen() == FrontendScreen::CampaignEpilogue;
+    frontend.update({}, 1);
+    report("campaign-victory-closing-scene", epilogueFirst &&
+                                                 frontend.screen() == FrontendScreen::Outcome);
     input = {};
     input.menuActivate = true;
     const FrontendAction continuation =
@@ -12552,6 +12604,7 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "bench-ui")) return cmdBenchUi(argv[2]);
     if (!strcmp(cmd, "bench-campaign")) return cmdBenchCampaign(argc, argv);
     if (!strcmp(cmd, "render-campaign-missions")) return cmdRenderCampaignMissions(argc, argv);
+    if (!strcmp(cmd, "audit-triggers")) return cmdAuditTriggers(argc, argv);
     if (!strcmp(cmd, "render-campaign-scene")) return cmdRenderCampaignScene(argc, argv);
 #ifndef SWGB_BASE_BUILD
     if (!strcmp(cmd, "test-sound-select")) {

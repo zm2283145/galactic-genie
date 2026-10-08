@@ -392,7 +392,8 @@ int main() {
                 // Campaigns (1CAM1/2.CP1) are optional.
                 size_t originalMissions = 0;
                 for (const swgb::CampaignInfo &campaign : catalog.campaigns())
-                    if (!campaign.expansion) originalMissions += campaign.missions.size();
+                    if (!campaign.expansion && !campaign.custom)
+                        originalMissions += campaign.missions.size();
                 if (valid && originalMissions != 43) {
                     err =
                         "expected 43 original XCAM missions; found " +
@@ -570,6 +571,8 @@ int main() {
             if (frontend.selectedCampaign() >=
                 catalog.campaigns().size())
                 return 1;
+            if (catalog.campaigns()[frontend.selectedCampaign()].custom)
+                return -1; // no original screens: the list layout
             if (catalog.campaigns()[frontend.selectedCampaign()].expansion)
                 return 100 + catalog.campaigns()[frontend.selectedCampaign()].originalNumber;
             const std::string &archive =
@@ -602,22 +605,27 @@ int main() {
                     mainMenuPalette;
                 break;
             case swgb::FrontendScreen::CampaignBrowser:
-                // Original campaigns 53014, Clone Campaigns 53222.
-                backgroundSlp = frontend.cloneCampaignsShown() ? 53222 : 53014;
-                backgroundPalette = frontend.cloneCampaignsShown() ? 53220 : 53016;
+                // Original campaigns 53014, Clone Campaigns 53222; the Custom
+                // Campaigns list sits on the main menu art.
+                backgroundSlp = frontend.customCampaignsShown() ? mainMenuSlp
+                                : frontend.cloneCampaignsShown() ? 53222 : 53014;
+                backgroundPalette = frontend.customCampaignsShown() ? mainMenuPalette
+                                    : frontend.cloneCampaignsShown() ? 53220 : 53016;
                 break;
             case swgb::FrontendScreen::CampaignMissions:
             case swgb::FrontendScreen::CampaignBriefing: {
                 const int theme =
                     campaignThemeNumber();
-                backgroundSlp = swgb::missionBackgroundSlp(theme);
-                backgroundPalette = swgb::missionPalette(theme);
+                // Custom campaigns (theme -1) use the first campaign's art.
+                backgroundSlp = swgb::missionBackgroundSlp(theme < 0 ? 1 : theme);
+                backgroundPalette = swgb::missionPalette(theme < 0 ? 1 : theme);
                 if (frontend.screen() ==
                     swgb::FrontendScreen::
                         CampaignBriefing) {
                     // Clone Campaigns dialogs: 53271 / 53281 (53270, 53280).
                     dialogSlp =
-                        theme == 101 ? 53271
+                        theme < 0 ? 53161
+                        : theme == 101 ? 53271
                         : theme == 102 ? 53281
                         : theme == 8
                             ? 53164
@@ -1361,7 +1369,8 @@ int main() {
                     matchMusic = false; // the in-game menus keep the game's music
                 if (matchMusic)
                     music = swgb::VitaAudio::Music::Game;
-                else if (currentFrontendScreen == Screen::CampaignBriefing)
+                else if (currentFrontendScreen == Screen::CampaignBriefing ||
+                         currentFrontendScreen == Screen::CampaignEpilogue)
                     music = swgb::VitaAudio::Music::None; // the scene's narration
                 else if (currentFrontendScreen == Screen::Outcome)
                     music = game.victoryStateForTesting() == 1 ? swgb::VitaAudio::Music::Victory
@@ -1395,8 +1404,26 @@ int main() {
                     }
                     campaignNarrationIndex = 0;
                     campaignNarrationRemaining = 0;
+                } else if (currentFrontendScreen ==
+                           swgb::FrontendScreen::CampaignEpilogue) {
+                    // The won mission's closing scene (xc<c>s<m>_end.mm).
+                    audio.resetSession();
+                    campaignNarration.clear();
+                    std::string sceneError;
+                    if (campaignScene.load(assets, std::string(kRoot) + "/Campaign/Media",
+                                           campaignThemeNumber(),
+                                           (int)frontend.selectedMission() + 1, false,
+                                           &sceneError)) {
+                        audio.prefetchVoices(campaignScene.soundNames());
+                        logf("campaign closing scene: campaign %d mission %d loaded",
+                             campaignThemeNumber(), (int)frontend.selectedMission() + 1);
+                    } else {
+                        logf("campaign closing scene unavailable (%s)", sceneError.c_str());
+                    }
                 } else if (previousFrontendScreen ==
-                           swgb::FrontendScreen::CampaignBriefing) {
+                               swgb::FrontendScreen::CampaignBriefing ||
+                           previousFrontendScreen ==
+                               swgb::FrontendScreen::CampaignEpilogue) {
                     audio.resetSession();
                     campaignNarration.clear();
                     campaignScene.release(assets);
@@ -1404,8 +1431,9 @@ int main() {
                 previousFrontendScreen =
                     currentFrontendScreen;
             }
-            if (currentFrontendScreen ==
-                    swgb::FrontendScreen::CampaignBriefing &&
+            if ((currentFrontendScreen ==
+                     swgb::FrontendScreen::CampaignBriefing ||
+                 currentFrontendScreen == swgb::FrontendScreen::CampaignEpilogue) &&
                 campaignScene.loaded()) {
                 campaignScene.advance(dt);
                 for (const std::string &sound : campaignScene.takeDueSounds())

@@ -1716,6 +1716,7 @@ private:
         bool air = false;
         int player = -1;
         int radiusHundredths = 0;
+        Object mover; // the unit the grid was built for (region updates)
         TilePathfinder finder;
     };
 
@@ -2175,6 +2176,8 @@ private:
     void updateAmbience(float dt, int screenW, int screenH);
     void updateAi(float dt);
     void updateAiPlayer(int player, AiPlayerState &state, size_t rulesPerSlice);
+    std::vector<int> aiSelectedPlayers(int player, const AiPlayerState &state,
+                                       const std::string &selector) const;
     void updateAiGatherers(
         int player, AiPlayerState &state);
     void updateAiWorkerShelter(
@@ -2381,6 +2384,24 @@ private:
     mutable std::vector<StoredPathGrid> pathGridStore_;
     std::pair<uint64_t, uint64_t> pathGridSignature(const Object &object) const;
     TilePathfinder &pathGridFor(const Object &object) const;
+    void buildPathGrid(const Object &object, TilePathfinder &finder, const int *region) const;
+    void updatePathGridsAfterObstructionChange();
+    // Static footprints as of the last grid update (sorted by object index).
+    struct ObstructionRecord {
+        uint32_t index;
+        const dat::Unit *unit;
+        float x, y;
+        int player;
+        bool locked, gate, alive;
+        bool operator==(const ObstructionRecord &other) const {
+            return index == other.index && unit == other.unit && x == other.x && y == other.y &&
+                   player == other.player && locked == other.locked && gate == other.gate &&
+                   alive == other.alive;
+        }
+    };
+    std::vector<ObstructionRecord> obstructionSnapshot_;
+    uint64_t obstructionDiplomacy_ = 0;
+    mutable uint32_t pathGridUpdates_ = 0;
     // Whether the mover's walkable area includes a tile next to (within one
     // tile of) the footprint centred at x, y: no path search.
     bool sameAreaNear(const Object &mover, float x, float y, float halfX, float halfY) const;

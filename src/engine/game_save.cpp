@@ -2356,6 +2356,7 @@ bool Game::loadMatch(
             std::move(loadedTriggerRuntime);
 
     pathGridCache_.clear();
+    obstructionSnapshot_.clear();
     pendingCarcasses_.clear();
     instructions_.clear();
     currentInstruction_.clear();

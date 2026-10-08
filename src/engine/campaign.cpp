@@ -196,26 +196,39 @@ bool CampaignCatalog::discover(
                    directory;
         return false;
     }
-    // (expansion, number) -> path: the original campaigns first.
-    std::vector<std::pair<std::pair<bool, int>, std::string>> paths;
+    // (set, number) -> path: the original campaigns, the Clone Campaigns,
+    // then any other campaign archive (Custom Campaigns, by file name).
+    std::vector<std::pair<std::pair<int, int>, std::string>> paths;
+    std::vector<std::string> customNames;
     while (dirent *entry = readdir(dir)) {
         int number = 0;
         bool expansion = false;
-        if (archiveNumber(entry->d_name, number, expansion) &&
-            stringIds(number, expansion).menu != 0)
-            paths.push_back({
-                {expansion, number},
-                joinPath(directory, entry->d_name)});
+        const std::string name = entry->d_name;
+        const std::string lowered = lower(name);
+        if (archiveNumber(name, number, expansion)) {
+            if (stringIds(number, expansion).menu != 0)
+                paths.push_back({{expansion ? 1 : 0, number}, joinPath(directory, name)});
+        } else if (lowered.size() > 4 &&
+                   (lowered.compare(lowered.size() - 4, 4, ".cpx") == 0 ||
+                    lowered.compare(lowered.size() - 4, 4, ".cp1") == 0)) {
+            customNames.push_back(name);
+        }
     }
     closedir(dir);
+    std::sort(customNames.begin(), customNames.end(),
+              [](const std::string &a, const std::string &b) { return lower(a) < lower(b); });
     std::sort(paths.begin(), paths.end());
+    for (size_t index = 0; index < customNames.size(); ++index)
+        paths.push_back({{2, (int)index}, joinPath(directory, customNames[index])});
     for (const auto &entryPath : paths) {
         const std::pair<int, std::string> path{entryPath.first.second, entryPath.second};
-        const bool expansion = entryPath.first.first;
+        const bool expansion = entryPath.first.first == 1;
+        const bool custom = entryPath.first.first == 2;
         std::string archiveError;
         auto archive =
             CpxArchive::open(path.second, &archiveError);
         if (!archive) {
+            if (custom) continue; // an unreadable custom campaign is left out
             if (err) *err = archiveError;
             campaigns_.clear();
             return false;
@@ -223,10 +236,11 @@ bool CampaignCatalog::discover(
         CampaignInfo campaign;
         campaign.archivePath = path.second;
         campaign.archiveName = archive->name();
-        campaign.originalNumber = path.first;
+        campaign.originalNumber = custom ? 0 : path.first;
         campaign.expansion = expansion;
+        campaign.custom = custom;
         const OriginalCampaignStrings ids =
-            stringIds(path.first, expansion);
+            custom ? OriginalCampaignStrings{} : stringIds(path.first, expansion);
         campaign.title =
             strings && ids.menu
                 ? strings(
@@ -245,6 +259,10 @@ bool CampaignCatalog::discover(
             Scenario scenario;
             if (!archive->read(i, bytes, &archiveError) ||
                 !scenario.load(bytes, &archiveError)) {
+                if (custom) {
+                    campaign.missions.clear();
+                    break;
+                }
                 if (err)
                     *err = archive->name() + " mission " +
                            std::to_string(i + 1) + ": " +
@@ -297,6 +315,7 @@ bool CampaignCatalog::discover(
             campaign.missions.push_back(
                 std::move(mission));
         }
+        if (custom && campaign.missions.empty()) continue;
         campaigns_.push_back(std::move(campaign));
     }
     if (campaigns_.empty()) {

@@ -33,6 +33,9 @@ enum class FrontendScreen : uint8_t {
     DataStatus,
     Confirm,
     Outcome,
+    // A won campaign mission's closing scene (Campaign/Media/*_end.mm),
+    // shown before the outcome menu.
+    CampaignEpilogue,
 };
 
 enum class FrontendAction : uint8_t {
@@ -192,7 +195,8 @@ public:
     size_t selectedCampaign() const {
         return campaignSelection_;
     }
-    bool cloneCampaignsShown() const { return cloneCampaigns_; }
+    bool cloneCampaignsShown() const { return cloneCampaigns_ && !customCampaigns_; }
+    bool customCampaignsShown() const { return customCampaigns_; }
     size_t selectedMission() const {
         return missionSelection_;
     }
@@ -200,8 +204,10 @@ public:
         size_t campaign, size_t mission) {
         campaignSelection_ = campaign;
         missionSelection_ = mission;
-        if (catalog_ && campaign < catalog_->campaigns().size())
+        if (catalog_ && campaign < catalog_->campaigns().size()) {
             cloneCampaigns_ = catalog_->campaigns()[campaign].expansion;
+            customCampaigns_ = catalog_->campaigns()[campaign].custom;
+        }
     }
     const CampaignMission *selectedCampaignMission() const;
     void reportMessage(const std::string &message) {
@@ -301,6 +307,23 @@ private:
     // The campaign selection screen shows the Clone Campaigns (1cam) rather
     // than the original campaigns (xcam).
     bool cloneCampaigns_ = false;
+    // The mission screen was opened by Basic Training on the main menu, so
+    // back returns there.
+    bool missionsFromMainMenu_ = false;
+    // The selection screen lists the Custom Campaigns instead.
+    bool customCampaigns_ = false;
+    bool inBrowserSet(const CampaignInfo &campaign) const {
+        return customCampaigns_ ? campaign.custom
+                                : !campaign.custom && campaign.expansion == cloneCampaigns_;
+    }
+    // Row of a custom campaign on its list.
+    size_t browserRow(size_t index) const {
+        size_t row = 0;
+        if (catalog_)
+            for (size_t i = 0; i < index && i < catalog_->campaigns().size(); ++i)
+                row += inBrowserSet(catalog_->campaigns()[i]) ? 1 : 0;
+        return row;
+    }
     size_t missionSelection_ = 0;
     int outcome_ = -1;
     std::string message_;

@@ -48,7 +48,15 @@ int TilePathfinder::component(int x, int y) const {
 // bit and passable() of a step's end tiles is implied by the edges tested.
 void TilePathfinder::buildMoves() {
     moves_.assign((size_t)size_ * size_, 0);
+    buildMoves(0, 0, size_ - 1, size_ - 1);
+}
+
+void TilePathfinder::buildMoves(int minX, int minY, int maxX, int maxY) {
     const int n = size_;
+    minX = std::max(0, minX);
+    minY = std::max(0, minY);
+    maxX = std::min(n - 1, maxX);
+    maxY = std::min(n - 1, maxY);
     auto east = [&](int x, int y) { // edge (x, y) -> (x + 1, y)
         return x >= 0 && y >= 0 && x < n && y < n && (edges_[(size_t)y * n + x] & 1);
     };
@@ -57,8 +65,8 @@ void TilePathfinder::buildMoves() {
     };
     auto horizontal = [&](int x, int y, int dx) { return dx > 0 ? east(x, y) : east(x - 1, y); };
     auto vertical = [&](int x, int y, int dy) { return dy > 0 ? south(x, y) : south(x, y - 1); };
-    for (int y = 0; y < n; y++)
-        for (int x = 0; x < n; x++) {
+    for (int y = minY; y <= maxY; y++)
+        for (int x = minX; x <= maxX; x++) {
             uint8_t bits = 0;
             if (east(x, y)) bits |= 1;
             if (east(x - 1, y)) bits |= 2;

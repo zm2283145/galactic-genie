@@ -61,6 +61,40 @@ public:
         buildMoves();
         components_.clear();
     }
+    // Recomputes passable_ for the tiles in [minX, maxX] x [minY, maxY], the
+    // edges into and inside that rectangle, and the moves around it, with the
+    // same callbacks build() takes. The rest of the grid is kept: callers pass
+    // every tile whose answers can have changed.
+    template <class Passable, class EdgeClear>
+    void rebuildRegion(int minX, int minY, int maxX, int maxY, const Passable &passable,
+                       const EdgeClear &edgeClear) {
+        if (size_ <= 0) return;
+        minX = minX < 0 ? 0 : minX;
+        minY = minY < 0 ? 0 : minY;
+        maxX = maxX >= size_ ? size_ - 1 : maxX;
+        maxY = maxY >= size_ ? size_ - 1 : maxY;
+        if (minX > maxX || minY > maxY) return;
+        for (int y = minY; y <= maxY; y++)
+            for (int x = minX; x <= maxX; x++)
+                passable_[(size_t)y * size_ + x] = passable(x, y) ? 1 : 0;
+        // A tile's east/south edge depends on it and that neighbour, so the
+        // tiles left of and above the rectangle change too.
+        for (int y = minY > 0 ? minY - 1 : 0; y <= maxY; y++)
+            for (int x = minX > 0 ? minX - 1 : 0; x <= maxX; x++) {
+                uint8_t bits = 0;
+                if (passable_[(size_t)y * size_ + x]) {
+                    if (this->passable(x + 1, y) && edgeClear(x, y, 0)) bits |= 1;
+                    if (this->passable(x, y + 1) && edgeClear(x, y, 1)) bits |= 2;
+                }
+                edges_[(size_t)y * size_ + x] = bits;
+            }
+        buildMoves(minX - 2, minY - 2, maxX + 2, maxY + 2);
+        components_.clear();
+    }
+    bool sameGridForTesting(const TilePathfinder &other) const {
+        return size_ == other.size_ && passable_ == other.passable_ && edges_ == other.edges_ &&
+               moves_ == other.moves_;
+    }
     void build(int size, const std::function<bool(int, int)> &passable) {
         build(size, passable, [](int, int, int) { return true; });
     }
@@ -95,6 +129,7 @@ private:
     mutable std::vector<int32_t> components_;
     bool edge(int x, int y, int dx, int dy) const;
     void buildMoves();
+    void buildMoves(int minX, int minY, int maxX, int maxY);
     void buildMovesReference(std::vector<uint8_t> &moves) const;
     // Search scratch, reused between searches.
     // Per-tile search state in one record (one cache line per visited tile).

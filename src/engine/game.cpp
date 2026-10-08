@@ -465,6 +465,7 @@ void Game::resetMatchState() {
     controlGroupRecallAge_ = 1000.0f;
     pathGridCache_.clear();
     pathGridStore_.clear();
+    obstructionSnapshot_.clear();
     mobileObjectIndices_.clear();
     mobileObjectCells_.clear();
     combatObjectIndices_.clear();
@@ -1520,6 +1521,15 @@ bool Game::initScenario(
             defines.insert("VICTORY-CONQUEST");
         else
             defines.insert("VICTORY-STANDARD");
+        // The player's civilization, as for skirmish personalities: the
+        // stock modules switch on it (#load-if-defined REBEL ...).
+        static constexpr const char *kCivilizationDefines[] = {
+            nullptr, "EMPIRE", "GUNGANS", "REBEL", "NABOO", "WOOKIEES",
+            "FEDERATION", "REPUBLIC", "CONFEDERACY",
+        };
+        const int civilization = civilizationForPlayer(player);
+        if (civilization > 0 && (size_t)civilization < std::size(kCivilizationDefines))
+            defines.insert(kCivilizationDefines[civilization]);
         bool loaded = false;
         std::string aiError;
         if (!source.personality.empty()) {
@@ -2937,7 +2947,6 @@ int Game::civilizationForPlayer(int player) const {
 }
 
 void Game::rebuildAdjacency() {
-    pathGridCache_.clear();
     std::vector<Object *> adjacentObjects, adjacentWalls;
     for (Object &object : prefetched(objects_)) {
         if (!object.active || object.hidden || !object.unit->adjacentMode) continue;
@@ -2980,6 +2989,92 @@ void Game::rebuildAdjacency() {
     }
 
     rebuildObjectClassification();
+    updatePathGridsAfterObstructionChange();
+}
+
+// The cached path grids follow the static footprints: instead of dropping
+// every grid whenever one footprint appears, disappears or changes (each
+// grid then costs a whole-map rebuild, ~60 ms on the Vita), only the tiles
+// around the footprints that changed since the last update are recomputed.
+void Game::updatePathGridsAfterObstructionChange() {
+    std::vector<ObstructionRecord> current;
+    current.reserve(staticObstructionIndices_.size());
+    for (uint32_t index : staticObstructionIndices_) {
+        const Object &object = objects_[(size_t)index];
+        current.push_back({index, object.unit, object.x, object.y, object.player,
+                           object.locked, object.gate, object.hitPoints > 0.0f});
+    }
+    uint64_t diplomacy = 1469598103934665603ull;
+    for (const ScenarioPlayer &player : players_)
+        for (uint32_t stance : player.diplomacy) diplomacy = (diplomacy ^ stance) * 1099511628211ull;
+    const bool fullClear = pathGridCache_.empty() || diplomacy != obstructionDiplomacy_ ||
+                           obstructionSnapshot_.empty();
+    int dirty[4] = {mapSize_, mapSize_, -1, -1};
+    auto mark = [&](const ObstructionRecord &record) {
+        if (!record.unit) return;
+        const float halfX = std::max(0.05f, record.unit->collisionSize[0]);
+        const float halfY = std::max(0.05f, record.unit->collisionSize[1]);
+        dirty[0] = std::min(dirty[0], (int)std::floor(record.x - halfX) - 1);
+        dirty[1] = std::min(dirty[1], (int)std::floor(record.y - halfY) - 1);
+        dirty[2] = std::max(dirty[2], (int)std::floor(record.x + halfX) + 1);
+        dirty[3] = std::max(dirty[3], (int)std::floor(record.y + halfY) + 1);
+    };
+    if (!fullClear) {
+        size_t a = 0, b = 0;
+        const auto &before = obstructionSnapshot_;
+        while (a < before.size() || b < current.size()) {
+            if (b >= current.size() || (a < before.size() && before[a].index < current[b].index))
+                mark(before[a++]);
+            else if (a >= before.size() || current[b].index < before[a].index)
+                mark(current[b++]);
+            else {
+                if (!(before[a] == current[b])) {
+                    mark(before[a]);
+                    mark(current[b]);
+                }
+                ++a;
+                ++b;
+            }
+        }
+    }
+    obstructionSnapshot_ = std::move(current);
+    obstructionDiplomacy_ = diplomacy;
+    if (fullClear) {
+        pathGridCache_.clear();
+        return;
+    }
+    if (dirty[2] < dirty[0]) return; // nothing that blocks movement changed
+    const int width = dirty[2] - dirty[0] + 1, height = dirty[3] - dirty[1] + 1;
+    if ((int64_t)width * height * 4 > (int64_t)mapSize_ * mapSize_) {
+        pathGridCache_.clear(); // most of the map: rebuild on demand
+        return;
+    }
+    static const bool checkGrids = std::getenv("SWGB_CHECK_GRIDS") != nullptr;
+    for (PathGridCache &entry : pathGridCache_) {
+        // Tiles whose tests reach a changed footprint: within the mover's
+        // radius (plus the edge to the next tile) of the changed area.
+        const int reach = (int)std::ceil(collisionRadius(entry.mover)) + 2;
+        const int region[4] = {dirty[0] - reach, dirty[1] - reach, dirty[2] + reach,
+                               dirty[3] + reach};
+        const auto start = std::chrono::steady_clock::now();
+        buildPathGrid(entry.mover, entry.finder, region);
+        pathGridUpdates_++;
+        pathGridBuildUs_ += (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - start)
+                                .count();
+        if (checkGrids) {
+            TilePathfinder full;
+            buildPathGrid(entry.mover, full, nullptr);
+            if (!full.sameGridForTesting(entry.finder)) {
+                fprintf(stderr, "path grid region update differs from a full build "
+                                "(region %d,%d-%d,%d)\n",
+                        region[0], region[1], region[2], region[3]);
+                std::abort();
+            }
+            fprintf(stderr, "path grid region update matches (%dx%d)\n", region[2] - region[0] + 1,
+                    region[3] - region[1] + 1);
+        }
+    }
 }
 
 void Game::rebuildObjectClassification() {
@@ -14276,6 +14371,126 @@ std::pair<uint64_t, uint64_t> Game::pathGridSignature(const Object &object) cons
     return {a, b};
 }
 
+// Builds the mover's grid (region == nullptr) or recomputes the tiles of a
+// rectangle {minX, minY, maxX, maxY} after static footprints changed there.
+// The same tests either way: a tile is blocked when its centre lies inside a
+// static footprint that blocks this player (buildings, trees, walls, closed
+// gates), and the unit must fit at the tile centre with its radius.
+void Game::buildPathGrid(const Object &object, TilePathfinder &finder, const int *region) const {
+    auto phaseUs = [](std::chrono::steady_clock::time_point since) {
+        return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                   std::chrono::steady_clock::now() - since)
+            .count();
+    };
+    const bool air = isAirUnit(object);
+    const auto buildStart = std::chrono::steady_clock::now();
+    // The tables cover the whole map, or the region plus a border wide enough
+    // for every test made from inside it.
+    const float radius = collisionRadius(object);
+    const int border = (int)std::ceil(radius) + 2;
+    const int tableMinX = region ? std::max(0, region[0] - border) : 0;
+    const int tableMinY = region ? std::max(0, region[1] - border) : 0;
+    const int tableMaxX = region ? std::min(mapSize_ - 1, region[2] + border) : mapSize_ - 1;
+    const int tableMaxY = region ? std::min(mapSize_ - 1, region[3] + border) : mapSize_ - 1;
+    const int tableW = tableMaxX - tableMinX + 1, tableH = tableMaxY - tableMinY + 1;
+    auto tableIndex = [&](int x, int y) {
+        return (size_t)(y - tableMinY) * tableW + (x - tableMinX);
+    };
+    std::vector<uint8_t> blocked((size_t)tableW * tableH, 0);
+    if (!air)
+        for (uint32_t index : staticObstructionIndices_) {
+            const Object &other = objects_[(size_t)index];
+            if (!other.active || other.hidden) continue;
+            if (other.gate && !gateBlocks(other, object)) continue;
+            const float halfX = std::max(0.05f, other.unit->collisionSize[0]);
+            const float halfY = std::max(0.05f, other.unit->collisionSize[1]);
+            const int minX = std::max(tableMinX, (int)std::floor(other.x - halfX));
+            const int maxX = std::min(tableMaxX, (int)std::floor(other.x + halfX));
+            const int minY = std::max(tableMinY, (int)std::floor(other.y - halfY));
+            const int maxY = std::min(tableMaxY, (int)std::floor(other.y + halfY));
+            for (int y = minY; y <= maxY; y++)
+                for (int x = minX; x <= maxX; x++)
+                    if (std::abs(x + 0.5f - other.x) < halfX &&
+                        std::abs(y + 0.5f - other.y) < halfY)
+                        blocked[tableIndex(x, y)] = 1;
+        }
+    // Fast path for the edge test: segmentClear() between two tile centres
+    // only ever fails on the map border, on the terrain of the two tiles, or
+    // on a static footprint listed in a cell its swept box touches. With both
+    // tiles' terrain passable, the ends inside the border and no footprint in
+    // any of those cells, the answer is true without sampling; anything else
+    // takes the full test.
+    pathGridPhaseUs_[1] += phaseUs(buildStart);
+    const auto tablesStart = std::chrono::steady_clock::now();
+    const size_t cells = (size_t)mapSize_ * mapSize_;
+    std::vector<uint8_t> terrainOk((size_t)tableW * tableH, 0);
+    const size_t stride = (size_t)tableW + 1;
+    std::vector<uint32_t> occupied(stride * (tableH + 1), 0);
+    for (int y = tableMinY; y <= tableMaxY; y++)
+        for (int x = tableMinX; x <= tableMaxX; x++) {
+            terrainOk[tableIndex(x, y)] = terrainPassable(object, x + 0.5f, y + 0.5f) ? 1 : 0;
+            const uint32_t here =
+                air ? 0u
+                    : (staticObstructionCells_.size() == cells &&
+                               !staticObstructionCells_[(size_t)y * mapSize_ + x].empty()
+                           ? 1u
+                           : 0u);
+            const size_t ty = (size_t)(y - tableMinY), tx = (size_t)(x - tableMinX);
+            occupied[(ty + 1) * stride + tx + 1] =
+                here + occupied[ty * stride + tx + 1] + occupied[(ty + 1) * stride + tx] -
+                occupied[ty * stride + tx];
+        }
+    // Cells outside the tables are never asked about with a valid answer
+    // (every test from the region stays within its border).
+    auto anyOccupied = [&](int x0, int y0, int x1, int y1) {
+        x0 = std::max(tableMinX, x0);
+        y0 = std::max(tableMinY, y0);
+        x1 = std::min(tableMaxX, x1);
+        y1 = std::min(tableMaxY, y1);
+        if (x0 > x1 || y0 > y1) return false;
+        const size_t ax0 = (size_t)(x0 - tableMinX), ay0 = (size_t)(y0 - tableMinY);
+        const size_t ax1 = (size_t)(x1 - tableMinX), ay1 = (size_t)(y1 - tableMinY);
+        return occupied[(ay1 + 1) * stride + ax1 + 1] - occupied[ay0 * stride + ax1 + 1] -
+                   occupied[(ay1 + 1) * stride + ax0] + occupied[ay0 * stride + ax0] !=
+               0;
+    };
+    pathGridPhaseUs_[2] += phaseUs(tablesStart);
+    const auto finderStart = std::chrono::steady_clock::now();
+    const auto passable = [&](int x, int y) {
+        if (blocked[tableIndex(x, y)]) return false;
+        // staticPassableAt without the footprint scan when no static
+        // footprint is listed in any cell it would visit.
+        const float px = x + 0.5f, py = y + 0.5f;
+        if (px < radius || py < radius || px >= mapSize_ - radius ||
+            py >= mapSize_ - radius || !terrainOk[tableIndex(x, y)])
+            return false;
+        if (air || !anyOccupied(fastFloor(px - radius), fastFloor(py - radius),
+                                fastFloor(px + radius), fastFloor(py + radius)))
+            return true;
+        return staticPassableAt(object, px, py);
+    };
+    const auto edgeClear = [&](int x, int y, int dir) {
+        const float ax = x + 0.5f, ay = y + 0.5f;
+        const float bx = ax + (dir == 0 ? 1.0f : 0.0f);
+        const float by = ay + (dir == 1 ? 1.0f : 0.0f);
+        const int nx = x + (dir == 0 ? 1 : 0), ny = y + (dir == 1 ? 1 : 0);
+        if (nx < mapSize_ && ny < mapSize_ && nx <= tableMaxX && ny <= tableMaxY &&
+            terrainOk[tableIndex(x, y)] &&
+            terrainOk[tableIndex(nx, ny)] &&
+            ax >= radius && ay >= radius &&
+            bx < mapSize_ - radius && by < mapSize_ - radius &&
+            !anyOccupied(fastFloor(ax - radius), fastFloor(ay - radius),
+                         fastFloor(bx + radius), fastFloor(by + radius)))
+            return true;
+        return segmentClear(object, ax, ay, bx, by);
+    };
+    if (region)
+        finder.rebuildRegion(region[0], region[1], region[2], region[3], passable, edgeClear);
+    else
+        finder.build(mapSize_, passable, edgeClear);
+    pathGridPhaseUs_[3] += phaseUs(finderStart);
+}
+
 // Long-range path (see pathfinding.h for how it mirrors the original).
 // goalObject/clearance turn the destination into a goal *region* around an
 // object, which is how the original approaches gather/build/attack targets.
@@ -14299,6 +14514,7 @@ TilePathfinder &Game::pathGridFor(const Object &object) const {
         entry.air = air;
         entry.player = object.player;
         entry.radiusHundredths = radiusHundredths;
+        entry.mover = object;
         const auto signatureStart = std::chrono::steady_clock::now();
         const std::pair<uint64_t, uint64_t> signature = pathGridSignature(object);
         auto phaseUs = [](std::chrono::steady_clock::time_point since) {
@@ -14317,100 +14533,7 @@ TilePathfinder &Game::pathGridFor(const Object &object) const {
             entry.finder = stored->finder;
         } else {
             const auto buildStart = std::chrono::steady_clock::now();
-            // A tile is blocked when its centre lies inside a static footprint
-            // that blocks this player (buildings, trees, walls, closed gates).
-            std::vector<uint8_t> blocked((size_t)mapSize_ * mapSize_, 0);
-            if (!air)
-                for (uint32_t index : staticObstructionIndices_) {
-                    const Object &other = objects_[(size_t)index];
-                    if (!other.active || other.hidden) continue;
-                    if (other.gate && !gateBlocks(other, object)) continue;
-                    const float halfX = std::max(0.05f, other.unit->collisionSize[0]);
-                    const float halfY = std::max(0.05f, other.unit->collisionSize[1]);
-                    const int minX = std::max(0, (int)std::floor(other.x - halfX));
-                    const int maxX = std::min(mapSize_ - 1, (int)std::floor(other.x + halfX));
-                    const int minY = std::max(0, (int)std::floor(other.y - halfY));
-                    const int maxY = std::min(mapSize_ - 1, (int)std::floor(other.y + halfY));
-                    for (int y = minY; y <= maxY; y++)
-                        for (int x = minX; x <= maxX; x++)
-                            if (std::abs(x + 0.5f - other.x) < halfX &&
-                                std::abs(y + 0.5f - other.y) < halfY)
-                                blocked[(size_t)y * mapSize_ + x] = 1;
-                }
-            // Fast path for the edge test: segmentClear() between two tile
-            // centres only ever fails on the map border, on the terrain of the
-            // two tiles, or on a static footprint listed in a cell its swept
-            // box touches. With both tiles' terrain passable, the ends inside
-            // the border and no footprint in any of those cells, the answer is
-            // true without sampling; anything else takes the full test.
-            pathGridPhaseUs_[1] += phaseUs(buildStart);
-            const auto tablesStart = std::chrono::steady_clock::now();
-            const float radius = collisionRadius(object);
-            const size_t cells = (size_t)mapSize_ * mapSize_;
-            std::vector<uint8_t> terrainOk(cells, 0);
-            std::vector<uint32_t> occupied((size_t)(mapSize_ + 1) * (mapSize_ + 1), 0);
-            for (int y = 0; y < mapSize_; y++)
-                for (int x = 0; x < mapSize_; x++) {
-                    terrainOk[(size_t)y * mapSize_ + x] =
-                        terrainPassable(object, x + 0.5f, y + 0.5f) ? 1 : 0;
-                    const uint32_t here =
-                        air ? 0u
-                            : (staticObstructionCells_.size() == cells &&
-                                       !staticObstructionCells_[(size_t)y * mapSize_ + x].empty()
-                                   ? 1u
-                                   : 0u);
-                    const size_t stride = (size_t)mapSize_ + 1;
-                    occupied[(size_t)(y + 1) * stride + x + 1] =
-                        here + occupied[(size_t)y * stride + x + 1] +
-                        occupied[(size_t)(y + 1) * stride + x] - occupied[(size_t)y * stride + x];
-                }
-            auto anyOccupied = [&](int x0, int y0, int x1, int y1) {
-                x0 = std::max(0, x0);
-                y0 = std::max(0, y0);
-                x1 = std::min(mapSize_ - 1, x1);
-                y1 = std::min(mapSize_ - 1, y1);
-                if (x0 > x1 || y0 > y1) return false;
-                const size_t stride = (size_t)mapSize_ + 1;
-                return occupied[(size_t)(y1 + 1) * stride + x1 + 1] -
-                           occupied[(size_t)y0 * stride + x1 + 1] -
-                           occupied[(size_t)(y1 + 1) * stride + x0] +
-                           occupied[(size_t)y0 * stride + x0] !=
-                       0;
-            };
-            pathGridPhaseUs_[2] += phaseUs(tablesStart);
-            const auto finderStart = std::chrono::steady_clock::now();
-            // ...and a unit must also fit at the tile centre with its radius.
-            entry.finder.build(
-                mapSize_,
-                [&](int x, int y) {
-                    if (blocked[(size_t)y * mapSize_ + x]) return false;
-                    // staticPassableAt without the footprint scan when no
-                    // static footprint is listed in any cell it would visit.
-                    const float px = x + 0.5f, py = y + 0.5f;
-                    if (px < radius || py < radius || px >= mapSize_ - radius ||
-                        py >= mapSize_ - radius || !terrainOk[(size_t)y * mapSize_ + x])
-                        return false;
-                    if (air || !anyOccupied(fastFloor(px - radius), fastFloor(py - radius),
-                                            fastFloor(px + radius), fastFloor(py + radius)))
-                        return true;
-                    return staticPassableAt(object, px, py);
-                },
-                [&](int x, int y, int dir) {
-                    const float ax = x + 0.5f, ay = y + 0.5f;
-                    const float bx = ax + (dir == 0 ? 1.0f : 0.0f);
-                    const float by = ay + (dir == 1 ? 1.0f : 0.0f);
-                    const int nx = x + (dir == 0 ? 1 : 0), ny = y + (dir == 1 ? 1 : 0);
-                    if (nx < mapSize_ && ny < mapSize_ &&
-                        terrainOk[(size_t)y * mapSize_ + x] &&
-                        terrainOk[(size_t)ny * mapSize_ + nx] &&
-                        ax >= radius && ay >= radius &&
-                        bx < mapSize_ - radius && by < mapSize_ - radius &&
-                        !anyOccupied(fastFloor(ax - radius), fastFloor(ay - radius),
-                                     fastFloor(bx + radius), fastFloor(by + radius)))
-                        return true;
-                    return segmentClear(object, ax, ay, bx, by);
-                });
-            pathGridPhaseUs_[3] += phaseUs(finderStart);
+            buildPathGrid(object, entry.finder, nullptr);
             StoredPathGrid grid;
             grid.signatureA = signature.first;
             grid.signatureB = signature.second;
@@ -15713,6 +15836,26 @@ bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed
         const Object *object = findObject((uint32_t)unitObject);
         return object && object->active && inSourceArea(*object, x1, y1, x2, y2);
     }
+    case 2: {
+        // Bring Object to Object (exe 0x5f1ea8): both coordinate offsets,
+        // truncated, within the two footprints' (original x) half sizes,
+        // truncated, plus 2 tiles.
+        const Object *object = findObject((uint32_t)unitObject);
+        const Object *target = findObject((uint32_t)triggerField(condition.fields, 3));
+        if (!object || !object->active || !target || !target->active || !object->unit ||
+            !target->unit)
+            return false;
+        const int dx = (int)(object->x - target->x);
+        const int dy = (int)(object->y - target->y);
+        const int limit = (int)(object->unit->collisionSize[1] + target->unit->collisionSize[1]) + 2;
+        return dx >= -limit && dy >= -limit && dx <= limit && dy <= limit;
+    }
+    case 7: {
+        // Capture Object (exe case 6): the object now belongs to the
+        // condition's player.
+        const Object *object = findObject((uint32_t)unitObject);
+        return object && object->active && player >= 0 && object->player == player;
+    }
     case 3:
         return countMatching(false) >= amount;
     case 4:
@@ -15876,8 +16019,8 @@ bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed
 
 bool Game::supportsTriggerCondition(int type) {
     switch (type) {
-    case 1: case 3: case 4: case 5:
-    case 6: case 8: case 9: case 10:
+    case 1: case 2: case 3: case 4: case 5:
+    case 6: case 7: case 8: case 9: case 10:
     case 11: case 12: case 13: case 14:
     case 15: case 16: case 17: case 18: case 19:
     case 20: case 21: case 22: case 23:
@@ -17743,6 +17886,36 @@ int Game::difficultyForPlayer(int player) const {
     return difficulty_;
 }
 
+// Players a player selector names: any-/every- with enemy, ally, computer
+// and human (all that are given must hold; self excluded), or a player
+// number (or a constant naming one).
+std::vector<int> Game::aiSelectedPlayers(int player, const AiPlayerState &state,
+                                         const std::string &selectorText) const {
+    std::vector<int> result;
+    const std::string selector = normalizeAiSymbol(selectorText);
+    if (selector.rfind("any-", 0) != 0 && selector.rfind("every-", 0) != 0) {
+        bool known = false;
+        const int number = resolveAiValue(player, state, selectorText, known);
+        if (known && number >= 1 && (size_t)number <= players_.size()) result.push_back(number);
+        return result;
+    }
+    const bool wantEnemy = selector.find("enemy") != std::string::npos;
+    const bool wantAlly = selector.find("ally") != std::string::npos;
+    const bool wantComputer = selector.find("computer") != std::string::npos;
+    const bool wantHuman = selector.find("human") != std::string::npos;
+    if (!wantEnemy && !wantAlly && !wantComputer && !wantHuman) return result;
+    for (size_t candidate = 1; candidate <= players_.size(); ++candidate) {
+        if ((int)candidate == player || !players_[candidate - 1].active) continue;
+        const bool enemy = !isFriendlyPlayer(player, (int)candidate);
+        const bool computer = candidate < aiPlayers_.size() && aiPlayers_[candidate].loaded;
+        if ((wantEnemy && !enemy) || (wantAlly && enemy) || (wantComputer && !computer) ||
+            (wantHuman && computer))
+            continue;
+        result.push_back((int)candidate);
+    }
+    return result;
+}
+
 bool Game::evaluateAiFactValue(
     int player, AiPlayerState &state,
     const AiNode &condition,
@@ -17771,6 +17944,98 @@ bool Game::evaluateAiFactValue(
     if (fact == "population") {
         value = (int)std::floor(
             populationUsed(player));
+        return true;
+    }
+    // The market here trades 100 for 70 at a fixed rate (buy-/sell-commodity).
+    if (fact == "commodity-buying-price") {
+        value = 100;
+        return true;
+    }
+    if (fact == "commodity-selling-price") {
+        value = 70;
+        return true;
+    }
+    // No AI walls are built, so wall plans read as complete.
+    if (fact == "wall-completed-percentage") {
+        value = 100;
+        return true;
+    }
+    if (fact == "wall-invisible-percentage") {
+        value = 0;
+        return true;
+    }
+    if (fact == "warboat-count") {
+        int count = 0;
+        for (const Object &object : prefetched(objects_))
+            if (object.active && !object.hidden && object.player == player && object.unit &&
+                object.unit->type != dat::UT_Building && !isWorker(object) && canAttack(object) &&
+                aiMilitaryDomain(*object.unit) == 1)
+                ++count;
+        value = count;
+        return true;
+    }
+    if (fact == "idle-farm-count") {
+        // Finished farms of the player nobody is working.
+        std::unordered_set<uint32_t> worked;
+        for (uint32_t index : workerObjectIndices_)
+            if ((size_t)index < objects_.size() && objects_[(size_t)index].player == player &&
+                objects_[(size_t)index].active && objects_[(size_t)index].gatherTargetId)
+                worked.insert(objects_[(size_t)index].gatherTargetId);
+        int count = 0;
+        for (const Object &object : prefetched(objects_))
+            if (object.active && !object.hidden && object.player == player && object.unit &&
+                object.unit->type == dat::UT_Building && !object.underConstruction &&
+                object.resourceType == 0 && object.resourceAmount > 0.0f &&
+                !worked.count(object.spawnId))
+                ++count;
+        value = count;
+        return true;
+    }
+    if (fact == "nursery-headroom") {
+        // Room for domestic animals: each finished Animal Nursery
+        // (BLDG-DROPANIM) is counted as holding the herd near it, so the
+        // stock rule builds the first one and another only when there is none.
+        int nurseries = 0;
+        if (const dat::Unit *nursery = aiUnit(player, "BLDG-DROPANIM"))
+            nurseries = aiObjectCount(player, *nursery, false);
+        value = nurseries > 0 ? 1 : 0;
+        return true;
+    }
+    if (fact == "dropsite-min-distance" && condition.children.size() >= 2) {
+        // Shortest distance from one of the player's drop sites for the
+        // resource (or a Command Center) to a known deposit of it; 255 with
+        // no such drop site, -1 with no known deposit.
+        bool known = false;
+        const int resourceType =
+            aiResourceIndex(resolveAiValue(player, state, condition.children[1].value, known));
+        if (!known || resourceType < 0) return false;
+        static constexpr const char *kDropSites[4] = {"BLDG-DROPCHOW", "BLDG-DROPCARBON",
+                                                      "BLDG-DROPMETAL", "BLDG-DROPNOVA"};
+        const dat::Unit *site = aiUnit(player, kDropSites[resourceType]);
+        const dat::Unit *siteEffective = site ? effectiveUnitForPlayer(player, site) : nullptr;
+        std::vector<const Object *> sites;
+        for (const Object &object : prefetched(objects_))
+            if (object.active && !object.hidden && object.player == player && object.unit &&
+                object.unit->type == dat::UT_Building && !object.underConstruction &&
+                (object.unit->name.rfind("BLDG-MAIN", 0) == 0 ||
+                 (site && (object.unit->id == site->id ||
+                           (siteEffective && object.unit->id == siteEffective->id)))))
+                sites.push_back(&object);
+        float best = -1.0f;
+        for (uint32_t index : gatherableObjectIndices_) {
+            if ((size_t)index >= objects_.size()) continue;
+            const Object &deposit = objects_[(size_t)index];
+            if (!deposit.active || deposit.hidden || deposit.resourceType != resourceType ||
+                deposit.resourceAmount <= 0.0f || deposit.player > 0 ||
+                !objectVisibleToPlayer(deposit, player))
+                continue;
+            for (const Object *dropSite : sites) {
+                const float distance = std::hypot(deposit.x - dropSite->x, deposit.y - dropSite->y);
+                if (best < 0.0f || distance < best) best = distance;
+            }
+            if (sites.empty()) best = 255.0f;
+        }
+        value = best < 0.0f ? -1 : (int)std::floor(best);
         return true;
     }
     if (fact == "population-cap") {
@@ -18216,17 +18481,45 @@ Game::AiTruth Game::evaluateAiCondition(
                    : AiTruth::False;
     }
     if (fact == "resource-found") {
+        // (resource-found carbon): a known deposit of that resource.
+        int wanted = -1;
+        if (condition.children.size() >= 2) {
+            bool known = false;
+            wanted = aiResourceIndex(resolveAiValue(player, state, condition.children[1].value, known));
+            if (!known) wanted = -1;
+        }
         for (const Object &object :
              prefetched(objects_))
             if (object.active &&
                 !object.hidden &&
-                objectVisibleToPlayer(
-                    object, player) &&
                 object.resourceAmount > 0.0f &&
                 object.resourceType >= 0 &&
-                object.resourceType <= 3)
+                object.resourceType <= 3 &&
+                (wanted < 0 || object.resourceType == wanted) &&
+                objectVisibleToPlayer(
+                    object, player))
                 return AiTruth::True;
         return AiTruth::False;
+    }
+    // Spies (the original's cheat-like "spy" purchase) and King of the Hill
+    // ruins do not exist in campaigns or these skirmishes.
+    if (fact == "can-spy" || fact == "can-spy-with-escrow" || fact == "hold-koh-ruin")
+        return AiTruth::False;
+    if (fact == "players-stance" && condition.children.size() == 3) {
+        // (players-stance <selector> <ally|neutral|enemy>)
+        bool known = false;
+        const int stance = resolveAiValue(player, state, condition.children[2].value, known);
+        if (!known) return AiTruth::Unknown;
+        bool any = false;
+        const bool every = normalizeAiSymbol(condition.children[1].value).rfind("every-", 0) == 0;
+        for (int candidate : aiSelectedPlayers(player, state, condition.children[1].value)) {
+            any = true;
+            const uint32_t actual = players_[(size_t)player - 1].diplomacy[(size_t)candidate];
+            const bool match = (int)actual == stance;
+            if (!every && match) return AiTruth::True;
+            if (every && !match) return AiTruth::False;
+        }
+        return any && every ? AiTruth::True : AiTruth::False;
     }
     if (fact ==
         "sheep-and-forage-too-far") {
@@ -18600,7 +18893,11 @@ Game::AiTruth Game::evaluateAiCondition(
         if ((fact ==
                  "players-current-age" ||
              fact ==
-                 "players-military-population") &&
+                 "players-military-population" ||
+             fact == "players-population" || fact == "players-civilian-population" ||
+             fact == "players-tribute" || fact == "players-tribute-memory" ||
+             fact == "players-building-type-count" || fact == "players-unit-type-count" ||
+             fact == "cc-players-building-type-count" || fact == "cc-players-unit-type-count") &&
             comparison >= 2) {
             const std::string selector =
                 normalizeAiSymbol(
@@ -18609,40 +18906,27 @@ Game::AiTruth Game::evaluateAiCondition(
             const bool every =
                 selector.rfind(
                     "every-", 0) == 0;
+            const bool typed = fact.find("type-count") != std::string::npos;
             bool matchedPlayer = false;
-            for (size_t candidate = 1;
-                 candidate <= players_.size();
-                 ++candidate) {
-                if ((int)candidate == player)
-                    continue;
-                const bool enemy =
-                    !isFriendlyPlayer(
-                        player,
-                        (int)candidate);
-                const bool ally = !enemy;
-                const bool computer =
-                    candidate <
-                            aiPlayers_.size() &&
-                    aiPlayers_[candidate].loaded;
-                const bool selected =
-                    selector.find("enemy") !=
-                            std::string::npos
-                        ? enemy
-                    : selector.find("ally") !=
-                              std::string::npos
-                        ? ally
-                    : selector.find(
-                              "computer") !=
-                              std::string::npos
-                        ? computer
-                    : selector.find("human") !=
-                              std::string::npos
-                        ? !computer
-                        : false;
-                if (!selected) continue;
+            for (const int selectedPlayer : aiSelectedPlayers(player, state, condition.children[1].value)) {
+                const size_t candidate = (size_t)selectedPlayer;
                 matchedPlayer = true;
                 int actual = 0;
-                if (fact ==
+                if (fact == "players-population") {
+                    actual = (int)std::floor(populationUsed((int)candidate));
+                } else if (fact == "players-civilian-population") {
+                    actual = aiFactPass_ && candidate < aiPopulation_.civilian.size()
+                                 ? (int)std::floor(aiPopulationStats().civilian[candidate])
+                                 : 0;
+                } else if (fact == "players-tribute" || fact == "players-tribute-memory") {
+                    actual = 0; // no tribute is ever sent between players here
+                } else if (typed) {
+                    // (players-building-type-count <selector> <type> op value)
+                    const dat::Unit *unit =
+                        comparison >= 3 ? aiUnit((int)candidate, condition.children[2].value)
+                                        : nullptr;
+                    actual = unit ? aiObjectCount((int)candidate, *unit, false) : 0;
+                } else if (fact ==
                     "players-current-age")
                     actual = aiTechLevel(
                         (int)candidate);
@@ -19065,8 +19349,10 @@ bool Game::executeAiAction(
     // ability-to-dodge-missiles): units here do not kite or dodge, so the
     // setting has nothing to change. Wall placement is never used (the wall
     // facts above are false), so enabling it is accepted and has no effect.
-    if (name == "set-difficulty-parameter" || name == "enable-wall-placement")
+    if (name == "set-difficulty-parameter" || name == "enable-wall-placement" ||
+        name == "clear-tribute-memory")
         return true;
+    if (name == "spy") return false; // never available (can-spy is false)
     if (state.warnedActions.insert(name).second) {
         std::string arguments;
         for (size_t index = 1;
