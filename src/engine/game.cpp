@@ -6,9 +6,11 @@
 #include <zlib.h>
 
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -19,6 +21,58 @@
 namespace swgb {
 
 namespace {
+// Range over the objects that prefetches a few objects ahead. The per-frame
+// passes walk ~6,700 objects about 600 bytes apart, which on the Vita is
+// bound by memory latency; prefetching the hot fields hides most of it.
+template <class T>
+struct PrefetchedRange {
+    T *first, *last;
+    struct Iterator {
+        T *p;
+        T &operator*() const { return *p; }
+        Iterator &operator++() {
+            const char *ahead = reinterpret_cast<const char *>(
+                reinterpret_cast<uintptr_t>(p) + 6 * sizeof(T));
+            __builtin_prefetch(ahead);
+            __builtin_prefetch(ahead + 32);
+            __builtin_prefetch(ahead + 64);
+            __builtin_prefetch(ahead + 96);
+            ++p;
+            return *this;
+        }
+        bool operator!=(const Iterator &other) const { return p != other.p; }
+    };
+    Iterator begin() const { return {first}; }
+    Iterator end() const { return {last}; }
+};
+template <class V>
+auto prefetched(V &v) -> PrefetchedRange<std::remove_reference_t<decltype(*v.data())>> {
+    return {v.data(), v.data() + v.size()};
+}
+
+inline void prefetchObjectAhead(const void *object) {
+    const char *ahead = static_cast<const char *>(object);
+    __builtin_prefetch(ahead);
+    __builtin_prefetch(ahead + 32);
+    __builtin_prefetch(ahead + 64);
+    __builtin_prefetch(ahead + 96);
+}
+
+// std::lround() without the libm call for the usual non-negative case
+// (exact: v - (int)v is exact below 2^23, and lround rounds halves up there).
+inline long fastRound(float v) {
+    if (!(v >= 0.0f) || v >= 8388608.0f) return std::lround(v);
+    const int i = (int)v;
+    return v - (float)i >= 0.5f ? i + 1 : i;
+}
+
+// floor() for map coordinates: (int)std::floor(v) without the libm call
+// (the Vita's VFP has no rounding instruction). Exact for |v| < 2^31.
+inline int fastFloor(float v) {
+    const int i = (int)v;
+    return i - (v < (float)i ? 1 : 0);
+}
+
 
 constexpr float kPi = 3.14159265358979f;
 constexpr uint8_t kCustomOiiaCat = 1;
@@ -368,7 +422,9 @@ void Game::resetMatchState() {
     players_ = {};
     resources_ = {};
     researchedTechs_ = {};
+    techGeneration_++;
     aiPlayers_ = {};
+    aiUnitCache_ = {};
     disabledTechs_ = {};
     disabledUnits_ = {};
     availableCache_ = {};
@@ -394,6 +450,7 @@ void Game::resetMatchState() {
     tileElevation_.clear();
     tileSlope_.clear();
     objects_.clear();
+    previousPositions_.clear();
     objectIndices_.clear();
     projectiles_.clear();
     remains_.clear();
@@ -404,10 +461,15 @@ void Game::resetMatchState() {
     lastRecalledControlGroup_ = -1;
     controlGroupRecallAge_ = 1000.0f;
     pathGridCache_.clear();
+    pathGridStore_.clear();
     mobileObjectIndices_.clear();
     mobileObjectCells_.clear();
     combatObjectIndices_.clear();
     combatObjectCells_.clear();
+    livestockObjectIndices_.clear();
+    gathererObjectIndices_.clear();
+    repairerObjectIndices_.clear();
+    converterObjectIndices_.clear();
     staticObstructionIndices_.clear();
     staticObstructionCells_.clear();
     shieldGeneratorIndices_.clear();
@@ -559,6 +621,7 @@ bool Game::initGenerated(
     resources_ = {};
     researchedTechs_ = {};
     aiPlayers_ = {};
+    aiUnitCache_ = {};
     techGeneration_++;
     disabledTechs_ = {};
     disabledUnits_ = {};
@@ -578,6 +641,7 @@ bool Game::initGenerated(
     automaticTargetsAcquired_ = retaliationOrders_ = armedBuildingsEngaged_ = 0;
     attackModeChanges_ = 0;
     objects_.clear();
+    previousPositions_.clear();
     selectionOrder_.clear();
     actionMenuOpen_ = false;
     actionMenuObjectId_ = 0;
@@ -718,7 +782,7 @@ bool Game::initGenerated(
             starts[(size_t)slotIndex][1]);
     }
     // Keep the generated sandbox quiet until its opposing bases are engaged.
-    for (Object &object : objects_)
+    for (Object &object : prefetched(objects_))
         if (canAttack(object))
             object.attackMode = AttackMode::Defensive;
 
@@ -909,7 +973,7 @@ bool Game::initCompactTestMap(
                 cornerElevation_[
                     (size_t)y * (mapSize + 1) +
                     x] = 0;
-        for (Object &object : objects_)
+        for (Object &object : prefetched(objects_))
             if (object.active &&
                 object.player == 0 &&
                 object.x > shoreLeft &&
@@ -945,7 +1009,7 @@ bool Game::initCompactTestMap(
             civilizationForPlayer(2),
             "BLDG-TRAINTROOPER");
     if (aiTroopCenter)
-        for (Object &object : objects_)
+        for (Object &object : prefetched(objects_))
             if (object.active &&
                 object.player == 2 &&
                 object.unit &&
@@ -1139,6 +1203,7 @@ bool Game::initScenario(
     resources_ = {};
     researchedTechs_ = {};
     aiPlayers_ = {};
+    aiUnitCache_ = {};
     techGeneration_++;
     disabledTechs_ = {};
     disabledUnits_ = {};
@@ -1201,6 +1266,7 @@ bool Game::initScenario(
                         (int)technology))
                     researchedTechs_[player].insert(
                         (int)technology);
+    techGeneration_++;
     triggers_ = scenario.triggers;
     triggerOrder_ = scenario.triggerOrder;
     triggerRuntime_.resize(triggers_.size());
@@ -1300,6 +1366,7 @@ bool Game::initScenario(
     // before the first frame.
 
     objects_.clear();
+    previousPositions_.clear();
     selectionOrder_.clear();
     actionMenuOpen_ = false;
     actionMenuObjectId_ = 0;
@@ -1375,7 +1442,7 @@ bool Game::initScenario(
         "scenario initialization: created " +
         std::to_string(objects_.size()) +
         " runtime objects");
-    for (Object &object : objects_)
+    for (Object &object : prefetched(objects_))
         configureGate(object);
     for (const ScenarioTrigger &trigger : triggers_)
         for (const ScenarioEffect &effect : trigger.effects)
@@ -1502,10 +1569,27 @@ bool Game::initScenario(
                 "scenario AI include unavailable for player " +
                 std::to_string(player) +
                 ": " + missing);
+        AiPlayerState &state =
+            aiPlayers_[(size_t)player];
+        const float phase =
+            (float)((player * 3) % 7) /
+            7.0f;
+        state.ruleTime =
+            0.02f + phase * 0.20f;
+        state.economyTime =
+            0.10f + phase * 1.50f;
+        state.defenseTime =
+            0.15f + phase * 0.35f;
+        state.strategyTime =
+            0.25f + phase * 0.75f;
+        state.militaryTime =
+            0.05f + phase * 0.20f;
+        state.scoutTime =
+            0.50f + phase * 1.0f;
     }
     const Object *hero = nullptr;
     size_t heroCount = 0;
-    for (const Object &object : objects_) {
+    for (const Object &object : prefetched(objects_)) {
         if (!object.active || object.hidden || object.player != localPlayer_ ||
             !object.triggerAddressable || !object.unit->heroMode)
             continue;
@@ -1520,8 +1604,23 @@ bool Game::initScenario(
     } else {
         lookAt(mapSize_ * 0.5f, mapSize_ * 0.5f);
     }
+    preloadTerrainArt();
     log("scenario initialization: complete");
     return true;
+}
+
+// Build every terrain sheet the map uses while the match loads. The per-frame
+// build budget otherwise leaves newly scrolled-in terrain types black for a
+// few frames; slope tiles and blend masks still build lazily.
+void Game::preloadTerrainArt() {
+    const auto &terrains = assets_.dat().terrainBlock.terrains;
+    if (terrains.empty()) return;
+    std::vector<bool> seen(256, false);
+    for (uint8_t id : terrain_) {
+        if (seen[id] || (size_t)id >= terrains.size()) continue;
+        seen[id] = true;
+        assets_.preloadTerrainSheet(drawTerrain(terrains, id).slp);
+    }
 }
 
 bool Game::loadAiScript(
@@ -1681,7 +1780,7 @@ int Game::aiObjectTotalForTesting(
             player, unit);
     int count = 0;
     for (const Object &object :
-         objects_)
+         prefetched(objects_))
         if (object.player == player &&
             object.unit &&
             (object.unit->id == unit->id ||
@@ -1695,7 +1794,7 @@ int Game::aiObjectTotalForTesting(
 size_t Game::aiQueuedUnitCountForTesting(
     int player, int unitId) const {
     size_t count = 0;
-    for (const Object &building : objects_)
+    for (const Object &building : prefetched(objects_))
         if (building.active &&
             building.player == player)
             for (const ProductionItem &item :
@@ -1709,7 +1808,7 @@ size_t Game::aiQueuedUnitCountForTesting(
 size_t Game::aiGathererCountForTesting(
     int player, int resourceType) const {
     size_t count = 0;
-    for (const Object &worker : objects_) {
+    for (const Object &worker : prefetched(objects_)) {
         if (!worker.active ||
             worker.hidden ||
             worker.player != player ||
@@ -2112,7 +2211,7 @@ size_t Game::allocationBytesForTesting() const {
 
 std::array<float, 2>
 Game::playerBasePositionForTesting(int player) const {
-    for (const Object &object : objects_)
+    for (const Object &object : prefetched(objects_))
         if (object.active &&
             object.player == player &&
             object.unit &&
@@ -2129,7 +2228,7 @@ int Game::reachableStartingResourceCountForTesting(
     const auto base =
         playerBasePositionForTesting(player);
     int count = 0;
-    for (const Object &resource : objects_) {
+    for (const Object &resource : prefetched(objects_)) {
         if (!resource.active ||
             !isGatherable(resource) ||
             resource.resourceType != resourceType)
@@ -2225,7 +2324,8 @@ void Game::resetVisibility() {
     for (std::vector<uint8_t> &tiles :
          visibleTiles_)
         tiles.assign(tileCount, 0);
-    for (Object &object : objects_)
+    visibilityTouched_.fill(true);
+    for (Object &object : prefetched(objects_))
         object.discoveredByPlayers = 0;
     visibilityTime_ = 0.0f;
     visibilityGeneration_++;
@@ -2238,11 +2338,22 @@ void Game::updateVisibility() {
     if (mapSize_ <= 0) return;
     if (visibleTiles_[0].size() != tileCount)
         resetVisibility();
-    for (std::vector<uint8_t> &tiles :
-         visibleTiles_)
-        std::fill(tiles.begin(), tiles.end(), 0);
+    // Only players that saw something last time have tiles to clear, and
+    // only players with a sight source this time have tiles to merge into
+    // their explored map (same result as clearing/merging all 17 maps).
+    for (size_t player = 0; player < visibleTiles_.size(); ++player)
+        if (visibilityTouched_[player] || visibleTiles_[player].size() != tileCount) {
+            std::fill(visibleTiles_[player].begin(), visibleTiles_[player].end(), 0);
+            visibilityTouched_[player] = false;
+        }
 
-    for (const Object &source : objects_) {
+    for (uint32_t sourceIndex :
+         sightSourceObjectIndices_) {
+        if ((size_t)sourceIndex >=
+            objects_.size())
+            continue;
+        const Object &source =
+            objects_[(size_t)sourceIndex];
         if (!source.active || source.hidden ||
             source.garrisonedInId >= 0 ||
             source.player <= 0 || source.player >= 17 ||
@@ -2265,40 +2376,170 @@ void Game::updateVisibility() {
             (radius + 0.5f) * (radius + 0.5f);
         std::vector<uint8_t> &visible =
             visibleTiles_[(size_t)source.player];
-        for (int y = minY; y <= maxY; y++)
-            for (int x = minX; x <= maxX;
-                 x++) {
+        visibilityTouched_[(size_t)source.player] = true;
+        for (int y = minY; y <= maxY; y++) {
+            const float dy =
+                y + 0.5f - source.y;
+            const float dySquared = dy * dy;
+            int rowMinX = minX;
+            int rowMaxX = maxX;
+            while (rowMinX <= rowMaxX) {
                 const float dx =
-                    x + 0.5f - source.x;
-                const float dy =
-                    y + 0.5f - source.y;
-                if (dx * dx + dy * dy <=
+                    rowMinX + 0.5f -
+                    source.x;
+                if (dx * dx + dySquared <=
                     radiusSquared)
-                    visible[(size_t)y *
-                                mapSize_ +
-                            x] = 1;
+                    break;
+                rowMinX++;
             }
+            while (rowMaxX >= rowMinX) {
+                const float dx =
+                    rowMaxX + 0.5f -
+                    source.x;
+                if (dx * dx + dySquared <=
+                    radiusSquared)
+                    break;
+                rowMaxX--;
+            }
+            if (rowMinX > rowMaxX)
+                continue;
+            const size_t row =
+                (size_t)y * mapSize_;
+            std::memset(
+                visible.data() + row + rowMinX,
+                1,
+                (size_t)(rowMaxX -
+                         rowMinX + 1));
+        }
     }
     for (size_t player = 1;
          player < visibleTiles_.size();
-         player++)
-        for (size_t tile = 0; tile < tileCount;
-             tile++)
-            if (visibleTiles_[player][tile])
-                exploredTiles_[player][tile] = 1;
-    for (Object &object : objects_) {
+         player++) {
+        if (!visibilityTouched_[player]) continue;
+        const uint8_t *visible = visibleTiles_[player].data();
+        uint8_t *explored = exploredTiles_[player].data();
+        // Both maps hold 0/1, so OR is "explored = 1 where visible".
+        for (size_t tile = 0; tile < tileCount; tile++)
+            explored[tile] = (uint8_t)(explored[tile] | (visible[tile] ? 1 : 0));
+    }
+    std::array<std::array<int, 16>, 17>
+        visionPlayers{};
+    std::array<size_t, 17>
+        visionPlayerCounts{};
+    for (int player = 1; player < 17;
+         ++player) {
+        if ((size_t)player > players_.size() ||
+            !players_[(size_t)player - 1].active)
+            continue;
+        visionPlayers[(size_t)player]
+                     [visionPlayerCounts[
+                         (size_t)player]++] =
+            player;
+        if (!hasSharedVision(player))
+            continue;
+        for (int ally = 1; ally < 17;
+             ++ally) {
+            if (ally == player ||
+                (size_t)ally > players_.size() ||
+                !players_[(size_t)ally - 1].active ||
+                !isFriendlyPlayer(
+                    player, ally) ||
+                !isFriendlyPlayer(
+                    ally, player))
+                continue;
+            visionPlayers[(size_t)player]
+                         [visionPlayerCounts[
+                             (size_t)player]++] =
+                ally;
+        }
+    }
+    for (uint32_t objectIndex :
+         discoverableObjectIndices_) {
+        if ((size_t)objectIndex >=
+            objects_.size())
+            continue;
+        Object &object =
+            objects_[(size_t)objectIndex];
         if (!object.active || object.hidden ||
             !object.unit ||
             (object.unit->type !=
                  dat::UT_Building &&
              !isHolocron(object)))
             continue;
-        for (int player = 1; player < 17;
-             player++)
-            if (objectCurrentlyVisibleToPlayer(
-                    object, player))
+        const float halfX =
+            std::max(
+                0.0f,
+                object.unit->collisionSize[0]);
+        const float halfY =
+            std::max(
+                0.0f,
+                object.unit->collisionSize[1]);
+        const int minX = std::max(
+            0,
+            (int)std::floor(
+                object.x - halfX));
+        const int maxX = std::min(
+            mapSize_ - 1,
+            (int)std::floor(
+                object.x + halfX));
+        const int minY = std::max(
+            0,
+            (int)std::floor(
+                object.y - halfY));
+        const int maxY = std::min(
+            mapSize_ - 1,
+            (int)std::floor(
+                object.y + halfY));
+        for (int player = 1;
+             player < 17; player++) {
+            if (!visionPlayerCounts[
+                    (size_t)player])
+                continue;
+            if (object.player == player ||
+                (object.player > 0 &&
+                 hasSharedVision(player) &&
+                 isFriendlyPlayer(
+                     player, object.player) &&
+                 isFriendlyPlayer(
+                     object.player, player))) {
                 object.discoveredByPlayers |=
                     1u << player;
+                continue;
+            }
+            if (isStealthed(object) &&
+                !detectedByPlayer(
+                    object, player))
+                continue;
+            bool visible = false;
+            for (size_t vision = 0;
+                 vision <
+                     visionPlayerCounts[
+                         (size_t)player] &&
+                 !visible;
+                 ++vision) {
+                const int source =
+                    visionPlayers[
+                        (size_t)player][vision];
+                const auto &tiles =
+                    visibleTiles_[
+                        (size_t)source];
+                for (int y = minY;
+                     y <= maxY && !visible;
+                     ++y)
+                    for (int x = minX;
+                         x <= maxX; ++x)
+                        if (tiles[
+                                (size_t)y *
+                                    mapSize_ +
+                                x]) {
+                            visible = true;
+                            break;
+                        }
+            }
+            if (visible)
+                object.discoveredByPlayers |=
+                    1u << player;
+        }
     }
     visibilityGeneration_++;
 }
@@ -2317,25 +2558,28 @@ bool Game::tileExplored(
         return true;
     const size_t tile =
         (size_t)y * mapSize_ + x;
+    const std::vector<uint8_t> &ownTiles =
+        exploredTiles_[(size_t)player];
+    if (ownTiles.size() ==
+            (size_t)mapSize_ * mapSize_ &&
+        ownTiles[tile])
+        return true;
+    if (!hasSharedVision(player) ||
+        (size_t)player > players_.size() ||
+        !players_[(size_t)player - 1].active)
+        return false;
     for (int visionPlayer = 1;
          visionPlayer < 17; ++visionPlayer) {
-        if (visionPlayer != player) {
-            if ((size_t)player >
-                    players_.size() ||
-                (size_t)visionPlayer >
-                    players_.size() ||
-                !players_[(size_t)player - 1]
-                     .active ||
-                !players_[
-                     (size_t)visionPlayer - 1]
-                     .active ||
-                !hasSharedVision(player) ||
-                !isFriendlyPlayer(
-                    player, visionPlayer) ||
-                !isFriendlyPlayer(
-                    visionPlayer, player))
-                continue;
-        }
+        if (visionPlayer == player ||
+            (size_t)visionPlayer >
+                players_.size() ||
+            !players_[(size_t)visionPlayer - 1]
+                 .active ||
+            !isFriendlyPlayer(
+                player, visionPlayer) ||
+            !isFriendlyPlayer(
+                visionPlayer, player))
+            continue;
         const std::vector<uint8_t> &tiles =
             exploredTiles_[(size_t)visionPlayer];
         if (tiles.size() ==
@@ -2359,25 +2603,28 @@ bool Game::tileVisible(
         return true;
     const size_t tile =
         (size_t)y * mapSize_ + x;
+    const std::vector<uint8_t> &ownTiles =
+        visibleTiles_[(size_t)player];
+    if (ownTiles.size() ==
+            (size_t)mapSize_ * mapSize_ &&
+        ownTiles[tile])
+        return true;
+    if (!hasSharedVision(player) ||
+        (size_t)player > players_.size() ||
+        !players_[(size_t)player - 1].active)
+        return false;
     for (int visionPlayer = 1;
          visionPlayer < 17; ++visionPlayer) {
-        if (visionPlayer != player) {
-            if ((size_t)player >
-                    players_.size() ||
-                (size_t)visionPlayer >
-                    players_.size() ||
-                !players_[(size_t)player - 1]
-                     .active ||
-                !players_[
-                     (size_t)visionPlayer - 1]
-                     .active ||
-                !hasSharedVision(player) ||
-                !isFriendlyPlayer(
-                    player, visionPlayer) ||
-                !isFriendlyPlayer(
-                    visionPlayer, player))
-                continue;
-        }
+        if (visionPlayer == player ||
+            (size_t)visionPlayer >
+                players_.size() ||
+            !players_[(size_t)visionPlayer - 1]
+                 .active ||
+            !isFriendlyPlayer(
+                player, visionPlayer) ||
+            !isFriendlyPlayer(
+                visionPlayer, player))
+            continue;
         const std::vector<uint8_t> &tiles =
             visibleTiles_[(size_t)visionPlayer];
         if (tiles.size() ==
@@ -2509,7 +2756,7 @@ bool Game::detectedByPlayer(
     if (player == localPlayer_ &&
         forceSightCheat_)
         return true;
-    for (const Object &detector : objects_) {
+    for (const Object &detector : prefetched(objects_)) {
         if (!isDetector(detector) ||
             (detector.player != player &&
              (!hasSharedVision(player) ||
@@ -2536,8 +2783,8 @@ bool Game::detectedByPlayer(
 
 float Game::elevationAt(float x, float y) const {
     if (cornerElevation_.empty()) return 0;
-    int tx = std::max(0, std::min(mapSize_ - 1, (int)std::floor(x)));
-    int ty = std::max(0, std::min(mapSize_ - 1, (int)std::floor(y)));
+    int tx = std::max(0, std::min(mapSize_ - 1, fastFloor(x)));
+    int ty = std::max(0, std::min(mapSize_ - 1, fastFloor(y)));
     float fx = std::max(0.0f, std::min(1.0f, x - tx));
     float fy = std::max(0.0f, std::min(1.0f, y - ty));
     const size_t stride = (size_t)mapSize_ + 1;
@@ -2552,6 +2799,19 @@ float Game::elevationAt(float x, float y) const {
 const dat::Unit *Game::findUnit(int civ, const std::string &name) const {
     const auto &civs = assets_.dat().civs;
     if (civ < 0 || (size_t)civ >= civs.size()) return nullptr;
+    // The dat never changes, so remember each (civ, name) answer.
+    std::string memoKey = std::to_string(civ);
+    memoKey += '\x1f';
+    memoKey += name;
+    const auto memo = findUnitMemo_.find(memoKey);
+    if (memo != findUnitMemo_.end()) return memo->second;
+    const dat::Unit *result = findUnitUncached(civ, name);
+    findUnitMemo_.emplace(std::move(memoKey), result);
+    return result;
+}
+
+const dat::Unit *Game::findUnitUncached(int civ, const std::string &name) const {
+    const auto &civs = assets_.dat().civs;
     for (const auto &u : civs[civ].units)
         if (u.exists &&
             (u.name == name ||
@@ -2670,7 +2930,7 @@ int Game::civilizationForPlayer(int player) const {
 void Game::rebuildAdjacency() {
     pathGridCache_.clear();
     std::vector<Object *> adjacentObjects, adjacentWalls;
-    for (Object &object : objects_) {
+    for (Object &object : prefetched(objects_)) {
         if (!object.active || object.hidden || !object.unit->adjacentMode) continue;
         adjacentObjects.push_back(&object);
         const dat::Graphic *graphic = assets_.dat().graphic(object.unit->standingGraphic[0]);
@@ -2716,8 +2976,23 @@ void Game::rebuildAdjacency() {
 void Game::rebuildObjectClassification() {
     mobileObjectIndices_.clear();
     combatObjectIndices_.clear();
+    gatherableObjectIndices_.clear();
+    workerObjectIndices_.clear();
+    livestockObjectIndices_.clear();
+    gathererObjectIndices_.clear();
+    repairerObjectIndices_.clear();
+    converterObjectIndices_.clear();
+    sightSourceObjectIndices_.clear();
+    discoverableObjectIndices_.clear();
+    minimapObjectIndices_.clear();
     staticObstructionIndices_.clear();
-    staticObstructionCells_.assign((size_t)mapSize_ * mapSize_, {});
+    // Empty every cell list but keep its storage (reallocating ~20,000
+    // vectors on each rebuild was a large part of a gate or research hitch).
+    const size_t cellCount = (size_t)mapSize_ * mapSize_;
+    if (staticObstructionCells_.size() != cellCount)
+        staticObstructionCells_.assign(cellCount, {});
+    else
+        for (std::vector<uint32_t> &cell : staticObstructionCells_) cell.clear();
     for (size_t index = 0; index < objects_.size(); index++)
         classifyObject(index);
 }
@@ -2728,8 +3003,61 @@ void Game::classifyObject(size_t index) {
     if (!object.active || object.hidden || object.felled)
         return;
     const dat::Unit *obstructionUnit = object.unit;
-    if (object.draw && object.spawnId &&
-        object.unit->type >= dat::UT_Combatant)
+    // The unit-definition half of each test is memoized per unit (dat units
+    // never change); the object-state half is evaluated as before. Objects
+    // here are active and not hidden, which the memoized tests assume.
+    auto memo = unitClassMemo_.find(object.unit);
+    if (memo == unitClassMemo_.end()) {
+        UnitClassBits bits;
+        bits.worker = isWorker(object);
+        bits.livestock = object.unit->cls == 1 &&
+                         object.unit->name.rfind("ANIMAL-CAPTURE", 0) == 0;
+        bits.gatherer = isGatherer(object);
+        bits.converter = conversionTask(object) != nullptr;
+        bits.sight = object.unit->lineOfSight > 0.0f;
+        bits.discoverable = object.unit->type == dat::UT_Building || isHolocron(object);
+        bits.minimap = object.unit->minimapMode != 0;
+        bits.combat = object.unit->type >= dat::UT_Combatant;
+        memo = unitClassMemo_.emplace(object.unit, bits).first;
+    }
+    const UnitClassBits &bits = memo->second;
+    if (isGatherable(object))
+        gatherableObjectIndices_.push_back(
+            (uint32_t)index);
+    if (bits.worker)
+        workerObjectIndices_.push_back(
+            (uint32_t)index);
+    if (bits.livestock)
+        livestockObjectIndices_.push_back(
+            (uint32_t)index);
+    if (bits.gatherer)
+        gathererObjectIndices_.push_back(
+            (uint32_t)index);
+    {
+        // repairerUnit() can look up the civilization's upgraded worker.
+        const int civilization =
+            bits.worker ? civilizationForPlayer(object.player) : -1;
+        const auto repairKey = std::make_pair(object.unit, civilization);
+        auto repairer = repairerMemo_.find(repairKey);
+        if (repairer == repairerMemo_.end())
+            repairer = repairerMemo_.emplace(repairKey, isRepairer(object)).first;
+        if (repairer->second)
+            repairerObjectIndices_.push_back(
+                (uint32_t)index);
+    }
+    if (bits.converter)
+        converterObjectIndices_.push_back(
+            (uint32_t)index);
+    if (bits.sight)
+        sightSourceObjectIndices_.push_back(
+            (uint32_t)index);
+    if (bits.discoverable)
+        discoverableObjectIndices_.push_back(
+            (uint32_t)index);
+    if (object.draw && bits.minimap)
+        minimapObjectIndices_.push_back(
+            (uint32_t)index);
+    if (object.draw && object.spawnId && bits.combat)
         combatObjectIndices_.push_back((uint32_t)index);
     const bool mobile =
         object.unit->speed > 0 &&
@@ -2800,7 +3128,11 @@ void Game::rebuildMobileOccupancy() {
 
 void Game::updateLivestockOwnership() {
     constexpr float captureRadius = 4.0f;
-    for (Object &livestock : objects_) {
+    constexpr float cellSize = 4.0f;
+    for (uint32_t livestockIndex :
+         livestockObjectIndices_) {
+        Object &livestock =
+            objects_[(size_t)livestockIndex];
         if (!livestock.active || livestock.hidden ||
             !livestock.unit ||
             livestock.unit->cls != 1 ||
@@ -2809,8 +3141,11 @@ void Game::updateLivestockOwnership() {
             continue;
         const bool explicitlyTargeted =
             std::any_of(
-                objects_.begin(), objects_.end(),
-                [&](const Object &unit) {
+                combatObjectIndices_.begin(),
+                combatObjectIndices_.end(),
+                [&](uint32_t index) {
+                    const Object &unit =
+                        objects_[(size_t)index];
                     return unit.active &&
                            !unit.hidden &&
                            unit.player > 0 &&
@@ -2822,24 +3157,55 @@ void Game::updateLivestockOwnership() {
         int closestPlayer = 0;
         float closestDistance =
             captureRadius * captureRadius;
-        for (uint32_t index : mobileObjectIndices_) {
-            const Object &unit =
-                objects_[(size_t)index];
-            if (!unit.active || unit.hidden ||
-                unit.player <= 0 || !unit.unit ||
-                unit.unit->cls == 1 ||
-                unit.unit->type <
-                    dat::UT_Combatant)
-                continue;
-            const float dx = unit.x - livestock.x;
-            const float dy = unit.y - livestock.y;
-            const float distance =
-                dx * dx + dy * dy;
-            if (distance < closestDistance) {
-                closestDistance = distance;
-                closestPlayer = unit.player;
-            }
-        }
+        const int centerX =
+            (int)std::floor(
+                livestock.x / cellSize);
+        const int centerY =
+            (int)std::floor(
+                livestock.y / cellSize);
+        for (int cellY =
+                 std::max(0, centerY - 1);
+             cellY <=
+             std::min(
+                 mobileObjectGridWidth_ - 1,
+                 centerY + 1);
+             cellY++)
+            for (int cellX =
+                     std::max(0, centerX - 1);
+                 cellX <=
+                 std::min(
+                     mobileObjectGridWidth_ - 1,
+                     centerX + 1);
+                 cellX++)
+                for (uint32_t index :
+                     mobileObjectCells_[
+                         (size_t)cellY *
+                             mobileObjectGridWidth_ +
+                         cellX]) {
+                    const Object &unit =
+                        objects_[(size_t)index];
+                    if (!unit.active ||
+                        unit.hidden ||
+                        unit.player <= 0 ||
+                        !unit.unit ||
+                        unit.unit->cls == 1 ||
+                        unit.unit->type <
+                            dat::UT_Combatant)
+                        continue;
+                    const float dx =
+                        unit.x - livestock.x;
+                    const float dy =
+                        unit.y - livestock.y;
+                    const float distance =
+                        dx * dx + dy * dy;
+                    if (distance <
+                        closestDistance) {
+                        closestDistance =
+                            distance;
+                        closestPlayer =
+                            unit.player;
+                    }
+                }
         if (closestPlayer > 0 &&
             closestPlayer != livestock.player) {
             livestock.player = closestPlayer;
@@ -3146,6 +3512,7 @@ bool Game::researchTechnology(int player, int technologyId) {
              .insert(technologyId)
              .second)
         return true;
+    aiUnitCache_[(size_t)player].clear();
     techGeneration_++;
     refreshAutomaticTechnologies(player);
     return true;
@@ -3157,7 +3524,7 @@ size_t Game::activeObjectCount() const {
 }
 
 bool Game::invariantsForTesting() const {
-    for (const Object &object : objects_) {
+    for (const Object &object : prefetched(objects_)) {
         if (!object.active)
             continue;
         if (!object.unit ||
@@ -3275,7 +3642,7 @@ std::vector<int> Game::buildingOptionIds(
 std::vector<uint32_t>
 Game::underConstructionObjectIds() const {
     std::vector<uint32_t> ids;
-    for (const Object &object : objects_)
+    for (const Object &object : prefetched(objects_))
         if (object.active && object.underConstruction)
             ids.push_back(object.spawnId);
     return ids;
@@ -3413,7 +3780,7 @@ CombatStats Game::combatStats() const {
     stats.retaliationOrders = retaliationOrders_;
     stats.armedBuildingsEngaged = armedBuildingsEngaged_;
     stats.attackModeChanges = attackModeChanges_;
-    for (const Object &object : objects_)
+    for (const Object &object : prefetched(objects_))
         if (object.active && object.attackTargetId) stats.activeOrders++;
     return stats;
 }
@@ -3657,6 +4024,7 @@ uint32_t Game::spawnConverterForTesting(
         if (findUnit(civilization, unitId)) {
             researchedTechs_[(size_t)player]
                 .insert(156);
+            techGeneration_++;
             return spawnObjectForTesting(
                 civilization, unitId,
                 player, x, y);
@@ -3681,6 +4049,7 @@ uint32_t Game::spawnConverterForTesting(
                 continue;
             researchedTechs_[(size_t)player]
                 .insert(156);
+            techGeneration_++;
             return spawnObjectForTesting(
                 civilization, unit.id,
                 player, x, y);
@@ -3816,12 +4185,19 @@ int Game::storedHolocronCountForTesting(
 }
 
 int Game::holocronCountForTesting() const {
-    return (int)std::count_if(
-        objects_.begin(), objects_.end(),
-        [&](const Object &object) {
-            return object.active &&
-                   isHolocron(object);
-        });
+    int count = 0;
+    for (uint32_t objectIndex :
+         discoverableObjectIndices_) {
+        if ((size_t)objectIndex >=
+            objects_.size())
+            continue;
+        const Object &object =
+            objects_[(size_t)objectIndex];
+        if (object.active &&
+            isHolocron(object))
+            count++;
+    }
+    return count;
 }
 
 uint32_t Game::spawnDetectorForTesting(
@@ -3846,6 +4222,7 @@ uint32_t Game::spawnDetectorForTesting(
     }
     researchedTechs_[(size_t)player]
         .insert(158);
+    techGeneration_++;
     return spawnConverterForTesting(
         player, x, y);
 }
@@ -3862,6 +4239,7 @@ bool Game::setStealthedForTesting(
     else
         researchedTechs_[(size_t)player]
             .erase(159);
+    techGeneration_++;
     return true;
 }
 
@@ -3955,7 +4333,7 @@ std::vector<uint32_t> Game::selectedObjectIds() const {
         if (object && object->active && object->selected)
             result.push_back(spawnId);
     }
-    for (const Object &object : objects_)
+    for (const Object &object : prefetched(objects_))
         if (object.active && object.selected &&
             std::find(result.begin(), result.end(), object.spawnId) ==
                 result.end())
@@ -3973,7 +4351,7 @@ bool Game::objectScreenPosition(uint32_t spawnId, int screenW, int screenH,
 
 std::vector<MovingObjectInfo> Game::movingObjects() const {
     std::vector<MovingObjectInfo> result;
-    for (const Object &object : objects_) {
+    for (const Object &object : prefetched(objects_)) {
         if (!object.active || object.hidden ||
             (object.state != State::Walk && !object.moveGoalActive))
             continue;
@@ -4037,7 +4415,7 @@ std::vector<Game::Object *> Game::effectTargets(const ScenarioEffect &effect) {
     const int type = triggerField(effect.fields, 21);
     const bool hasArea = x1 >= 0 && y1 >= 0 && x2 >= 0 && y2 >= 0;
     if (!hasArea && unitId < 0 && group < 0 && type < 0) return targets;
-    for (Object &object : objects_) {
+    for (Object &object : prefetched(objects_)) {
         if (!objectMatches(object, unitId, player, group, type)) continue;
         if (hasArea && !inSourceArea(object, x1, y1, x2, y2)) continue;
         targets.push_back(&object);
@@ -4142,21 +4520,41 @@ bool Game::canAttackTarget(
     }
 }
 
+// First task of the given action type in a unit's header (the dat is fixed,
+// so the per-unit answers for the common types are kept).
+const dat::Task *Game::firstUnitTask(int unitId, int actionType) const {
+    const auto &headers = assets_.dat().unitHeaders;
+    if (unitId < 0 || (size_t)unitId >= headers.size()) return nullptr;
+    static constexpr int kCachedTypes[6] = {5, 101, 104, 106, 110, 132};
+    int slot = -1;
+    for (int i = 0; i < 6; i++)
+        if (kCachedTypes[i] == actionType) slot = i;
+    const auto &tasks = headers[(size_t)unitId].tasks;
+    if (slot < 0) {
+        for (const dat::Task &task : tasks)
+            if (task.actionType == actionType) return &task;
+        return nullptr;
+    }
+    if (unitTaskIndex_.size() != headers.size()) {
+        std::array<int32_t, 6> unknown;
+        unknown.fill(-2);
+        unitTaskIndex_.assign(headers.size(), unknown);
+    }
+    auto &entry = unitTaskIndex_[(size_t)unitId];
+    if (entry[(size_t)slot] == -2) {
+        entry.fill(-1);
+        for (size_t t = tasks.size(); t-- > 0;)
+            for (int i = 0; i < 6; i++)
+                if (tasks[t].actionType == kCachedTypes[i]) entry[(size_t)i] = (int32_t)t;
+    }
+    return entry[(size_t)slot] >= 0 ? &tasks[(size_t)entry[(size_t)slot]] : nullptr;
+}
+
 const dat::Task *Game::conversionTask(
     const Object &converter) const {
-    if (!converter.unit ||
-        converter.unit->id < 0 ||
-        (size_t)converter.unit->id >=
-            assets_.dat().unitHeaders.size())
+    if (!converter.unit)
         return nullptr;
-    for (const dat::Task &task :
-         assets_.dat()
-             .unitHeaders[
-                 (size_t)converter.unit->id]
-             .tasks)
-        if (task.actionType == 104)
-            return &task;
-    return nullptr;
+    return firstUnitTask(converter.unit->id, 104);
 }
 
 float Game::conversionChargeFraction(
@@ -4257,7 +4655,10 @@ bool Game::issueConversion(
 }
 
 void Game::updateConversion(float dt) {
-    for (Object &converter : objects_) {
+    for (uint32_t converterIndex :
+         converterObjectIndices_) {
+        Object &converter =
+            objects_[(size_t)converterIndex];
         const dat::Task *task =
             conversionTask(converter);
         if (task &&
@@ -4352,7 +4753,7 @@ void Game::updateConversion(float dt) {
             std::max(
                 0.1f, task->workValue2);
         converter.state = State::Idle;
-        for (Object &other : objects_)
+        for (Object &other : prefetched(objects_))
             if (other.conversionTargetId ==
                 convertedId) {
                 other.conversionTargetId = 0;
@@ -4484,7 +4885,7 @@ void Game::releaseHolocronsForRemoval(
     if (!isTemple(object))
         return;
     size_t offset = 0;
-    for (Object &holocron : objects_) {
+    for (Object &holocron : prefetched(objects_)) {
         if (!holocron.active ||
             !isHolocron(holocron) ||
             holocron.garrisonedInId !=
@@ -4511,15 +4912,38 @@ void Game::releaseHolocronsForRemoval(
 }
 
 void Game::updateHolocrons(float dt) {
-    for (Object &carrier : objects_)
+    // One pass over the objects finds everything the holocron passes below
+    // look at; each pass then visits its candidates in object order and
+    // re-checks the live state, so the result matches full scans.
+    std::vector<uint32_t> carryingObjects, targetingObjects, holocronObjects;
+    std::array<std::vector<uint32_t>, 17> holocronCarriers{};
+    std::vector<uint32_t> holocronCandidates;
+    for (size_t index = 0; index < objects_.size(); ++index) {
+        const Object &object = objects_[index];
+        prefetchObjectAhead(reinterpret_cast<const void *>(reinterpret_cast<uintptr_t>(&object) + 6 * sizeof(Object)));
+        const bool holocron = isHolocron(object);
+        if (holocron) holocronObjects.push_back((uint32_t)index);
+        if (holocron || isTemple(object))
+            holocronCandidates.push_back((uint32_t)index);
+        if (!object.active) continue;
+        if (object.carriedHolocronId) carryingObjects.push_back((uint32_t)index);
+        if (object.holocronTargetId) targetingObjects.push_back((uint32_t)index);
+        if (object.player > 0 && (size_t)object.player < holocronCarriers.size() &&
+            (size_t)object.player < aiPlayers_.size())
+            holocronCarriers[(size_t)object.player].push_back((uint32_t)index);
+    }
+    for (uint32_t carrierIndex : carryingObjects) {
+        Object &carrier = objects_[carrierIndex];
         if (carrier.active &&
             carrier.carriedHolocronId &&
             (!canCarryHolocron(carrier) ||
              carrier.garrisonedInId >= 0 ||
              carrier.underConstruction))
             dropHolocron(carrier);
+    }
 
-    for (Object &carrier : objects_) {
+    for (uint32_t carrierIndex : targetingObjects) {
+        Object &carrier = objects_[carrierIndex];
         if (!carrier.active ||
             !carrier.holocronTargetId)
             continue;
@@ -4641,7 +5065,8 @@ void Game::updateHolocrons(float dt) {
         }
     }
 
-    for (const Object &holocron : objects_) {
+    for (uint32_t holocronIndex : holocronObjects) {
+        const Object &holocron = objects_[holocronIndex];
         if (!holocron.active ||
             !isHolocron(holocron) ||
             holocron.garrisonedInId < 0 ||
@@ -4672,7 +5097,9 @@ void Game::updateHolocrons(float dt) {
         if (!players_[player - 1].active ||
             players_[player - 1].human)
             continue;
-        for (Object &carrier : objects_) {
+        if (player >= holocronCarriers.size()) continue;
+        for (uint32_t carrierIndex : holocronCarriers[player]) {
+            Object &carrier = objects_[carrierIndex];
             if (!carrier.active ||
                 carrier.player !=
                     (int)player ||
@@ -4684,8 +5111,8 @@ void Game::updateHolocrons(float dt) {
             Object *best = nullptr;
             float bestDistance =
                 std::numeric_limits<float>::max();
-            for (Object &candidate :
-                 objects_) {
+            for (uint32_t candidateIndex : holocronCandidates) {
+                Object &candidate = objects_[candidateIndex];
                 const bool eligible =
                     carrier.carriedHolocronId
                         ? isTemple(candidate) &&
@@ -4729,14 +5156,21 @@ void Game::updateHolocrons(float dt) {
 
 int Game::storedHolocronCount(
     int player) const {
-    return (int)std::count_if(
-        objects_.begin(), objects_.end(),
-        [&](const Object &object) {
-            return object.active &&
-                   isHolocron(object) &&
-                   object.player == player &&
-                   object.garrisonedInId >= 0;
-        });
+    int count = 0;
+    for (uint32_t objectIndex :
+         discoverableObjectIndices_) {
+        if ((size_t)objectIndex >=
+            objects_.size())
+            continue;
+        const Object &object =
+            objects_[(size_t)objectIndex];
+        if (object.active &&
+            isHolocron(object) &&
+            object.player == player &&
+            object.garrisonedInId >= 0)
+            count++;
+    }
+    return count;
 }
 
 // The command-panel test reached through the selected object's virtual method
@@ -4761,7 +5195,7 @@ bool Game::canAttackGround(
 }
 
 bool Game::selectedCanAttackGround() const {
-    for (const Object &object : objects_)
+    for (const Object &object : prefetched(objects_))
         if (object.selected &&
             object.player == localPlayer_ &&
             canAttackGround(object))
@@ -4848,31 +5282,55 @@ float Game::modifiedUnitAttribute(const Object &object,
     if (object.player < 0 ||
         (size_t)object.player >= researchedTechs_.size())
         return value;
-    for (int technologyId :
-         researchedTechs_[(size_t)object.player]) {
-        if (technologyId < 0 ||
-            (size_t)technologyId >= assets_.dat().techs.size())
-            continue;
-        const dat::Tech &technology =
-            assets_.dat().techs[(size_t)technologyId];
-        if (technology.effectId < 0 ||
-            (size_t)technology.effectId >=
-                assets_.dat().effects.size())
-            continue;
-        for (const dat::EffectCommand &command :
-             assets_.dat()
-                 .effects[(size_t)technology.effectId]
-                 .commands) {
-            if (command.c != attribute ||
-                !technologyCommandApplies(command, object))
+    // The applicable set/add/multiply commands depend only on the player's
+    // researched techs, the unit id and class and the attribute: cache that
+    // list per tech generation and replay it in the original order.
+    const uint64_t key =
+        ((uint64_t)(uint32_t)object.player << 56) ^
+        ((uint64_t)(uint16_t)object.unit->id << 40) ^
+        ((uint64_t)(uint16_t)object.unit->cls << 24) ^
+        (uint64_t)(uint32_t)(attribute & 0xffffff);
+    UnitAttributeOps &ops = unitAttributeOps_[key];
+    if (ops.generation != techGeneration_ || ops.player != object.player ||
+        ops.unitId != object.unit->id || ops.cls != object.unit->cls ||
+        ops.attribute != attribute) {
+        ops.generation = techGeneration_;
+        ops.player = object.player;
+        ops.unitId = object.unit->id;
+        ops.cls = object.unit->cls;
+        ops.attribute = attribute;
+        ops.ops.clear();
+        for (int technologyId :
+             researchedTechs_[(size_t)object.player]) {
+            if (technologyId < 0 ||
+                (size_t)technologyId >= assets_.dat().techs.size())
                 continue;
-            if (command.type == 0)
-                value = command.d;
-            else if (command.type == 4)
-                value += command.d;
-            else if (command.type == 5)
-                value *= command.d;
+            const dat::Tech &technology =
+                assets_.dat().techs[(size_t)technologyId];
+            if (technology.effectId < 0 ||
+                (size_t)technology.effectId >=
+                    assets_.dat().effects.size())
+                continue;
+            for (const dat::EffectCommand &command :
+                 assets_.dat()
+                     .effects[(size_t)technology.effectId]
+                     .commands) {
+                if (command.c != attribute ||
+                    !technologyCommandApplies(command, object))
+                    continue;
+                if (command.type == 0 || command.type == 4 ||
+                    command.type == 5)
+                    ops.ops.push_back({command.type, command.d});
+            }
         }
+    }
+    for (const auto &op : ops.ops) {
+        if (op.first == 0)
+            value = op.second;
+        else if (op.first == 4)
+            value += op.second;
+        else
+            value *= op.second;
     }
     return value;
 }
@@ -5184,19 +5642,30 @@ bool Game::isSelectable(const Object &object) const {
 }
 
 bool Game::hasSelectedUnit() const {
-    for (const Object &object : objects_)
-        if (object.selected && isSelectable(object)) return true;
+    for (uint32_t spawnId : selectionOrder_) {
+        const Object *object =
+            findObject(spawnId);
+        if (object && object->selected &&
+            isSelectable(*object))
+            return true;
+    }
     return false;
 }
 
 bool Game::hasSelectedAttacker() const {
-    for (const Object &object : objects_)
-        if (object.selected && isSelectable(object) && canAttack(object)) return true;
+    for (uint32_t spawnId : selectionOrder_) {
+        const Object *object =
+            findObject(spawnId);
+        if (object && object->selected &&
+            isSelectable(*object) &&
+            canAttack(*object))
+            return true;
+    }
     return false;
 }
 
 void Game::clearSelection() {
-    for (Object &object : objects_) object.selected = false;
+    for (Object &object : prefetched(objects_)) object.selected = false;
     selectionOrder_.clear();
     attackGroundCursorActive_ = false;
     unitCommandCursorActive_ = false;
@@ -5223,11 +5692,6 @@ void Game::syncSelectionOrder() {
                 return !object || !object->active || !object->selected;
             }),
         selectionOrder_.end());
-    for (const Object &object : objects_)
-        if (object.active && object.selected &&
-            std::find(selectionOrder_.begin(), selectionOrder_.end(),
-                      object.spawnId) == selectionOrder_.end())
-            selectionOrder_.push_back(object.spawnId);
 }
 
 std::vector<Game::Object *> Game::selectedObjectsInOrder(
@@ -5318,7 +5782,13 @@ Game::Object *Game::objectAtScreenRaw(float screenX, float screenY,
                                       bool includeGatherables) {
     Object *best = nullptr;
     float bestScore = std::numeric_limits<float>::max();
-    for (Object &object : objects_) {
+    for (uint32_t objectIndex :
+         screenPickObjectIndices_) {
+        if ((size_t)objectIndex >=
+            objects_.size())
+            continue;
+        Object &object =
+            objects_[(size_t)objectIndex];
         const bool currentlyVisible =
             objectCurrentlyVisibleToPlayer(
                 object, localPlayer_);
@@ -5363,7 +5833,13 @@ Game::Object *Game::gatherableAtScreen(
     Object *best = nullptr;
     float bestScore =
         std::numeric_limits<float>::max();
-    for (Object &object : objects_) {
+    for (uint32_t objectIndex :
+         screenPickObjectIndices_) {
+        if ((size_t)objectIndex >=
+            objects_.size())
+            continue;
+        Object &object =
+            objects_[(size_t)objectIndex];
         if (!isGatherable(object)) continue;
         if (isFlatFootprint(object)) {
             if (footprintContainsScreen(object, screenX, screenY, screenW, screenH) &&
@@ -5412,7 +5888,13 @@ Game::Object *Game::enemyAtScreen(float screenX, float screenY, int screenW, int
 
     Object *best = nullptr;
     float bestScore = std::numeric_limits<float>::max();
-    for (Object &object : objects_) {
+    for (uint32_t objectIndex :
+         screenPickObjectIndices_) {
+        if ((size_t)objectIndex >=
+            objects_.size())
+            continue;
+        Object &object =
+            objects_[(size_t)objectIndex];
         const bool eligible =
             std::any_of(
                 selected.begin(), selected.end(),
@@ -5454,7 +5936,7 @@ void Game::selectAtScreen(float screenX, float screenY, int screenW, int screenH
     clearSelection();
     if (doubleClick) {
         selectObject(*object);
-        for (Object &candidate : objects_) {
+        for (Object &candidate : prefetched(objects_)) {
             if (&candidate == object || !isSelectable(candidate) ||
                 candidate.unit->id != object->unit->id)
                 continue;
@@ -5486,7 +5968,7 @@ void Game::selectBox(float startX, float startY, float endX, float endY,
     selectionClickAge_ = 1000.0f;
     lastSelectionUnitId_ = -1;
     clearSelection();
-    for (Object &object : objects_) {
+    for (Object &object : prefetched(objects_)) {
         if (!isSelectable(object)) continue;
         float objectX, objectY;
         objectScreenPosition(object, screenW, screenH, objectX, objectY);
@@ -5650,7 +6132,7 @@ bool Game::handleSelectionPanelClick(float screenX, float screenY,
             building->unit->type ==
                 dat::UT_Building) {
             size_t iconIndex = 0;
-            for (Object &unit : objects_) {
+            for (Object &unit : prefetched(objects_)) {
                 if (!unit.active ||
                     unit.garrisonedInId !=
                         (int32_t)building->spawnId)
@@ -5932,7 +6414,7 @@ void Game::refreshAutomaticTechnologies(int player) {
                 const std::string unitName =
                     technology.name2.substr(5);
                 bool exists = false;
-                for (const Object &object : objects_)
+                for (const Object &object : prefetched(objects_))
                     // A finished building "initiates" its MADE technology
                     // (the unit's tech id); the name match covers the rest
                     // (MADE-BLDG-AIRBASE belongs to BLDG-TRAINAIR, 105).
@@ -6075,7 +6557,7 @@ const dat::Unit *Game::effectiveUnitForPlayer(
 
 void Game::applyUnitUpgrades(int player) {
     bool pathingChanged = false;
-    for (Object &object : objects_) {
+    for (Object &object : prefetched(objects_)) {
         if (!object.active || object.player != player ||
             !object.unit)
             continue;
@@ -6525,7 +7007,7 @@ void Game::updateUnitCommandOrder(
         float bestDistance = 64.0f;
         if (unit.attackMode !=
             AttackMode::Passive)
-            for (Object &candidate : objects_) {
+            for (Object &candidate : prefetched(objects_)) {
                 if (!candidate.active ||
                     candidate.hidden ||
                     candidate.player <= 0 ||
@@ -6835,7 +7317,7 @@ float Game::populationUse(
 
 float Game::populationUsed(int player) const {
     float used = 0.0f;
-    for (const Object &object : objects_)
+    for (const Object &object : prefetched(objects_))
         if (object.active &&
             object.player == player &&
             object.unit)
@@ -6848,7 +7330,7 @@ float Game::populationCapacity(int player) const {
         (size_t)player > players_.size())
         return 0.0f;
     float capacity = 0.0f;
-    for (const Object &object : objects_) {
+    for (const Object &object : prefetched(objects_)) {
         if (!object.active ||
             object.player != player ||
             !object.unit ||
@@ -7312,18 +7794,8 @@ bool Game::isGatherer(
         return false;
     if (isWorker(object))
         return true;
-    if (object.unit->id < 0 ||
-        (size_t)object.unit->id >=
-            assets_.dat().unitHeaders.size())
-        return false;
-    for (const dat::Task &task :
-         assets_.dat()
-             .unitHeaders[(size_t)object.unit->id]
-             .tasks)
-        if (task.actionType == 5 ||
-            task.actionType == 110)
-            return true;
-    return false;
+    return firstUnitTask(object.unit->id, 5) ||
+           firstUnitTask(object.unit->id, 110);
 }
 
 bool Game::isBuilder(
@@ -7389,6 +7861,20 @@ bool Game::requiresPower(
 }
 
 bool Game::isPowered(const Object &building) const {
+    if (poweredMemoActive_ && !objects_.empty() &&
+        &building >= objects_.data() &&
+        &building < objects_.data() + objects_.size()) {
+        const size_t index = (size_t)(&building - objects_.data());
+        if (index < poweredMemo_.size()) {
+            int8_t &memo = poweredMemo_[index];
+            if (memo < 0) {
+                poweredMemoActive_ = false;
+                memo = isPowered(building) ? 1 : 0;
+                poweredMemoActive_ = true;
+            }
+            return memo != 0;
+        }
+    }
     if (!building.active || !building.unit ||
         building.unit->type != dat::UT_Building)
         return false;
@@ -7396,7 +7882,7 @@ bool Game::isPowered(const Object &building) const {
         return !building.underConstruction;
     if (!requiresPower(building))
         return !building.underConstruction;
-    for (const Object &source : objects_) {
+    for (const Object &source : prefetched(objects_)) {
         if (!source.active || source.hidden ||
             source.underConstruction ||
             source.player != building.player ||
@@ -7524,7 +8010,9 @@ float Game::shieldRegeneration(
 }
 
 void Game::updateShields(float dt) {
-    for (Object &object : objects_) {
+    poweredMemo_.assign(objects_.size(), -1);
+    poweredMemoActive_ = true;
+    for (Object &object : prefetched(objects_)) {
         if (!object.active || object.hidden ||
             object.underConstruction || !object.unit) {
             object.shieldPoints = 0;
@@ -7544,12 +8032,17 @@ void Game::updateShields(float dt) {
             object.maxShieldPoints);
         if (!self && (!source || !isPowered(*source))) {
             object.shieldRegenerationTime = 0;
-            const float drainRate =
-                std::max(
-                    0.0f,
-                    playerAttribute(
-                        object.player, 26));
             object.shieldDrainTime += dt;
+            // The drain rate is only needed once a whole second has built up
+            // on a shield that still holds points.
+            const float drainRate =
+                object.shieldDrainTime >= 1.0f &&
+                        object.shieldPoints > 0.0f
+                    ? std::max(
+                          0.0f,
+                          playerAttribute(
+                              object.player, 26))
+                    : 0.0f;
             while (object.shieldDrainTime >=
                        1.0f &&
                    object.shieldPoints > 0.0f) {
@@ -7585,21 +8078,14 @@ void Game::updateShields(float dt) {
                         object.shieldPoints));
         }
     }
+    poweredMemoActive_ = false;
 }
 
 const dat::Unit *Game::builderUnit(
     const Object &worker) const {
     if (!worker.unit) return nullptr;
-    if (worker.unit->id >= 0 &&
-        (size_t)worker.unit->id <
-            assets_.dat().unitHeaders.size())
-        for (const dat::Task &task :
-             assets_.dat()
-                 .unitHeaders[
-                     (size_t)worker.unit->id]
-                 .tasks)
-            if (task.actionType == 101)
-                return worker.unit;
+    if (firstUnitTask(worker.unit->id, 101))
+        return worker.unit;
     if (!isWorker(worker))
         return nullptr;
     std::string name = worker.unit->name;
@@ -7788,7 +8274,7 @@ Game::Object *Game::nearestDropSite(
     Object *closest = nullptr;
     float closestDistance =
         std::numeric_limits<float>::max();
-    for (Object &building : objects_) {
+    for (Object &building : prefetched(objects_)) {
         if (!building.active || building.hidden ||
             building.underConstruction ||
             building.player != worker.player ||
@@ -7862,7 +8348,7 @@ bool Game::assignAutomaticWorkerTask(
     Object *foundation = nullptr;
     float foundationDistance =
         std::numeric_limits<float>::max();
-    for (Object &building : objects_) {
+    for (Object &building : prefetched(objects_)) {
         if (!building.active ||
             !building.underConstruction ||
             building.player != worker.player ||
@@ -7882,7 +8368,7 @@ bool Game::assignAutomaticWorkerTask(
     Object *resourceTarget = nullptr;
     float resourceDistance =
         std::numeric_limits<float>::max();
-    for (Object &resource : objects_) {
+    for (Object &resource : prefetched(objects_)) {
         if (!isGatherable(resource)) continue;
         const float dx = resource.x - worker.x;
         const float dy = resource.y - worker.y;
@@ -8120,16 +8606,8 @@ bool Game::isRepairableBy(
 
 const dat::Unit *Game::repairerUnit(const Object &worker) const {
     if (!worker.unit) return nullptr;
-    if (worker.unit->id >= 0 &&
-        (size_t)worker.unit->id <
-            assets_.dat().unitHeaders.size())
-        for (const dat::Task &task :
-             assets_.dat()
-                 .unitHeaders[
-                     (size_t)worker.unit->id]
-                 .tasks)
-            if (task.actionType == 106)
-                return worker.unit;
+    if (firstUnitTask(worker.unit->id, 106))
+        return worker.unit;
     if (!isWorker(worker))
         return nullptr;
     std::string name = worker.unit->name;
@@ -8165,7 +8643,10 @@ bool Game::issueRepairCommand(
 }
 
 void Game::updateRepairing(float dt) {
-    for (Object &worker : objects_) {
+    for (uint32_t workerIndex :
+         repairerObjectIndices_) {
+        Object &worker =
+            objects_[(size_t)workerIndex];
         if (!worker.active || worker.hidden ||
             !worker.repairTargetId)
             continue;
@@ -8286,7 +8767,7 @@ Game::Object *Game::nextResourceLike(const Object &worker) {
     Object *best = nullptr;
     float bestDistance =
         std::numeric_limits<float>::max();
-    for (Object &candidate : objects_) {
+    for (Object &candidate : prefetched(objects_)) {
         if (!candidate.active || !isGatherable(candidate) || candidate.resourceAmount <= 0.001f)
             continue;
         if (candidate.player > 0 &&
@@ -8331,7 +8812,10 @@ Game::Object *Game::nextResourceLike(const Object &worker) {
 
 void Game::updateGathering(float dt) {
     bool depletedResource = false;
-    for (Object &worker : objects_) {
+    for (uint32_t workerIndex :
+         gathererObjectIndices_) {
+        Object &worker =
+            objects_[(size_t)workerIndex];
         if (!worker.active || worker.hidden ||
             !worker.unit ||
             (!worker.gatherTargetId &&
@@ -8766,7 +9250,7 @@ bool Game::canGarrison(const Object &unit,
 size_t Game::garrisonedCount(
     const Object &building, bool includeIncoming) const {
     size_t count = 0;
-    for (const Object &object : objects_)
+    for (const Object &object : prefetched(objects_))
         if (object.active &&
             (object.garrisonedInId ==
                  (int32_t)building.spawnId ||
@@ -8787,7 +9271,7 @@ float Game::animalNurseryFoodRate(
         !(nursery.unit->garrisonType & 16))
         return 0.0f;
     size_t animals = 0;
-    for (const Object &animal : objects_)
+    for (const Object &animal : prefetched(objects_))
         if (animal.active &&
             animal.garrisonedInId ==
                 (int32_t)nursery.spawnId &&
@@ -8994,7 +9478,24 @@ bool Game::issueGarrisonOrder(
 
 void Game::updateGarrisoning() {
     bool changed = false;
-    for (Object &building : objects_) {
+    // One pass collects the candidates of the three passes below (each pass
+    // re-checks the live state in object order, as the full scans did):
+    // buildings; units with a garrison order; units inside something or
+    // that may board this update.
+    std::vector<uint32_t> buildingCandidates, boardingCandidates, passengerCandidates;
+    for (size_t index = 0; index < objects_.size(); ++index) {
+        const Object &object = objects_[index];
+        prefetchObjectAhead(reinterpret_cast<const void *>(
+            reinterpret_cast<uintptr_t>(&object) + 6 * sizeof(Object)));
+        if (!object.active) continue;
+        if (object.unit && object.unit->type == dat::UT_Building)
+            buildingCandidates.push_back((uint32_t)index);
+        if (object.garrisonTargetId != 0) boardingCandidates.push_back((uint32_t)index);
+        if (object.garrisonTargetId != 0 || object.garrisonedInId >= 0)
+            passengerCandidates.push_back((uint32_t)index);
+    }
+    for (uint32_t buildingIndex : buildingCandidates) {
+        Object &building = objects_[buildingIndex];
         if (!building.active ||
             !building.unit ||
             building.unit->type !=
@@ -9017,7 +9518,8 @@ void Game::updateGarrisoning() {
                       ejected > 0;
         }
     }
-    for (Object &unit : objects_) {
+    for (uint32_t unitIndex : boardingCandidates) {
+        Object &unit = objects_[unitIndex];
         if (!unit.active || unit.hidden ||
             unit.garrisonTargetId == 0)
             continue;
@@ -9065,7 +9567,8 @@ void Game::updateGarrisoning() {
             *building, assets_.dat().garrisonSound);
     }
     // Passengers ride along inside their transport.
-    for (Object &unit : objects_) {
+    for (uint32_t unitIndex : passengerCandidates) {
+        Object &unit = objects_[unitIndex];
         if (!unit.active || unit.garrisonedInId < 0) continue;
         const Object *container = findObject((uint32_t)unit.garrisonedInId);
         if (!container || !container->active || !isTransport(*container)) continue;
@@ -9125,7 +9628,7 @@ bool Game::ejectGarrisonedUnit(
 
 size_t Game::ejectGarrisoned(Object &building) {
     size_t ejected = 0;
-    for (Object &unit : objects_)
+    for (Object &unit : prefetched(objects_))
         if (ejectGarrisonedUnit(
                 building, unit, ejected))
             ejected++;
@@ -9748,7 +10251,7 @@ bool Game::placeWallLine(int x1, int y1, int x2, int y2) {
     // map edge. A single post extends away from its only wall neighbour.
     if (!outOfMoney && !foundations.empty()) {
         auto objectOfClassAt = [&](int cls, int tx, int ty) {
-            for (const Object &o : objects_)
+            for (const Object &o : prefetched(objects_))
                 if (o.active && !o.hidden && o.unit->cls == cls &&
                     (int)std::floor(o.x) == tx && (int)std::floor(o.y) == ty)
                     return true;
@@ -9852,7 +10355,7 @@ int Game::gateVariantAt(int x0, int y0) const {
     // is our Y-line (frame 0), its y-line our X-line (frame 1), and its two
     // diagonals our (X+t, Y-t) (frame 3) and (X+t, Y+t) (frame 4).
     auto countAt = [&](int tx, int ty, int frame) {
-        for (const Object &o : objects_) {
+        for (const Object &o : prefetched(objects_)) {
             if (!o.active || o.hidden || (int)std::floor(o.x) != tx || (int)std::floor(o.y) != ty)
                 continue;
             if (o.unit->cls == 8) return 1;
@@ -9990,7 +10493,7 @@ bool Game::placementValid(const dat::Unit &unit, float x, float y,
         // Own wall pieces under the gate are replaced by it.
         const float hx = placementHalfSize(unit, 0);
         const float hy = placementHalfSize(unit, 1);
-        for (Object &o : objects_)
+        for (Object &o : prefetched(objects_))
             if (o.active && !o.hidden && o.player == localPlayer_ && o.unit->cls == 6 &&
                 std::abs(o.x - x) < hx && std::abs(o.y - y) < hy)
                 walls.push_back(&o);
@@ -10122,7 +10625,7 @@ void Game::updateConstruction(float dt) {
             building.player == localPlayer_;
         size_t workingBuilders = 0;
         float workRateFactor = 0.0f;
-        for (Object &builder : objects_) {
+        for (Object &builder : prefetched(objects_)) {
             if (!builder.active ||
                 builder.constructionTargetId !=
                     building.spawnId)
@@ -10223,7 +10726,7 @@ void Game::updateConstruction(float dt) {
             playWorldUnitSound(building,
                                building.unit->constructionSound);
         std::vector<uint32_t> builders;
-        for (Object &builder : objects_)
+        for (Object &builder : prefetched(objects_))
             if (builder.constructionTargetId ==
                 building.spawnId) {
                 builders.push_back(builder.spawnId);
@@ -10738,13 +11241,13 @@ void Game::eliminatePlayer(
         !players_[(size_t)player - 1]
              .active)
         return;
-    for (Object &object : objects_)
+    for (Object &object : prefetched(objects_))
         if (object.active &&
             object.player == player &&
             !isHolocron(object))
             releaseHolocronsForRemoval(
                 object);
-    for (Object &object : objects_) {
+    for (Object &object : prefetched(objects_)) {
         if (!object.active ||
             object.player != player)
             continue;
@@ -10798,35 +11301,86 @@ void Game::updateConquest(float dt) {
         return;
     conquestCheckTime_ = 0.5f;
 
+    std::array<bool, 17> hasAssets{};
+    std::array<int, 17> commandCenters{};
+    std::array<int, 17> workers{};
+    std::array<int, 17> military{};
+    std::array<int, 17> militaryBuildings{};
+    std::array<float, 17> strength{};
+    std::array<float, 17> totalStrength{};
+    const bool evaluateSurrender =
+        campaignArchive_.empty();
+    for (const Object &object :
+         prefetched(objects_)) {
+        if (!object.active ||
+            object.player <= 0 ||
+            object.player >= 17 ||
+            !object.unit)
+            continue;
+        const size_t playerIndex =
+            (size_t)object.player;
+        totalStrength[playerIndex] +=
+            aiObjectStrength(object);
+        if (object.annexParentId == 0 &&
+            object.carcassClass < 0) {
+            if (victoryCondition_ ==
+                SkirmishVictory::CommandCenter) {
+                if (object.unit->name.rfind(
+                        "BLDG-MAIN", 0) == 0 ||
+                    object.unit->name2.rfind(
+                        "BLDG-MAIN", 0) == 0)
+                    hasAssets[playerIndex] = true;
+            } else if (object.unit->type >=
+                       dat::UT_Combatant) {
+                hasAssets[playerIndex] = true;
+            }
+        }
+        if (!evaluateSurrender)
+            continue;
+        if (isWorker(object))
+            workers[playerIndex]++;
+        if (canAttack(object) &&
+            object.unit->type !=
+                dat::UT_Building) {
+            military[playerIndex]++;
+            strength[playerIndex] +=
+                aiObjectStrength(object);
+        }
+        if (object.unit->type !=
+            dat::UT_Building)
+            continue;
+        const std::string name =
+            normalizeAiSymbol(
+                object.unit->name2.empty()
+                    ? object.unit->name
+                    : object.unit->name2);
+        if (name.rfind(
+                "bldg-main", 0) == 0)
+            commandCenters[playerIndex]++;
+        const std::vector<
+            const dat::Unit *>
+            options =
+                productionOptions(object);
+        if (std::any_of(
+                options.begin(),
+                options.end(),
+                [](const dat::Unit *unit) {
+                    return unit &&
+                           unit->type >=
+                               dat::UT_Combatant &&
+                           unit->cls != 58 &&
+                           !unit->attacks.empty();
+                }))
+            militaryBuildings[
+                playerIndex]++;
+    }
     for (int player = 1;
          player <= (int)players_.size();
          ++player) {
         if (!players_[(size_t)player - 1]
                  .active)
             continue;
-        const bool hasAssets =
-            std::any_of(
-                objects_.begin(),
-                objects_.end(),
-                [&](const Object &object) {
-                    if (!object.active ||
-                        object.player != player ||
-                        !object.unit ||
-                        object.annexParentId != 0 ||
-                        object.carcassClass >= 0)
-                        return false;
-                    if (victoryCondition_ ==
-                        SkirmishVictory::CommandCenter)
-                        return object.unit->name.rfind(
-                                   "BLDG-MAIN", 0) ==
-                                   0 ||
-                               object.unit->name2.rfind(
-                                   "BLDG-MAIN", 0) ==
-                                   0;
-                    return object.unit->type >=
-                           dat::UT_Combatant;
-                });
-        if (!hasAssets)
+        if (!hasAssets[(size_t)player])
             eliminatePlayer(
                 player, false);
     }
@@ -10837,9 +11391,10 @@ void Game::updateConquest(float dt) {
         return;
     }
 
-    for (int player = 1;
-         player <= (int)players_.size();
-         ++player) {
+    if (evaluateSurrender)
+      for (int player = 1;
+           player <= (int)players_.size();
+           ++player) {
         if (player == localPlayer_ ||
             !players_[(size_t)player - 1]
                  .active ||
@@ -10848,79 +11403,28 @@ void Game::updateConquest(float dt) {
             (size_t)player >=
                 aiPlayers_.size())
             continue;
-        int commandCenters = 0;
-        int workers = 0;
-        int military = 0;
-        int militaryBuildings = 0;
-        float ownStrength = 0.0f;
-        for (const Object &object :
-             objects_) {
-            if (!object.active ||
-                object.player != player ||
-                !object.unit)
-                continue;
-            if (isWorker(object))
-                workers++;
-            if (canAttack(object) &&
-                object.unit->type !=
-                    dat::UT_Building) {
-                military++;
-                ownStrength +=
-                    aiObjectStrength(object);
-            }
-            if (object.unit->type ==
-                dat::UT_Building) {
-                const std::string name =
-                    normalizeAiSymbol(
-                        object.unit->name2
-                                .empty()
-                            ? object.unit->name
-                            : object.unit->name2);
-                if (name.rfind(
-                        "bldg-main", 0) ==
-                    0)
-                    commandCenters++;
-                const std::vector<
-                    const dat::Unit *>
-                    options =
-                        productionOptions(
-                            object);
-                if (std::any_of(
-                        options.begin(),
-                        options.end(),
-                        [](const dat::Unit
-                               *unit) {
-                            return unit &&
-                                   unit->type >=
-                                       dat::UT_Combatant &&
-                                   unit->cls !=
-                                       58 &&
-                                   !unit->attacks
-                                        .empty();
-                        }))
-                    militaryBuildings++;
-            }
-        }
         float enemyStrength = 0.0f;
-        for (const Object &enemy :
-             objects_)
-            if (enemy.active &&
-                enemy.player > 0 &&
-                !isFriendlyPlayer(
-                    player,
-                    enemy.player))
+        for (int enemy = 1;
+             enemy <= (int)players_.size();
+             ++enemy)
+            if (!isFriendlyPlayer(
+                    player, enemy))
                 enemyStrength +=
-                    aiObjectStrength(enemy);
+                    totalStrength[
+                        (size_t)enemy];
         const bool economyCollapsed =
-            commandCenters == 0 &&
-            workers < 3 &&
-            militaryBuildings == 0;
+            commandCenters[(size_t)player] ==
+                0 &&
+            workers[(size_t)player] < 3 &&
+            militaryBuildings[
+                (size_t)player] == 0;
         const bool outmatched =
-            military < 4 &&
+            military[(size_t)player] < 4 &&
             enemyStrength >
                 std::max(
                     1.0f,
-                    ownStrength * 4.0f);
+                    strength[(size_t)player] *
+                        4.0f);
         AiPlayerState &state =
             aiPlayers_[(size_t)player];
         if (economyCollapsed &&
@@ -10931,7 +11435,7 @@ void Game::updateConquest(float dt) {
         if (state.surrenderTime >= 15.0f)
             eliminatePlayer(
                 player, true);
-    }
+      }
 
     bool activeEnemy = false;
     for (int player = 1;
@@ -10978,7 +11482,7 @@ int Game::playerScore(int player) const {
         researchedTechs_[(size_t)player]
             .size() *
         25.0f;
-    for (const Object &object : objects_) {
+    for (const Object &object : prefetched(objects_)) {
         if (!object.active ||
             object.player != player ||
             !object.unit ||
@@ -11134,8 +11638,14 @@ void Game::updateVictoryConditions(float dt) {
                         storedHolocronCount(
                             member);
                     if (!monument)
-                        for (const Object &object :
-                             objects_)
+                        for (uint32_t objectIndex :
+                             discoverableObjectIndices_) {
+                            if ((size_t)objectIndex >=
+                                objects_.size())
+                                continue;
+                            const Object &object =
+                                objects_[(size_t)
+                                             objectIndex];
                             if (object.active &&
                                 object.player ==
                                     member &&
@@ -11147,6 +11657,7 @@ void Game::updateVictoryConditions(float dt) {
                                 monument = true;
                                 break;
                             }
+                        }
                 }
         const bool holocronControl =
             canonical &&
@@ -11298,7 +11809,7 @@ void Game::activateCheat(size_t index, int screenW, int screenH) {
         break;
     case CheatAction::ForceBuild:
         forceBuildCheat_ = !forceBuildCheat_;
-        for (Object &object : objects_) {
+        for (Object &object : prefetched(objects_)) {
             if (object.active && !object.productionQueue.empty())
                 object.productionRemaining = 0.0f;
         }
@@ -11368,7 +11879,7 @@ void Game::activateCheat(size_t index, int screenW, int screenH) {
         break;
     case CheatAction::Technology: {
         std::vector<std::pair<Object *, float>> oldMaximums;
-        for (Object &object : objects_)
+        for (Object &object : prefetched(objects_))
             if (object.active &&
                 object.player == localPlayer_)
                 oldMaximums.push_back(
@@ -11396,7 +11907,7 @@ void Game::activateCheat(size_t index, int screenW, int screenH) {
 
 void Game::cycleSelectedAttackMode() {
     bool changed = false;
-    for (Object &object : objects_) {
+    for (Object &object : prefetched(objects_)) {
         if (!object.selected || !isSelectable(object) || !canAttack(object)) continue;
         switch (object.attackMode) {
         case AttackMode::Aggressive:
@@ -11539,7 +12050,7 @@ void Game::issueAttack(Object &source, Object &target, float approachAngle,
                     false))
                 continue;
             bool occupied = false;
-            for (const Object &other : objects_) {
+            for (const Object &other : prefetched(objects_)) {
                 if (&other == &source ||
                     !other.active ||
                     other.hidden ||
@@ -11673,7 +12184,7 @@ void Game::retryAttackApproach(Object &source) {
                 source.attackApproachDistance,
                 source.targetX, source.targetY);
             bool occupied = false;
-            for (const Object &other : objects_) {
+            for (const Object &other : prefetched(objects_)) {
                 if (&other == &source ||
                     !other.active ||
                     other.player != source.player ||
@@ -11776,25 +12287,61 @@ void Game::acquireAutomaticTarget(Object &source) {
 // effects applied: type 1 sets (b == 0) or adds (b != 0) d, type 6 multiplies.
 float Game::playerAttribute(int player, int attribute) const {
     const int civilization = civilizationForPlayer(player);
-    float value = 0.0f;
-    if (civilization >= 0 && (size_t)civilization < assets_.dat().civs.size()) {
-        const auto &base = assets_.dat().civs[(size_t)civilization].resources;
-        if (attribute >= 0 && (size_t)attribute < base.size()) value = base[(size_t)attribute];
+    if (player < 0 || (size_t)player >= researchedTechs_.size()) {
+        float value = 0.0f;
+        if (civilization >= 0 && (size_t)civilization < assets_.dat().civs.size()) {
+            const auto &base = assets_.dat().civs[(size_t)civilization].resources;
+            if (attribute >= 0 && (size_t)attribute < base.size()) value = base[(size_t)attribute];
+        }
+        return value;
     }
-    if (player < 0 || (size_t)player >= researchedTechs_.size()) return value;
-    for (int technologyId : researchedTechs_[(size_t)player]) {
-        if (technologyId < 0 || (size_t)technologyId >= assets_.dat().techs.size()) continue;
-        const dat::Tech &technology = assets_.dat().techs[(size_t)technologyId];
-        if (technology.effectId < 0 || (size_t)technology.effectId >= assets_.dat().effects.size())
-            continue;
-        for (const dat::EffectCommand &command :
-             assets_.dat().effects[(size_t)technology.effectId].commands) {
-            if (command.a != attribute) continue;
-            if (command.type == 1) value = command.b ? value + command.d : command.d;
-            else if (command.type == 6) value *= command.d;
+    // Attributes only change when the player's researched set (techGeneration_)
+    // or civilization changes, so fold every researched effect once and reuse
+    // the table. Effects apply in the same tech/command order as before.
+    std::vector<float> &values = attributeCache_[(size_t)player];
+    if (attributeCacheGeneration_[(size_t)player] != techGeneration_ ||
+        attributeCacheCivilization_[(size_t)player] != civilization) {
+        attributeCacheGeneration_[(size_t)player] = techGeneration_;
+        attributeCacheCivilization_[(size_t)player] = civilization;
+        values.clear();
+        if (civilization >= 0 && (size_t)civilization < assets_.dat().civs.size())
+            values = assets_.dat().civs[(size_t)civilization].resources;
+        for (int technologyId : researchedTechs_[(size_t)player]) {
+            if (technologyId < 0 || (size_t)technologyId >= assets_.dat().techs.size()) continue;
+            const dat::Tech &technology = assets_.dat().techs[(size_t)technologyId];
+            if (technology.effectId < 0 || (size_t)technology.effectId >= assets_.dat().effects.size())
+                continue;
+            for (const dat::EffectCommand &command :
+                 assets_.dat().effects[(size_t)technology.effectId].commands) {
+                if ((command.type != 1 && command.type != 6) || command.a < 0 ||
+                    command.a >= 4096)
+                    continue;
+                if ((size_t)command.a >= values.size()) values.resize((size_t)command.a + 1, 0.0f);
+                float &value = values[(size_t)command.a];
+                if (command.type == 1) value = command.b ? value + command.d : command.d;
+                else value *= command.d;
+            }
         }
     }
-    return value;
+    if (attribute < 0 || (size_t)attribute >= values.size()) {
+        if (attribute < 4096) return 0.0f;
+        // Out-of-table ids: keep the original uncached semantics.
+        float value = 0.0f;
+        for (int technologyId : researchedTechs_[(size_t)player]) {
+            if (technologyId < 0 || (size_t)technologyId >= assets_.dat().techs.size()) continue;
+            const dat::Tech &technology = assets_.dat().techs[(size_t)technologyId];
+            if (technology.effectId < 0 || (size_t)technology.effectId >= assets_.dat().effects.size())
+                continue;
+            for (const dat::EffectCommand &command :
+                 assets_.dat().effects[(size_t)technology.effectId].commands) {
+                if (command.a != attribute) continue;
+                if (command.type == 1) value = command.b ? value + command.d : command.d;
+                else if (command.type == 6) value *= command.d;
+            }
+        }
+        return value;
+    }
+    return values[(size_t)attribute];
 }
 
 // Farms have no sprite (their SLPs are placeholders): the original paints
@@ -11852,7 +12399,7 @@ void Game::killObject(Object &object, bool countKill) {
         object.active) {
         const bool transport = isTransport(object);
         if (!transport) ejectGarrisoned(object);
-        for (Object &passenger : objects_)
+        for (Object &passenger : prefetched(objects_))
             if (passenger.active && passenger.garrisonedInId == (int32_t)object.spawnId) {
                 passenger.garrisonedInId = -1;
                 passenger.hidden = false;
@@ -11871,7 +12418,7 @@ void Game::killObject(Object &object, bool countKill) {
     // (building set_state 0x554710 forwards to every annex), so they die
     // with it.
     if (object.unit->type == dat::UT_Building && object.spawnId) {
-        for (Object &part : objects_)
+        for (Object &part : prefetched(objects_))
             if (part.active && &part != &object && part.annexParentId == object.spawnId)
                 killObject(part, false);
     }
@@ -11882,7 +12429,7 @@ void Game::killObject(Object &object, bool countKill) {
             if (annex.unitId < 0) continue;
             const float ax = object.x + annex.misplacementY;
             const float ay = object.y - annex.misplacementX;
-            for (Object &part : objects_)
+            for (Object &part : prefetched(objects_))
                 if (part.active && &part != &object && part.player == object.player &&
                     part.unit && part.unit->id == annex.unitId &&
                     std::abs(part.x - ax) < 0.05f && std::abs(part.y - ay) < 0.05f) {
@@ -11958,7 +12505,7 @@ bool Game::transferOwnership(
         stopUnit(object);
     dropHolocron(object);
     size_t ejectionOffset = 0;
-    for (Object &passenger : objects_)
+    for (Object &passenger : prefetched(objects_))
         if (&passenger != &object &&
             passenger.active &&
             !isHolocron(passenger) &&
@@ -11982,7 +12529,7 @@ bool Game::transferOwnership(
          object.unit->type ==
              dat::UT_Building);
 
-    for (Object &other : objects_) {
+    for (Object &other : prefetched(objects_)) {
         if (!other.active || &other == &object)
             continue;
         if (other.annexParentId ==
@@ -12432,7 +12979,7 @@ float Game::buildingProjectileTotal(const Object &building) const {
     float total = building.unit->totalProjectiles;
     const float own = garrisonFirePower(*building.unit);
     if (own <= 0) return total;
-    for (const Object &unit : objects_)
+    for (const Object &unit : prefetched(objects_))
         if (unit.active && unit.garrisonedInId == (int)building.spawnId &&
             unit.unit->type == dat::UT_Creatable)
             total += garrisonFirePower(*unit.unit) / own;
@@ -12616,7 +13163,7 @@ void Game::applyBlast(uint32_t sourceId, int sourcePlayer, float x, float y, uin
     std::uniform_real_distribution<float>
         percent(0.0f, 100.0f);
     std::vector<uint32_t> victims;
-    for (const Object &other : objects_) {
+    for (const Object &other : prefetched(objects_)) {
         if (!other.active || other.hidden || !other.unit || other.spawnId == primaryId ||
             other.spawnId == sourceId ||
             other.unit->type < dat::UT_Combatant || other.carcassClass >= 0 || isAirUnit(other))
@@ -13030,7 +13577,7 @@ bool Game::terrainPassable(const Object &object, float x, float y) const {
     if (restriction < 0 || (size_t)restriction >= restrictions.size()) return false;
     const auto &multipliers =
         restrictions[(size_t)restriction].passableBuildableDmgMultiplier;
-    const int terrain = terrainAt((int)std::floor(x), (int)std::floor(y));
+    const int terrain = terrainAt(fastFloor(x), fastFloor(y));
     return terrain >= 0 && (size_t)terrain < multipliers.size() &&
            multipliers[(size_t)terrain] > 0.0f;
 }
@@ -13119,42 +13666,83 @@ bool Game::detourAround(Object &object, float goalX, float goalY) {
     const int goalCY = (int)std::lround((ty - originY) / kStep);
     std::vector<uint8_t> open(kSize * kSize, 0);
     const float radius = collisionRadius(object);
+    // Only units near the window can block one of its cells: drop the rest
+    // up front (same blockers, same order) instead of testing every mobile
+    // unit for each of the 33x33 cells.
+    std::vector<uint32_t> nearby;
+    {
+        const float windowMaxX = originX + (kSize - 1) * kStep;
+        const float windowMaxY = originY + (kSize - 1) * kStep;
+        for (uint32_t index : mobileObjectIndices_) {
+            const Object &other = objects_[(size_t)index];
+            if (&other == &object || !other.active || other.hidden ||
+                isAirUnit(other) != isAirUnit(object))
+                continue;
+            const float reach = radius + collisionRadius(other) + 0.05f + 0.01f;
+            if (other.x < originX - reach || other.x > windowMaxX + reach ||
+                other.y < originY - reach || other.y > windowMaxY + reach)
+                continue;
+            nearby.push_back(index);
+        }
+    }
+    // A cell is open when it is statically passable and no nearby unit is
+    // within separation of it. Each unit only marks the cells around it
+    // (a cell further than one step outside its separation box cannot pass
+    // the distance test), with the same per-cell test as before.
+    std::vector<uint8_t> unitBlocked(kSize * kSize, 0);
+    for (uint32_t index : nearby) {
+        const Object &other = objects_[(size_t)index];
+        if (&other == &object || !other.active || other.hidden ||
+            isAirUnit(other) != isAirUnit(object))
+            continue;
+        const float sep = radius + collisionRadius(other) + 0.05f;
+        const int minCX = std::max(0, (int)std::floor((other.x - sep - originX) / kStep) - 1);
+        const int maxCX = std::min(kSize - 1, (int)std::ceil((other.x + sep - originX) / kStep) + 1);
+        const int minCY = std::max(0, (int)std::floor((other.y - sep - originY) / kStep) - 1);
+        const int maxCY = std::min(kSize - 1, (int)std::ceil((other.y + sep - originY) / kStep) + 1);
+        for (int cy = minCY; cy <= maxCY; cy++)
+            for (int cx = minCX; cx <= maxCX; cx++) {
+                uint8_t &blocked = unitBlocked[cy * kSize + cx];
+                if (blocked) continue;
+                float x, y;
+                cellPos(cx, cy, x, y);
+                const float dx = x - other.x, dy = y - other.y;
+                if (dx * dx + dy * dy < sep * sep) blocked = 1;
+            }
+    }
     for (int cy = 0; cy < kSize; cy++)
         for (int cx = 0; cx < kSize; cx++) {
             float x, y;
             cellPos(cx, cy, x, y);
-            bool ok = staticPassableAt(object, x, y);
-            if (ok)
-                for (uint32_t index : mobileObjectIndices_) {
-                    const Object &other = objects_[(size_t)index];
-                    if (&other == &object || !other.active || other.hidden ||
-                        isAirUnit(other) != isAirUnit(object))
-                        continue;
-                    const float dx = x - other.x, dy = y - other.y;
-                    const float sep = radius + collisionRadius(other) + 0.05f;
-                    if (dx * dx + dy * dy < sep * sep) {
-                        ok = false;
-                        break;
-                    }
-                }
-            open[cy * kSize + cx] = ok;
+            open[cy * kSize + cx] =
+                !unitBlocked[cy * kSize + cx] && staticPassableAt(object, x, y);
         }
     const int start = kHalf * kSize + kHalf;
     open[start] = 1;
     std::vector<float> cost(kSize * kSize, 1e9f);
     std::vector<int> parent(kSize * kSize, -1);
+    // Heap order depends only on f, so carrying the cell coordinates in the
+    // node (no divide per pop: ARM has none) leaves the search unchanged.
     struct Node {
         float f;
         int i;
+        int16_t cx, cy;
         bool operator<(const Node &o) const { return f > o.f; }
     };
     std::priority_queue<Node> queue;
+    // h(i) memoized per cell (same expression, computed once).
+    std::array<float, kSize * kSize> hMemo;
+    hMemo.fill(-1.0f);
     auto h = [&](int i) {
-        const float dx = (float)(i % kSize - goalCX), dy = (float)(i / kSize - goalCY);
-        return std::sqrt(dx * dx + dy * dy);
+        float &memo = hMemo[(size_t)i];
+        if (memo < 0.0f) {
+            const float dx = (float)(i % kSize - goalCX), dy = (float)(i / kSize - goalCY);
+            memo = std::sqrt(dx * dx + dy * dy);
+        }
+        return memo;
     };
     cost[start] = 0;
-    queue.push({h(start), start});
+    queue.push({h(start), start, (int16_t)kHalf, (int16_t)kHalf});
     int best = start;
     float bestH = h(start);
     static const int dirs[8][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1},
@@ -13169,7 +13757,7 @@ bool Game::detourAround(Object &object, float goalX, float goalY) {
             best = n.i;
         }
         if (hh < 0.5f) break;
-        const int cx = n.i % kSize, cy = n.i / kSize;
+        const int cx = n.cx, cy = n.cy;
         for (const auto &d : dirs) {
             const int nx = cx + d[0], ny = cy + d[1];
             if (nx < 0 || ny < 0 || nx >= kSize || ny >= kSize) continue;
@@ -13181,7 +13769,7 @@ bool Game::detourAround(Object &object, float goalX, float goalY) {
             if (nc >= cost[ni]) continue;
             cost[ni] = nc;
             parent[ni] = n.i;
-            queue.push({nc + h(ni), ni});
+            queue.push({nc + h(ni), ni, (int16_t)nx, (int16_t)ny});
         }
     }
     // Only take the detour if it makes real progress toward the goal.
@@ -13368,7 +13956,7 @@ bool Game::positionPassable(
                 : std::max(
                       0.05f,
                       object.unit->collisionSize[1]);
-        for (const Object &other : objects_) {
+        for (const Object &other : prefetched(objects_)) {
             if (!other.active || other.hidden || !other.gate || &other == &object) continue;
             if (placementIgnore_ &&
                 std::find(placementIgnore_->begin(), placementIgnore_->end(), &other) !=
@@ -13501,10 +14089,10 @@ bool Game::segmentClear(const Object &object, float ax, float ay, float bx,
             y >= mapSize_ - radius || !terrainPassable(object, x, y))
             return false;
         if (!air) {
-            const int minX = std::max(0, (int)std::floor(std::min(prevX, x) - radius));
-            const int maxX = std::min(mapSize_ - 1, (int)std::floor(std::max(prevX, x) + radius));
-            const int minY = std::max(0, (int)std::floor(std::min(prevY, y) - radius));
-            const int maxY = std::min(mapSize_ - 1, (int)std::floor(std::max(prevY, y) + radius));
+            const int minX = std::max(0, fastFloor(std::min(prevX, x) - radius));
+            const int maxX = std::min(mapSize_ - 1, fastFloor(std::max(prevX, x) + radius));
+            const int minY = std::max(0, fastFloor(std::min(prevY, y) - radius));
+            const int maxY = std::min(mapSize_ - 1, fastFloor(std::max(prevY, y) + radius));
             for (int cellY = minY; cellY <= maxY; cellY++)
                 for (int cellX = minX; cellX <= maxX; cellX++)
                     for (uint32_t index :
@@ -13529,10 +14117,10 @@ bool Game::staticPassableAt(const Object &object, float x, float y) const {
         y >= mapSize_ - radius || !terrainPassable(object, x, y))
         return false;
     if (isAirUnit(object)) return true;
-    const int minX = std::max(0, (int)std::floor(x - radius));
-    const int maxX = std::min(mapSize_ - 1, (int)std::floor(x + radius));
-    const int minY = std::max(0, (int)std::floor(y - radius));
-    const int maxY = std::min(mapSize_ - 1, (int)std::floor(y + radius));
+    const int minX = std::max(0, fastFloor(x - radius));
+    const int maxX = std::min(mapSize_ - 1, fastFloor(x + radius));
+    const int minY = std::max(0, fastFloor(y - radius));
+    const int maxY = std::min(mapSize_ - 1, fastFloor(y + radius));
     for (int cellY = minY; cellY <= maxY; cellY++)
         for (int cellX = minX; cellX <= maxX; cellX++)
             for (uint32_t index :
@@ -13547,6 +14135,45 @@ bool Game::staticPassableAt(const Object &object, float x, float y) const {
                     return false;
             }
     return true;
+}
+
+std::pair<uint64_t, uint64_t> Game::pathGridSignature(const Object &object) const {
+    uint64_t a = 1469598103934665603ull, b = 0x9e3779b97f4a7c15ull;
+    auto mix = [&](uint64_t v) {
+        a = (a ^ v) * 1099511628211ull;
+        b = (b + v + 0x632be59bd9b4e019ull) * 0xff51afd7ed558ccdull;
+        b ^= b >> 29;
+    };
+    auto mixFloat = [&](float f) {
+        uint32_t bits;
+        std::memcpy(&bits, &f, sizeof bits);
+        mix(bits);
+    };
+    const bool air = isAirUnit(object);
+    mix((uint64_t)(uint32_t)object.unit->terrainRestriction);
+    mix(air ? 1 : 0);
+    mixFloat(collisionRadius(object));
+    mix((uint64_t)(uint32_t)mapSize_);
+    for (size_t i = 0; i < terrain_.size(); i += 8) {
+        uint64_t word = 0;
+        std::memcpy(&word, terrain_.data() + i, std::min<size_t>(8, terrain_.size() - i));
+        mix(word);
+    }
+    for (uint32_t index : staticObstructionIndices_) {
+        const Object &other = objects_[(size_t)index];
+        mix(index);
+        mix((uint64_t)(other.active ? 1 : 0) | (other.hidden ? 2 : 0) | (other.gate ? 4 : 0) |
+            (&other == &object ? 8 : 0) |
+            (other.gate && gateBlocks(other, object) ? 16 : 0));
+        mix((uint64_t)(uintptr_t)other.unit);
+        mixFloat(other.x);
+        mixFloat(other.y);
+    }
+    for (const std::vector<uint32_t> &cell : staticObstructionCells_) {
+        mix(cell.size());
+        for (uint32_t index : cell) mix(index);
+    }
+    return {a, b};
 }
 
 // Long-range path (see pathfinding.h for how it mirrors the original).
@@ -13574,38 +14201,129 @@ bool Game::findPath(const Object &object, float targetX, float targetY,
         entry.air = air;
         entry.player = object.player;
         entry.radiusHundredths = radiusHundredths;
-        // A tile is blocked when its centre lies inside a static footprint
-        // that blocks this player (buildings, trees, walls, closed gates).
-        std::vector<uint8_t> blocked((size_t)mapSize_ * mapSize_, 0);
-        if (!air)
-            for (uint32_t index : staticObstructionIndices_) {
-                const Object &other = objects_[(size_t)index];
-                if (!other.active || other.hidden) continue;
-                if (other.gate && !gateBlocks(other, object)) continue;
-                const float halfX = std::max(0.05f, other.unit->collisionSize[0]);
-                const float halfY = std::max(0.05f, other.unit->collisionSize[1]);
-                const int minX = std::max(0, (int)std::floor(other.x - halfX));
-                const int maxX = std::min(mapSize_ - 1, (int)std::floor(other.x + halfX));
-                const int minY = std::max(0, (int)std::floor(other.y - halfY));
-                const int maxY = std::min(mapSize_ - 1, (int)std::floor(other.y + halfY));
-                for (int y = minY; y <= maxY; y++)
-                    for (int x = minX; x <= maxX; x++)
-                        if (std::abs(x + 0.5f - other.x) < halfX &&
-                            std::abs(y + 0.5f - other.y) < halfY)
-                            blocked[(size_t)y * mapSize_ + x] = 1;
-            }
-        // ...and a unit must also fit at the tile centre with its radius.
-        entry.finder.build(
-            mapSize_,
-            [&](int x, int y) {
-                return !blocked[(size_t)y * mapSize_ + x] &&
-                       staticPassableAt(object, x + 0.5f, y + 0.5f);
-            },
-            [&](int x, int y, int dir) {
-                return segmentClear(object, x + 0.5f, y + 0.5f,
-                                    x + 0.5f + (dir == 0 ? 1.0f : 0.0f),
-                                    y + 0.5f + (dir == 1 ? 1.0f : 0.0f));
+        const auto signatureStart = std::chrono::steady_clock::now();
+        const std::pair<uint64_t, uint64_t> signature = pathGridSignature(object);
+        auto phaseUs = [](std::chrono::steady_clock::time_point since) {
+            return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::steady_clock::now() - since)
+                .count();
+        };
+        pathGridPhaseUs_[0] += phaseUs(signatureStart);
+        auto stored = std::find_if(
+            pathGridStore_.begin(), pathGridStore_.end(),
+            [&](const StoredPathGrid &grid) {
+                return grid.signatureA == signature.first &&
+                       grid.signatureB == signature.second;
             });
+        if (stored != pathGridStore_.end()) {
+            entry.finder = stored->finder;
+        } else {
+            const auto buildStart = std::chrono::steady_clock::now();
+            // A tile is blocked when its centre lies inside a static footprint
+            // that blocks this player (buildings, trees, walls, closed gates).
+            std::vector<uint8_t> blocked((size_t)mapSize_ * mapSize_, 0);
+            if (!air)
+                for (uint32_t index : staticObstructionIndices_) {
+                    const Object &other = objects_[(size_t)index];
+                    if (!other.active || other.hidden) continue;
+                    if (other.gate && !gateBlocks(other, object)) continue;
+                    const float halfX = std::max(0.05f, other.unit->collisionSize[0]);
+                    const float halfY = std::max(0.05f, other.unit->collisionSize[1]);
+                    const int minX = std::max(0, (int)std::floor(other.x - halfX));
+                    const int maxX = std::min(mapSize_ - 1, (int)std::floor(other.x + halfX));
+                    const int minY = std::max(0, (int)std::floor(other.y - halfY));
+                    const int maxY = std::min(mapSize_ - 1, (int)std::floor(other.y + halfY));
+                    for (int y = minY; y <= maxY; y++)
+                        for (int x = minX; x <= maxX; x++)
+                            if (std::abs(x + 0.5f - other.x) < halfX &&
+                                std::abs(y + 0.5f - other.y) < halfY)
+                                blocked[(size_t)y * mapSize_ + x] = 1;
+                }
+            // Fast path for the edge test: segmentClear() between two tile
+            // centres only ever fails on the map border, on the terrain of the
+            // two tiles, or on a static footprint listed in a cell its swept
+            // box touches. With both tiles' terrain passable, the ends inside
+            // the border and no footprint in any of those cells, the answer is
+            // true without sampling; anything else takes the full test.
+            pathGridPhaseUs_[1] += phaseUs(buildStart);
+            const auto tablesStart = std::chrono::steady_clock::now();
+            const float radius = collisionRadius(object);
+            const size_t cells = (size_t)mapSize_ * mapSize_;
+            std::vector<uint8_t> terrainOk(cells, 0);
+            std::vector<uint32_t> occupied((size_t)(mapSize_ + 1) * (mapSize_ + 1), 0);
+            for (int y = 0; y < mapSize_; y++)
+                for (int x = 0; x < mapSize_; x++) {
+                    terrainOk[(size_t)y * mapSize_ + x] =
+                        terrainPassable(object, x + 0.5f, y + 0.5f) ? 1 : 0;
+                    const uint32_t here =
+                        air ? 0u
+                            : (staticObstructionCells_.size() == cells &&
+                                       !staticObstructionCells_[(size_t)y * mapSize_ + x].empty()
+                                   ? 1u
+                                   : 0u);
+                    const size_t stride = (size_t)mapSize_ + 1;
+                    occupied[(size_t)(y + 1) * stride + x + 1] =
+                        here + occupied[(size_t)y * stride + x + 1] +
+                        occupied[(size_t)(y + 1) * stride + x] - occupied[(size_t)y * stride + x];
+                }
+            auto anyOccupied = [&](int x0, int y0, int x1, int y1) {
+                x0 = std::max(0, x0);
+                y0 = std::max(0, y0);
+                x1 = std::min(mapSize_ - 1, x1);
+                y1 = std::min(mapSize_ - 1, y1);
+                if (x0 > x1 || y0 > y1) return false;
+                const size_t stride = (size_t)mapSize_ + 1;
+                return occupied[(size_t)(y1 + 1) * stride + x1 + 1] -
+                           occupied[(size_t)y0 * stride + x1 + 1] -
+                           occupied[(size_t)(y1 + 1) * stride + x0] +
+                           occupied[(size_t)y0 * stride + x0] !=
+                       0;
+            };
+            pathGridPhaseUs_[2] += phaseUs(tablesStart);
+            const auto finderStart = std::chrono::steady_clock::now();
+            // ...and a unit must also fit at the tile centre with its radius.
+            entry.finder.build(
+                mapSize_,
+                [&](int x, int y) {
+                    if (blocked[(size_t)y * mapSize_ + x]) return false;
+                    // staticPassableAt without the footprint scan when no
+                    // static footprint is listed in any cell it would visit.
+                    const float px = x + 0.5f, py = y + 0.5f;
+                    if (px < radius || py < radius || px >= mapSize_ - radius ||
+                        py >= mapSize_ - radius || !terrainOk[(size_t)y * mapSize_ + x])
+                        return false;
+                    if (air || !anyOccupied(fastFloor(px - radius), fastFloor(py - radius),
+                                            fastFloor(px + radius), fastFloor(py + radius)))
+                        return true;
+                    return staticPassableAt(object, px, py);
+                },
+                [&](int x, int y, int dir) {
+                    const float ax = x + 0.5f, ay = y + 0.5f;
+                    const float bx = ax + (dir == 0 ? 1.0f : 0.0f);
+                    const float by = ay + (dir == 1 ? 1.0f : 0.0f);
+                    const int nx = x + (dir == 0 ? 1 : 0), ny = y + (dir == 1 ? 1 : 0);
+                    if (nx < mapSize_ && ny < mapSize_ &&
+                        terrainOk[(size_t)y * mapSize_ + x] &&
+                        terrainOk[(size_t)ny * mapSize_ + nx] &&
+                        ax >= radius && ay >= radius &&
+                        bx < mapSize_ - radius && by < mapSize_ - radius &&
+                        !anyOccupied(fastFloor(ax - radius), fastFloor(ay - radius),
+                                     fastFloor(bx + radius), fastFloor(by + radius)))
+                        return true;
+                    return segmentClear(object, ax, ay, bx, by);
+                });
+            pathGridPhaseUs_[3] += phaseUs(finderStart);
+            StoredPathGrid grid;
+            grid.signatureA = signature.first;
+            grid.signatureB = signature.second;
+            grid.finder = entry.finder;
+            if (pathGridStore_.size() >= 24) pathGridStore_.erase(pathGridStore_.begin());
+            pathGridStore_.push_back(std::move(grid));
+            pathGridBuilds_++;
+            pathGridBuildUs_ += (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now() - buildStart)
+                                    .count();
+        }
         pathGridCache_.push_back(std::move(entry));
         cache = pathGridCache_.end() - 1;
     }
@@ -13621,6 +14339,16 @@ bool Game::findPath(const Object &object, float targetX, float targetY,
         goal.range = collisionRadius(object) + std::max(0.0f, clearance);
     }
     std::vector<std::array<float, 2>> tiles;
+    const auto findStart = std::chrono::steady_clock::now();
+    struct FindTimer {
+        std::chrono::steady_clock::time_point start;
+        uint64_t &total;
+        ~FindTimer() {
+            total += (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                         std::chrono::steady_clock::now() - start)
+                         .count();
+        }
+    } findTimer{findStart, pathFindUs_};
     PathResult result =
         cache->finder.find(object.x, object.y, goal, tiles, 30000,
                            [&](int x, int y) {
@@ -14694,7 +15422,7 @@ int Game::instructionPlayer(
                        candidate.substr(
                            candidateSpace + 1);
         };
-    for (const Object &object : objects_) {
+    for (const Object &object : prefetched(objects_)) {
         if (!object.active || !object.unit ||
             object.player <= 0)
             continue;
@@ -14737,6 +15465,63 @@ void Game::queueInstruction(
     log("instruction: " + text);
 }
 
+void Game::buildTriggerObjectSnapshot() {
+    for (auto &bucket : triggerObjectBuckets_) bucket.clear();
+    triggerObjectOther_.clear();
+    if (triggerTypeBitsByObject_.size() != objects_.size())
+        triggerTypeBitsByObject_.resize(objects_.size(), {nullptr, 0});
+    // Only the players some object-count condition asks about need entries
+    // (countMatching reads a single bucket when the condition names a player).
+    std::array<bool, 18> bucketNeeded{};
+    bool allNeeded = false;
+    for (const ScenarioTrigger &trigger : triggers_)
+        for (const ScenarioCondition &condition : trigger.conditions) {
+            if (condition.type != 3 && condition.type != 4 && condition.type != 5) continue;
+            const int player = triggerField(condition.fields, 5);
+            if (player < 0 || (size_t)player >= bucketNeeded.size()) allNeeded = true;
+            else bucketNeeded[(size_t)player] = true;
+        }
+    for (size_t objectIndex = 0; objectIndex < objects_.size(); ++objectIndex) {
+        const Object &object = objects_[objectIndex];
+        prefetchObjectAhead(reinterpret_cast<const void *>(reinterpret_cast<uintptr_t>(&object) + 6 * sizeof(Object)));
+        if (!object.active || !object.triggerAddressable) continue;
+        if (!allNeeded &&
+            (object.player < 0 || (size_t)object.player >= bucketNeeded.size() ||
+             !bucketNeeded[(size_t)object.player]))
+            continue;
+        TriggerObjectEntry entry;
+        entry.x = object.x;
+        entry.y = object.y;
+        entry.player = object.player;
+        entry.unitId = object.unit->id;
+        entry.cls = object.unit->cls;
+        entry.hidden = object.hidden;
+        // The type bits depend only on the (immutable) unit definition.
+        auto &perObject = triggerTypeBitsByObject_[objectIndex];
+        if (perObject.first == object.unit) {
+            entry.typeBits = perObject.second;
+        } else {
+        auto memo = triggerTypeBits_.find(object.unit);
+        if (memo == triggerTypeBits_.end()) {
+            const bool building = object.unit->type == dat::UT_Building;
+            const bool civilian = object.unit->cls == 4 ||
+                                  object.unit->name.find("WORKER") != std::string::npos;
+            const bool military = !building && !civilian && object.unit->type >= dat::UT_Combatant;
+            memo = triggerTypeBits_.emplace(
+                object.unit,
+                (uint8_t)((building ? 1 : 0) | (civilian ? 2 : 0) | (military ? 4 : 0))).first;
+        }
+        entry.typeBits = memo->second;
+        perObject = {object.unit, memo->second};
+        }
+        if (object.player >= 0 && (size_t)object.player < triggerObjectBuckets_.size())
+            triggerObjectBuckets_[(size_t)object.player].push_back(entry);
+        else
+            triggerObjectOther_.push_back(entry);
+    }
+    triggerObjectsValid_ = true;
+}
+
 bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed) {
     const int amount = triggerField(condition.fields, 0);
     const int attribute = triggerField(condition.fields, 1);
@@ -14749,11 +15534,50 @@ bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed
     const int type = triggerField(condition.fields, 14);
 
     auto countMatching = [&](bool requireArea) {
+        if (!triggerObjectsValid_) buildTriggerObjectSnapshot();
+        // Same tests as objectMatches()/inSourceArea() on the snapshot.
         int count = 0;
-        for (const Object &object : objects_) {
-            if (!objectMatches(object, unitId, player, group, type)) continue;
-            if (requireArea && !inSourceArea(object, x1, y1, x2, y2)) continue;
-            count++;
+        const bool areaValid = !(x1 < 0 || y1 < 0 || x2 < 0 || y2 < 0);
+        if (requireArea && !areaValid) return 0;
+        const int minX = std::min(x1, x2), maxX = std::max(x1, x2);
+        const int minY = std::min(y1, y2), maxY = std::max(y1, y2);
+        auto scan = [&](const std::vector<TriggerObjectEntry> &entries) {
+            for (const TriggerObjectEntry &entry : entries) {
+                if (unitId >= 0 && entry.unitId != unitId) continue;
+                if (group >= 0 && entry.cls != group) continue;
+                if (type >= 0) {
+                    const bool building = entry.typeBits & 1;
+                    const bool civilian = entry.typeBits & 2;
+                    const bool military = entry.typeBits & 4;
+                    if (type == 2) { if (!building) continue; }
+                    else if (type == 3) { if (!civilian) continue; }
+                    else if (type == 4) { if (!military) continue; }
+                    else if (type == 1) { if (building || civilian || military) continue; }
+                    else continue;
+                }
+                if (requireArea) {
+                    if (entry.hidden) continue;
+                    const float sourceX = mapSize_ - entry.y;
+                    const float sourceY = entry.x;
+                    if (!(sourceX >= minX && sourceX <= maxX + 1.0f &&
+                          sourceY >= minY && sourceY <= maxY + 1.0f))
+                        continue;
+                }
+                count++;
+            }
+        };
+        if (player >= 0) {
+            if ((size_t)player < triggerObjectBuckets_.size()) {
+                scan(triggerObjectBuckets_[(size_t)player]);
+            } else {
+                std::vector<TriggerObjectEntry> same;
+                for (const TriggerObjectEntry &entry : triggerObjectOther_)
+                    if (entry.player == player) same.push_back(entry);
+                scan(same);
+            }
+        } else {
+            for (const auto &bucket : triggerObjectBuckets_) scan(bucket);
+            scan(triggerObjectOther_);
         }
         return count;
     };
@@ -14791,7 +15615,7 @@ bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed
             return object && object->active && object->selected;
         }
         int selected = 0;
-        for (const Object &object : objects_)
+        for (const Object &object : prefetched(objects_))
             if (object.selected && objectMatches(object, unitId, player, group, type))
                 selected++;
         return selected >= std::max(1, amount);
@@ -14845,7 +15669,7 @@ bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed
             technology < 0)
             return false;
         for (const Object &building :
-             objects_)
+             prefetched(objects_))
             if (building.active &&
                 building.player == player)
                 for (const ProductionItem &item :
@@ -14857,7 +15681,7 @@ bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed
     }
     case 18: {
         int count = 0;
-        for (const Object &object : objects_) {
+        for (const Object &object : prefetched(objects_)) {
             if (!object.active ||
                 object.garrisonedInId < 0 ||
                 !objectMatches(
@@ -14876,7 +15700,7 @@ bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed
         return difficulty_ == amount;
     case 20: {
         int count = 0;
-        for (const Object &object : objects_)
+        for (const Object &object : prefetched(objects_))
             if (object.underConstruction &&
                 objectMatches(
                     object, unitId, player,
@@ -14886,7 +15710,7 @@ bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed
     }
     case 21: {
         int selected = 0;
-        for (const Object &object : objects_)
+        for (const Object &object : prefetched(objects_))
             if (object.selected && objectMatches(object, unitId, player, group, type) &&
                 inSourceArea(object, x1, y1, x2, y2))
                 selected++;
@@ -14894,7 +15718,7 @@ bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed
     }
     case 22: {
         int count = 0;
-        for (const Object &object : objects_)
+        for (const Object &object : prefetched(objects_))
             if (objectMatches(
                     object, unitId, player,
                     group, type) &&
@@ -14906,7 +15730,7 @@ bool Game::conditionMet(const ScenarioCondition &condition, float triggerElapsed
     }
     case 23: {
         int count = 0;
-        for (const Object &object : objects_)
+        for (const Object &object : prefetched(objects_))
             if (object.active &&
                 object.player == player &&
                 object.productionPopulationBlocked)
@@ -15128,7 +15952,7 @@ void Game::executeEffect(const ScenarioEffect &effect) {
              effectTargets(effect)) {
             std::vector<uint32_t> passengers;
             for (const Object &object :
-                 objects_)
+                 prefetched(objects_))
                 if (object.active &&
                     object.garrisonedInId ==
                         (int32_t)container->spawnId)
@@ -15334,6 +16158,7 @@ void Game::executeEffect(const ScenarioEffect &effect) {
 
 void Game::updateTriggers(float dt) {
     if (triggers_.empty()) return;
+    triggerObjectsValid_ = false;
     for (size_t i = 0; i < triggerRuntime_.size(); i++)
         if (triggerRuntime_[i].enabled) triggerRuntime_[i].elapsed += dt;
     std::vector<bool> firedThisUpdate(triggers_.size(), false);
@@ -15383,6 +16208,7 @@ void Game::updateTriggers(float dt) {
             } else {
                 for (const ScenarioEffect &effect : trigger.effects) executeEffect(effect);
             }
+            triggerObjectsValid_ = false;
             firedAny = true;
         }
         if (!firedAny) return;
@@ -15602,7 +16428,7 @@ bool Game::selectObjectForTesting(uint32_t spawnId) {
     Object *target = findObject(spawnId);
     if (!target || !isInspectable(*target))
         return false;
-    for (Object &object : objects_)
+    for (Object &object : prefetched(objects_))
         object.selected = false;
     target->selected = true;
     selectionOrder_.clear();
@@ -15759,13 +16585,13 @@ void Game::groupMoveForTesting(const std::vector<uint32_t> &spawnIds,
 
 bool Game::selectObjectsForTesting(
     const std::vector<uint32_t> &spawnIds) {
-    for (Object &object : objects_)
+    for (Object &object : prefetched(objects_))
         object.selected = false;
     selectionOrder_.clear();
     for (uint32_t spawnId : spawnIds) {
         Object *target = findObject(spawnId);
         if (!target || !isSelectable(*target)) {
-            for (Object &object : objects_)
+            for (Object &object : prefetched(objects_))
                 object.selected = false;
             selectionOrder_.clear();
             return false;
@@ -15779,70 +16605,136 @@ bool Game::selectObjectsForTesting(
 const dat::Unit *Game::aiUnit(
     int player,
     const std::string &symbol) const {
+    if (player < 0 ||
+        (size_t)player >=
+            aiUnitCache_.size())
+        return nullptr;
+    const std::string normalized =
+        normalizeAiSymbol(symbol);
+    auto &cache =
+        aiUnitCache_[(size_t)player];
+    const auto cached =
+        cache.find(normalized);
+    if (cached != cache.end())
+        return cached->second;
     const int civilization =
         civilizationForPlayer(player);
+    const auto ensureLookup =
+        [&](int civ) {
+            if (civ < 0 ||
+                (size_t)civ >=
+                    aiUnitLookup_.size() ||
+                aiUnitLookupBuilt_[
+                    (size_t)civ])
+                return;
+            auto &lookup =
+                aiUnitLookup_[(size_t)civ];
+            for (const dat::Unit &candidate :
+                 assets_.dat()
+                     .civs[(size_t)civ]
+                     .units) {
+                if (!candidate.exists)
+                    continue;
+                for (const std::string *name :
+                     {&candidate.name,
+                      &candidate.name2}) {
+                    if (name->empty())
+                        continue;
+                    auto &matches =
+                        lookup[
+                            normalizeAiSymbol(
+                                *name)];
+                    if (std::find(
+                            matches.begin(),
+                            matches.end(),
+                            &candidate) ==
+                        matches.end())
+                        matches.push_back(
+                            &candidate);
+                }
+            }
+            aiUnitLookupBuilt_[
+                (size_t)civ] = true;
+        };
     const auto preferredUnit =
-        [&](const std::string &name) {
-            const std::string normalizedName =
-                normalizeAiSymbol(name);
+        [&](int civ,
+            const std::string &normalizedName,
+            bool requireAvailable) {
+            if (civ < 0 ||
+                (size_t)civ >=
+                    aiUnitLookup_.size())
+                return (const dat::Unit *)nullptr;
+            ensureLookup(civ);
+            const auto found =
+                aiUnitLookup_[(size_t)civ]
+                    .find(normalizedName);
+            if (found ==
+                aiUnitLookup_[(size_t)civ]
+                    .end())
+                return (const dat::Unit *)nullptr;
             const dat::Unit *fallback =
                 (const dat::Unit *)nullptr;
-            if (civilization >= 0 &&
-                (size_t)civilization <
-                    assets_.dat().civs.size())
-                for (const dat::Unit &candidate :
-                     assets_.dat()
-                         .civs[(size_t)civilization]
-                         .units) {
-                    if (normalizeAiSymbol(
-                            candidate.name) !=
-                            normalizedName &&
-                        normalizeAiSymbol(
-                            candidate.name2) !=
-                            normalizedName)
-                        continue;
-                    if (!fallback)
-                        fallback = &candidate;
+            for (const dat::Unit *candidate :
+                 found->second) {
+                    if (!fallback) fallback =
+                        candidate;
+                    if (!requireAvailable)
+                        return candidate;
                     const dat::Unit *effective =
                         effectiveUnitForPlayer(
-                            player, &candidate);
+                            player, candidate);
                     if (effective &&
                         unitAvailable(
                             player,
                             effective->id))
-                        return &candidate;
-                }
+                        return candidate;
+            }
             return fallback;
         };
     const dat::Unit *unit =
-        preferredUnit(symbol);
-    if (!unit)
-        unit = findUnit(civilization, symbol);
-    if (!unit && civilization != 0)
-        unit = findUnit(0, symbol);
-    const std::string normalized =
-        normalizeAiSymbol(symbol);
-    if (!unit &&
+        preferredUnit(
+            civilization, normalized, true);
+    const dat::Unit *result = unit;
+    if (!result)
+        result = preferredUnit(
+            civilization, normalized, false);
+    if (!result && civilization != 0)
+        result = preferredUnit(
+            0, normalized, false);
+    if (!result)
+        result = findUnit(
+            civilization, symbol);
+    if (!result && civilization != 0)
+        result = findUnit(0, symbol);
+    if (!result &&
         normalized.size() > 5 &&
         normalized.compare(
             normalized.size() - 5,
             5, "-line") == 0) {
         const std::string stem =
-            symbol.substr(0, symbol.size() - 5);
-        unit = preferredUnit(stem);
-        if (!unit)
-            unit = preferredUnit(stem + "1");
-        if (!unit)
-            unit = findUnit(civilization, stem);
-        if (!unit)
-            unit = findUnit(
+            normalized.substr(
+                0, normalized.size() - 5);
+        result = preferredUnit(
+            civilization, stem, true);
+        if (!result)
+            result =
+                preferredUnit(
+                    civilization,
+                    stem + "1", true);
+        if (!result)
+            result =
+                findUnit(civilization, stem);
+        if (!result)
+            result = findUnit(
                 civilization, stem + "1");
-        if (!unit && civilization != 0)
-            unit = findUnit(0, stem);
-        if (!unit && civilization != 0)
-            unit = findUnit(0, stem + "1");
+        if (!result && civilization != 0)
+            result = findUnit(0, stem);
+        if (!result && civilization != 0)
+            result =
+                findUnit(0, stem + "1");
     }
-    return unit;
+    cache[normalized] = result;
+    return result;
 }
 
 int Game::aiTechnology(
@@ -15889,7 +16781,10 @@ int Game::aiObjectCount(
     int player, const dat::Unit &unit,
     bool includeFoundations) const {
     int count = 0;
-    for (const Object &object : objects_) {
+    const dat::Unit *effective =
+        effectiveUnitForPlayer(
+            player, &unit);
+    for (const Object &object : prefetched(objects_)) {
         if (!object.active ||
             object.hidden ||
             object.player != player ||
@@ -15897,9 +16792,6 @@ int Game::aiObjectCount(
             (!includeFoundations &&
              object.underConstruction))
             continue;
-        const dat::Unit *effective =
-            effectiveUnitForPlayer(
-                player, &unit);
         if (includeFoundations)
             for (const ProductionItem &item :
                  object.productionQueue)
@@ -16227,7 +17119,7 @@ bool Game::aiBuild(
             }))
         return false;
     Object *worker = nullptr;
-    for (Object &candidate : objects_)
+    for (Object &candidate : prefetched(objects_))
         if (candidate.active &&
             !candidate.hidden &&
             candidate.player == player &&
@@ -16266,7 +17158,7 @@ bool Game::aiBuild(
         std::numeric_limits<float>::max();
     if (resourceType >= 0)
         for (const Object &candidate :
-             objects_) {
+             prefetched(objects_)) {
             if (!isGatherable(candidate) ||
                 !objectVisibleToPlayer(
                     candidate, player) ||
@@ -16299,7 +17191,7 @@ bool Game::aiBuild(
         float bestDistance =
             std::numeric_limits<float>::max();
         for (const Object &candidate :
-             objects_) {
+             prefetched(objects_)) {
             if (!candidate.active ||
                 candidate.hidden ||
                 candidate.player <= 0 ||
@@ -16352,7 +17244,7 @@ bool Game::aiBuild(
         centerY = resource->y;
     } else {
         for (const Object &building :
-             objects_)
+             prefetched(objects_))
             if (building.active &&
                 !building.hidden &&
                 !building.underConstruction &&
@@ -16399,8 +17291,7 @@ bool Game::aiBuild(
                  radius <= mapSize_ && !found;
                  ++radius) {
                 for (int offset = -radius;
-                     offset <= radius &&
-                     !found;
+                     offset <= radius && !found;
                      ++offset)
                     found =
                         tryPlacement(
@@ -16408,8 +17299,7 @@ bool Game::aiBuild(
                         tryPlacement(
                             offset, radius);
                 for (int offset = -radius + 1;
-                     offset < radius &&
-                     !found;
+                     offset < radius && !found;
                      ++offset)
                     found =
                         tryPlacement(
@@ -16420,7 +17310,7 @@ bool Game::aiBuild(
         };
     findPlacement();
     if (!found)
-        for (Object &candidate : objects_) {
+        for (Object &candidate : prefetched(objects_)) {
             if (!candidate.active ||
                 candidate.hidden ||
                 candidate.player != player ||
@@ -16484,7 +17374,7 @@ bool Game::aiTrain(
                 0.001f)
         return false;
     Object *producer = nullptr;
-    for (Object &building : objects_) {
+    for (Object &building : prefetched(objects_)) {
         if (!building.active ||
             building.hidden ||
             building.underConstruction ||
@@ -16537,7 +17427,7 @@ bool Game::aiResearch(
         researchedTechs_[(size_t)player]
             .count(technologyId))
         return false;
-    for (const Object &building : objects_)
+    for (const Object &building : prefetched(objects_))
         for (const ProductionItem &item :
              building.productionQueue)
             if (building.active &&
@@ -16553,7 +17443,7 @@ bool Game::aiResearch(
         !aiCanAfford(player, technology))
         return false;
     Object *researcher = nullptr;
-    for (Object &building : objects_) {
+    for (Object &building : prefetched(objects_)) {
         if (!building.active ||
             building.hidden ||
             building.underConstruction ||
@@ -16694,7 +17584,7 @@ bool Game::evaluateAiFactValue(
         fact == "attack-soldier-count") {
         float population = 0.0f;
         for (const Object &object :
-             objects_) {
+             prefetched(objects_)) {
             if (!object.active ||
                 object.hidden ||
                 object.player != player ||
@@ -16731,7 +17621,7 @@ bool Game::evaluateAiFactValue(
         fact == "attack-warboat-count") {
         int count = 0;
         for (const Object &object :
-             objects_)
+             prefetched(objects_))
             if (object.active &&
                 !object.hidden &&
                 object.player == player &&
@@ -16944,7 +17834,7 @@ Game::AiTruth Game::evaluateAiCondition(
         return AiTruth::False;
     if (fact == "hold-holocrons") {
         for (const Object &holocron :
-             objects_)
+             prefetched(objects_))
             if (holocron.active &&
                 isHolocron(holocron) &&
                 holocron.player == player &&
@@ -16957,7 +17847,7 @@ Game::AiTruth Game::evaluateAiCondition(
     if (fact ==
         "enemy-captured-holocrons") {
         for (const Object &holocron :
-             objects_)
+             prefetched(objects_))
             if (holocron.active &&
                 isHolocron(holocron) &&
                 holocron.player > 0 &&
@@ -17102,7 +17992,7 @@ Game::AiTruth Game::evaluateAiCondition(
     }
     if (fact == "resource-found") {
         for (const Object &object :
-             objects_)
+             prefetched(objects_))
             if (object.active &&
                 !object.hidden &&
                 objectVisibleToPlayer(
@@ -17121,7 +18011,7 @@ Game::AiTruth Game::evaluateAiCondition(
                 player, baseX, baseY))
             return AiTruth::True;
         for (const Object &object :
-             objects_) {
+             prefetched(objects_)) {
             if (!object.active ||
                 object.hidden ||
                 object.player != 0 ||
@@ -17144,7 +18034,7 @@ Game::AiTruth Game::evaluateAiCondition(
         "too-many-unpowered-buildings") {
         int unpowered = 0;
         for (const Object &object :
-             objects_)
+             prefetched(objects_))
             if (object.active &&
                 !object.hidden &&
                 object.player == player &&
@@ -17176,7 +18066,7 @@ Game::AiTruth Game::evaluateAiCondition(
             return AiTruth::Unknown;
         bool market = false;
         for (const Object &object :
-             objects_)
+             prefetched(objects_))
             if (object.active &&
                 !object.hidden &&
                 object.player == player &&
@@ -17210,7 +18100,7 @@ Game::AiTruth Game::evaluateAiCondition(
                 player, baseX, baseY))
             return AiTruth::False;
         for (const Object &object :
-             objects_) {
+             prefetched(objects_)) {
             if (!object.active ||
                 object.hidden ||
                 !object.unit ||
@@ -17249,7 +18139,7 @@ Game::AiTruth Game::evaluateAiCondition(
     }
     if (fact == "town-under-attack") {
         for (const Object &attacker :
-             objects_) {
+             prefetched(objects_)) {
             if (!attacker.active ||
                 attacker.hidden ||
                 attacker.player == player ||
@@ -17298,7 +18188,7 @@ Game::AiTruth Game::evaluateAiCondition(
                 (size_t)technology];
         bool queued = false;
         for (const Object &building :
-             objects_)
+             prefetched(objects_))
             for (const ProductionItem &item :
                  building.productionQueue)
                 if (building.active &&
@@ -17405,7 +18295,7 @@ Game::AiTruth Game::evaluateAiCondition(
                     0.001f)
             return AiTruth::False;
         for (const Object &building :
-             objects_) {
+             prefetched(objects_)) {
             if (!building.active ||
                 building.hidden ||
                 building.underConstruction ||
@@ -17525,7 +18415,7 @@ Game::AiTruth Game::evaluateAiCondition(
                         (int)candidate);
                 else
                     for (const Object &object :
-                         objects_)
+                         prefetched(objects_))
                         if (object.active &&
                             !object.hidden &&
                             object.player ==
@@ -17905,7 +18795,7 @@ bool Game::executeAiAction(
                 player,
                 action.children[1].value);
         if (!unit) return false;
-        for (Object &object : objects_)
+        for (Object &object : prefetched(objects_))
             if (object.active &&
                 object.player == player &&
                 object.unit &&
@@ -17951,11 +18841,12 @@ void Game::updateAiPlayer(
     int player, AiPlayerState &state) {
     if (state.program.rules.empty())
         return;
-    constexpr size_t kRulesPerSlice = 96;
+    const size_t rulesPerSlice =
+        campaignArchive_.empty() ? 96u : 8u;
     const size_t count =
         state.program.rules.size();
     for (size_t checked = 0;
-         checked < kRulesPerSlice &&
+         checked < rulesPerSlice &&
          checked < count;
          ++checked) {
         AiRule &rule =
@@ -18200,7 +19091,7 @@ bool Game::aiBasePoint(
     int player, float &x, float &y) const {
     const Object *best = nullptr;
     int bestKind = 4;
-    for (const Object &object : objects_) {
+    for (const Object &object : prefetched(objects_)) {
         if (!object.active ||
             object.hidden ||
             object.player != player ||
@@ -18344,7 +19235,6 @@ void Game::updateAiStrategy(
                     std::min(3, age - 1))] *
             capacityScale),
     };
-
     if (age >= 2) {
         static constexpr const char
             *buildings[] = {
@@ -18367,7 +19257,6 @@ void Game::updateAiStrategy(
                 return;
         }
     }
-
     std::array<int, 3> forceCounts{};
     std::array<std::vector<
                    const dat::Unit *>,
@@ -18377,7 +19266,7 @@ void Game::updateAiStrategy(
         transportCandidates;
     int transportCount = 0;
     std::unordered_map<int, int> typeCounts;
-    for (const Object &object : objects_) {
+    for (const Object &object : prefetched(objects_)) {
         if (!object.active ||
             object.hidden ||
             object.player != player ||
@@ -18489,12 +19378,13 @@ void Game::updateAiStrategy(
                        right->trainTime;
             });
         for (const dat::Unit *transport :
-             transportCandidates)
+             transportCandidates) {
             if (aiTrain(
                     player, *transport)) {
                 state.replenishmentQueued++;
                 return;
             }
+        }
     }
 
     int trainDomain = -1;
@@ -18536,11 +19426,12 @@ void Game::updateAiStrategy(
                        right->trainTime;
             });
         for (const dat::Unit *option :
-             options)
+             options) {
             if (aiTrain(player, *option)) {
                 state.replenishmentQueued++;
                 break;
             }
+        }
     }
 
     if (state.gameTime <
@@ -18560,7 +19451,7 @@ void Game::updateAiStrategy(
             group.transports.end());
     }
     int ready = 0;
-    for (const Object &object : objects_)
+    for (const Object &object : prefetched(objects_))
         if (object.active &&
             !object.hidden &&
             object.player == player &&
@@ -18683,7 +19574,7 @@ bool Game::aiAttackNow(
 
     std::vector<Object *> attackers;
     std::vector<Object *> transports;
-    for (Object &object : objects_) {
+    for (Object &object : prefetched(objects_)) {
         if (!object.active ||
             object.hidden ||
             object.player != player ||
@@ -18723,7 +19614,7 @@ bool Game::aiAttackNow(
     int bestAttackers = 0;
     float bestScore =
         std::numeric_limits<float>::max();
-    for (Object &candidate : objects_) {
+    for (Object &candidate : prefetched(objects_)) {
         if (!candidate.active ||
             candidate.hidden ||
             candidate.player <= 0 ||
@@ -18734,24 +19625,14 @@ bool Game::aiAttackNow(
             continue;
         int compatible = 0;
         float distance = 0.0f;
+        size_t compatibilityChecks = 0;
         for (const Object *attacker :
              attackers) {
+            if (compatibilityChecks >= 8)
+                break;
+            compatibilityChecks++;
             if (!canAttackTarget(
                     *attacker, candidate))
-                continue;
-            const float clearance =
-                std::max(
-                    0.1f,
-                    attackRange(
-                        *attacker, candidate) *
-                        0.8f);
-            if (!isAirUnit(*attacker) &&
-                !canReachObject(
-                    *attacker, candidate,
-                    clearance) &&
-                (candidate.unit->type !=
-                     dat::UT_Building ||
-                 !hasTransport(*attacker)))
                 continue;
             compatible++;
             const float dx =
@@ -18785,6 +19666,8 @@ bool Game::aiAttackNow(
     std::array<std::vector<Object *>, 3>
         direct;
     std::vector<Object *> crossing;
+    std::unordered_map<int, bool>
+        domainReachability;
     for (Object *attacker : attackers) {
         if (!canAttackTarget(
                 *attacker, *target))
@@ -18795,11 +19678,29 @@ bool Game::aiAttackNow(
                 attackRange(
                     *attacker, *target) *
                     0.8f);
-        const bool reachable =
-            isAirUnit(*attacker) ||
-            canReachObject(
-                *attacker, *target,
-                clearance);
+        bool reachable =
+            isAirUnit(*attacker);
+        if (!reachable) {
+            const int restriction =
+                attacker->unit
+                    ->terrainRestriction;
+            const auto known =
+                domainReachability.find(
+                    restriction);
+            if (known !=
+                domainReachability.end()) {
+                reachable =
+                    known->second;
+            } else {
+                reachable =
+                    canReachObject(
+                        *attacker, *target,
+                        clearance);
+                domainReachability[
+                    restriction] =
+                    reachable;
+            }
+        }
         if (!reachable) {
             if (target->unit->type ==
                     dat::UT_Building &&
@@ -19258,7 +20159,7 @@ void Game::updateAiMilitaryGroups(
                 centerY /= fighters.size();
                 float enemyStrength = 0.0f;
                 for (const Object &enemy :
-                     objects_) {
+                     prefetched(objects_)) {
                     if (!enemy.active ||
                         enemy.hidden ||
                         enemy.player <= 0 ||
@@ -19640,7 +20541,7 @@ void Game::updateAiScouting(
             exploredTiles_.size())
         return;
     for (const Object &candidate :
-         objects_)
+         prefetched(objects_))
         if (candidate.active &&
             !candidate.hidden &&
             candidate.player > 0 &&
@@ -19652,28 +20553,21 @@ void Game::updateAiScouting(
 
     Object *scout = nullptr;
     int bestKind = -1;
-    for (Object &candidate : objects_) {
-        const bool assigned =
-            std::any_of(
-                state.militaryGroups.begin(),
-                state.militaryGroups.end(),
-                [&](const AiMilitaryGroup &group) {
-                    return std::find(
-                               group.members.begin(),
-                               group.members.end(),
-                               candidate.spawnId) !=
-                               group.members.end() ||
-                           std::find(
-                               group.escorts.begin(),
-                               group.escorts.end(),
-                               candidate.spawnId) !=
-                               group.escorts.end() ||
-                           std::find(
-                               group.transports.begin(),
-                               group.transports.end(),
-                               candidate.spawnId) !=
-                               group.transports.end();
-                });
+    std::unordered_set<uint32_t>
+        assignedObjects;
+    for (const AiMilitaryGroup &group :
+         state.militaryGroups) {
+        assignedObjects.insert(
+            group.members.begin(),
+            group.members.end());
+        assignedObjects.insert(
+            group.escorts.begin(),
+            group.escorts.end());
+        assignedObjects.insert(
+            group.transports.begin(),
+            group.transports.end());
+    }
+    for (Object &candidate : prefetched(objects_)) {
         if (!candidate.active ||
             candidate.hidden ||
             candidate.player != player ||
@@ -19684,7 +20578,8 @@ void Game::updateAiScouting(
             candidate.unit->speed <= 0.0f ||
             isWorker(candidate) ||
             isTransport(candidate) ||
-            assigned ||
+            assignedObjects.count(
+                candidate.spawnId) != 0 ||
             candidate.attackTargetId ||
             candidate.moveGoalActive ||
             candidate.state == State::Walk)
@@ -19757,7 +20652,7 @@ void Game::updateAiWorkerShelter(
     int player, AiPlayerState &state,
     float dt) {
     std::vector<Object *> commandCenters;
-    for (Object &building : objects_) {
+    for (Object &building : prefetched(objects_)) {
         if (!building.active ||
             building.hidden ||
             building.player != player ||
@@ -19836,7 +20731,7 @@ void Game::updateAiWorkerShelter(
             std::vector<
                 std::pair<float, Object *>>
                 workers;
-            for (Object &worker : objects_) {
+            for (Object &worker : prefetched(objects_)) {
                 if (!worker.active ||
                     worker.hidden ||
                     worker.player != player ||
@@ -19927,7 +20822,17 @@ void Game::updateAiWorkerShelter(
 
 void Game::updateAiGatherers(
     int player, AiPlayerState &state) {
-    for (Object &trawler : objects_) {
+    constexpr size_t kPathBudget = 1;
+    size_t pathAttempts = 0;
+    const bool authoredCampaign =
+        !campaignArchive_.empty();
+    for (uint32_t objectIndex :
+         mobileObjectIndices_) {
+        if ((size_t)objectIndex >=
+            objects_.size())
+            continue;
+        Object &trawler =
+            objects_[(size_t)objectIndex];
         if (!trawler.active ||
             trawler.hidden ||
             trawler.player != player ||
@@ -19943,14 +20848,27 @@ void Game::updateAiGatherers(
         Object *closest = nullptr;
         float closestDistance =
             std::numeric_limits<float>::max();
-        for (Object &resource : objects_) {
+        for (uint32_t resourceIndex :
+             gatherableObjectIndices_) {
+            if ((size_t)resourceIndex >=
+                objects_.size())
+                continue;
+            Object &resource =
+                objects_[(size_t)resourceIndex];
             if (!isGatherable(resource) ||
                 resource.resourceType != 17 ||
                 !objectVisibleToPlayer(
-                    resource, player) ||
-                !canReachObject(
-                    trawler, resource, 0.25f))
+                    resource, player))
                 continue;
+            if (!authoredCampaign) {
+                if (pathAttempts >=
+                    kPathBudget)
+                    break;
+                pathAttempts++;
+                if (!canReachObject(
+                        trawler, resource, 0.25f))
+                    continue;
+            }
             const float dx =
                 resource.x - trawler.x;
             const float dy =
@@ -19962,9 +20880,11 @@ void Game::updateAiGatherers(
             closest = &resource;
             closestDistance = distance;
         }
-        if (closest)
+        if (closest &&
             issueGatherCommand(
-                trawler, *closest);
+                trawler, *closest) &&
+            authoredCampaign)
+            return;
     }
     static constexpr const char *names[4] = {
         "sn-food-gatherer-percentage",
@@ -19993,18 +20913,22 @@ void Game::updateAiGatherers(
         if (resource(player, type) >=
             300.0f)
             continue;
-        const bool knownDeposit =
-            std::any_of(
-                objects_.begin(),
-                objects_.end(),
-                [&](const Object &object) {
-                    return isGatherable(
-                               object) &&
-                           object.resourceType ==
-                               type &&
-                           objectVisibleToPlayer(
-                               object, player);
-                });
+        bool knownDeposit = false;
+        for (uint32_t resourceIndex :
+             gatherableObjectIndices_) {
+            if ((size_t)resourceIndex >=
+                objects_.size())
+                continue;
+            const Object &object =
+                objects_[(size_t)resourceIndex];
+            if (isGatherable(object) &&
+                object.resourceType == type &&
+                objectVisibleToPlayer(
+                    object, player)) {
+                knownDeposit = true;
+                break;
+            }
+        }
         if (!knownDeposit)
             continue;
         emergency[(size_t)type] = true;
@@ -20029,7 +20953,13 @@ void Game::updateAiGatherers(
     std::array<int, 4> assigned{};
     std::unordered_set<uint32_t>
         assignedTrees;
-    for (Object &worker : objects_) {
+    for (uint32_t workerIndex :
+         workerObjectIndices_) {
+        if ((size_t)workerIndex >=
+            objects_.size())
+            continue;
+        Object &worker =
+            objects_[(size_t)workerIndex];
         if (!worker.active ||
             worker.hidden ||
             worker.player != player ||
@@ -20160,11 +21090,69 @@ void Game::updateAiGatherers(
                         oldTarget->resourceType < 4
                     ? oldTarget->resourceType
                     : -1;
+            if (authoredCampaign) {
+                Object *resourceTarget =
+                    nullptr;
+                float nearestDistance =
+                    std::numeric_limits<
+                        float>::max();
+                for (uint32_t resourceIndex :
+                     gatherableObjectIndices_) {
+                    if ((size_t)resourceIndex >=
+                        objects_.size())
+                        continue;
+                    Object &resource =
+                        objects_[(size_t)
+                                     resourceIndex];
+                    if (!isGatherable(resource) ||
+                        !objectVisibleToPlayer(
+                            resource, player) ||
+                        resource.resourceType !=
+                            type ||
+                        (resource.unit &&
+                         resource.unit->cls == 31 &&
+                         assignedTrees.count(
+                             resource.spawnId)))
+                        continue;
+                    const float dx =
+                        resource.x - worker->x;
+                    const float dy =
+                        resource.y - worker->y;
+                    const float distance =
+                        dx * dx + dy * dy;
+                    if (distance >=
+                        nearestDistance)
+                        continue;
+                    resourceTarget = &resource;
+                    nearestDistance = distance;
+                }
+                if (!resourceTarget ||
+                    !issueGatherCommand(
+                        *worker,
+                        *resourceTarget))
+                    break;
+                if (resourceTarget->unit &&
+                    resourceTarget->unit->cls ==
+                        31)
+                    assignedTrees.insert(
+                        resourceTarget->spawnId);
+                if (oldResourceType >= 0)
+                    assigned[(size_t)
+                                 oldResourceType]--;
+                assigned[(size_t)type]++;
+                return;
+            }
             std::vector<
                 std::pair<float, Object *>>
                 candidates;
-            for (Object &resource :
-                 objects_) {
+            for (uint32_t resourceIndex :
+                 gatherableObjectIndices_) {
+                if ((size_t)resourceIndex >=
+                    objects_.size())
+                    continue;
+                Object &resource =
+                    objects_[(size_t)
+                                 resourceIndex];
                 if (!isGatherable(resource) ||
                     !objectVisibleToPlayer(
                         resource, player) ||
@@ -20194,12 +21182,17 @@ void Game::updateAiGatherers(
                 });
             Object *resourceTarget = nullptr;
             for (const auto &candidate :
-                 candidates)
-                if (canReachObject(
+                 candidates) {
+                if (pathAttempts >=
+                    kPathBudget)
+                    break;
+                pathAttempts++;
+                if (!canReachObject(
                         *worker,
                         *candidate.second,
-                        0.1f) &&
-                    issueGatherCommand(
+                        0.1f))
+                    continue;
+                if (issueGatherCommand(
                         *worker,
                         *candidate.second)) {
                     resourceTarget =
@@ -20212,6 +21205,7 @@ void Game::updateAiGatherers(
                                 ->spawnId);
                     break;
                 }
+            }
             if (!resourceTarget) break;
             if (oldResourceType >= 0)
                 assigned[(size_t)
@@ -20222,6 +21216,24 @@ void Game::updateAiGatherers(
 }
 
 void Game::updateAi(float dt) {
+    using AiClock = std::chrono::steady_clock;
+    const auto elapsedAiUs =
+        [](AiClock::time_point from,
+           AiClock::time_point to) {
+            return (uint64_t)
+                std::chrono::duration_cast<
+                    std::chrono::microseconds>(
+                    to - from)
+                    .count();
+        };
+    updateStats_.aiRulesUs = 0;
+    updateStats_.aiEconomyUs = 0;
+    updateStats_.aiDefenseUs = 0;
+    updateStats_.aiStrategyUs = 0;
+    updateStats_.aiMilitaryUs = 0;
+    updateStats_.aiScoutingUs = 0;
+    updateStats_.aiMaxPlayerUs = 0;
+    updateStats_.aiMaxPlayer = -1;
     for (size_t player = 1;
          player < aiPlayers_.size();
          ++player) {
@@ -20230,6 +21242,8 @@ void Game::updateAi(float dt) {
         if (!state.loaded ||
             !players_[player - 1].active)
             continue;
+        const auto playerStart =
+            AiClock::now();
         state.gameTime += dt;
         for (auto &timer : state.timers)
             timer.second -= dt;
@@ -20244,45 +21258,128 @@ void Game::updateAi(float dt) {
         state.ruleTime -= dt;
         if (state.ruleTime <= 0.0f) {
             state.ruleTime = 0.25f;
+            const auto phaseStart =
+                AiClock::now();
             updateAiPlayer(
                 (int)player, state);
+            updateStats_.aiRulesUs +=
+                elapsedAiUs(
+                    phaseStart,
+                    AiClock::now());
         }
         state.economyTime -= dt;
         if (state.economyTime <= 0.0f) {
             state.economyTime = 2.0f;
+            const auto phaseStart =
+                AiClock::now();
             updateAiGatherers(
                 (int)player, state);
+            updateStats_.aiEconomyUs +=
+                elapsedAiUs(
+                    phaseStart,
+                    AiClock::now());
         }
         state.defenseTime -= dt;
         if (state.defenseTime <= 0.0f) {
             state.defenseTime = 0.5f;
+            const auto phaseStart =
+                AiClock::now();
             updateAiWorkerShelter(
-                (int)player, state,
-                0.5f);
+                (int)player, state, 0.5f);
+            updateStats_.aiDefenseUs +=
+                elapsedAiUs(
+                    phaseStart,
+                    AiClock::now());
         }
         state.strategyTime -= dt;
         if (state.strategyTime <= 0.0f) {
             state.strategyTime = 2.0f;
-            updateAiStrategy(
-                (int)player, state);
+            // Authored campaign rules own their build/train/attack policy.
+            // Generic strategy remains the fallback for skirmishes and
+            // standalone/custom scenarios.
+            if (campaignArchive_.empty()) {
+                const auto phaseStart =
+                    AiClock::now();
+                updateAiStrategy(
+                    (int)player, state);
+                updateStats_.aiStrategyUs +=
+                    elapsedAiUs(
+                        phaseStart,
+                        AiClock::now());
+            }
         }
         state.militaryTime -= dt;
         if (state.militaryTime <= 0.0f) {
             state.militaryTime = 0.25f;
+            const auto phaseStart =
+                AiClock::now();
             updateAiMilitaryGroups(
-                (int)player, state,
-                0.25f);
+                (int)player, state, 0.25f);
+            updateStats_.aiMilitaryUs +=
+                elapsedAiUs(
+                    phaseStart,
+                    AiClock::now());
         }
         state.scoutTime -= dt;
         if (state.scoutTime <= 0.0f) {
             state.scoutTime = 3.0f;
+            const auto phaseStart =
+                AiClock::now();
             updateAiScouting(
                 (int)player, state);
+            updateStats_.aiScoutingUs +=
+                elapsedAiUs(
+                    phaseStart,
+                    AiClock::now());
+        }
+        const uint64_t playerUs =
+            elapsedAiUs(
+                playerStart,
+                AiClock::now());
+        if (playerUs >
+            updateStats_.aiMaxPlayerUs) {
+            updateStats_.aiMaxPlayerUs =
+                playerUs;
+            updateStats_.aiMaxPlayer =
+                (int)player;
         }
     }
 }
 
 void Game::update(float dt, const InputState &in) {
+    WorldInput worldInput;
+    if (!updateInputPhase(dt, in, worldInput)) return;
+    simulateStep(dt, &worldInput);
+}
+
+bool Game::updateInput(float dt, const InputState &in) {
+    WorldInput worldInput;
+    if (!updateInputPhase(dt, in, worldInput)) return false;
+    handleWorldInput(worldInput);
+    return true;
+}
+
+void Game::simulate(float dt) {
+    // Fixed-step callers: no simulation once the match is decided (update()
+    // returns before it too).
+    if (victoryState_ >= 0) return;
+    simulateStep(dt, nullptr);
+}
+
+bool Game::updateInputPhase(float dt, const InputState &in, WorldInput &worldInput) {
+    using UpdateClock =
+        std::chrono::steady_clock;
+    const auto updateStart =
+        UpdateClock::now();
+    auto elapsedUs =
+        [](UpdateClock::time_point from,
+           UpdateClock::time_point to) {
+            return (uint64_t)
+                std::chrono::duration_cast<
+                    std::chrono::microseconds>(
+                    to - from)
+                    .count();
+        };
     if (gameSpeed_ == SkirmishGameSpeed::Slow)
         dt *= 0.75f;
     else if (gameSpeed_ ==
@@ -20315,8 +21412,7 @@ void Game::update(float dt, const InputState &in) {
         }
     }
     if (victoryState_ >= 0)
-        return;
-    simulationTime_ += dt;
+        return false;
     controlGroupRecallAge_ += dt;
     minimapRefreshTime_ =
         std::max(0.0f, minimapRefreshTime_ - dt);
@@ -20581,339 +21677,22 @@ void Game::update(float dt, const InputState &in) {
         if (in.toggleDebug) debug_ = !debug_;
     }
 
-    updateTriggers(dt);
-    updateAi(dt);
-    struct ProductionSpawn {
-        const dat::Unit *unit;
-        int player;
-        float x, y;
-        uint32_t buildingId;
-    };
-    std::vector<ProductionSpawn> productionSpawns;
-    std::vector<std::array<float, 4>>
-        reservedProductionExits;
-    std::array<float, 17> reservedPopulation{};
-    for (size_t player = 1;
-         player < reservedPopulation.size();
-         player++)
-        reservedPopulation[player] =
-            populationUsed((int)player);
-    const size_t productionObjectCount = objects_.size();
-    for (size_t index = 0; index < productionObjectCount;
-         index++) {
-        Object &building = objects_[index];
-        if (!building.active ||
-            building.productionQueue.empty())
-            continue;
-        if (forceBuildCheat_ && building.player == localPlayer_)
-            building.productionRemaining = 0.0f;
-        else {
-            const float rate =
-                isPowered(building) ? 1.0f : 0.25f;
-            building.productionRemaining -= dt * rate;
-        }
-        if (building.productionRemaining > 0) continue;
-        const ProductionItem item =
-            building.productionQueue.front();
-        if (item.technologyId >= 0) {
-            const bool researched =
-                researchTechnology(
-                    building.player,
-                    item.technologyId);
-            const bool techLevel =
-                item.technologyId >= 1 &&
-                item.technologyId <= 3;
-            if (researched && techLevel)
-                playInterfaceFeedback(
-                    kInterfaceTechLevelSound);
-            building.productionQueue.pop_front();
-            building.productionRemaining =
-                building.productionQueue.empty()
-                    ? 0.0f
-                    : building.productionQueue.front().duration;
-            if (researched &&
-                building.player == localPlayer_) {
-                statusMessage_ =
-                    technologyDisplayName(
-                        item.technologyId) +
-                    " COMPLETE";
-                statusTime_ = 3.0f;
-            } else if (researched && techLevel) {
-                statusMessage_ =
-                    playerDisplayName(
-                        building.player) +
-                    " ADVANCED TO " +
-                    technologyDisplayName(
-                        item.technologyId);
-                statusTime_ = 3.0f;
-            }
-            continue;
-        }
-        const dat::Unit *unit = item.unit;
-        if (!unit) {
-            building.productionQueue.pop_front();
-            building.productionRemaining =
-                building.productionQueue.empty()
-                    ? 0.0f
-                    : building.productionQueue.front().duration;
-            continue;
-        }
-        const float population =
-            populationUse(*unit);
-        const float capacity =
-            populationCapacity(building.player);
-        if (population > 0.0f &&
-            building.player > 0 &&
-            (size_t)building.player <
-                reservedPopulation.size() &&
-            reservedPopulation[
-                (size_t)building.player] +
-                    population >
-                capacity + 0.001f) {
-            building.productionRemaining = 0.0f;
-            if (!building.productionPopulationBlocked &&
-                building.player == localPlayer_) {
-                statusMessage_ =
-                    assets_.localizedString(3005);
-                if (statusMessage_.empty())
-                    statusMessage_ =
-                        "YOU NEED TO BUILD MORE SHELTERS";
-                statusTime_ = 3.0f;
-                playInterfaceFeedback(
-                    kInterfaceNeedHousingSound);
-            }
-            building.productionPopulationBlocked =
-                true;
-            continue;
-        }
-        building.productionPopulationBlocked = false;
-        float exitX = 0.0f;
-        float exitY = 0.0f;
-        if (!findProductionExit(
-                building, *unit,
-                reservedProductionExits,
-                exitX, exitY)) {
-            building.productionRemaining = 0;
-            continue;
-        }
-        Object candidate;
-        candidate.unit = unit;
-        candidate.player = building.player;
-        productionSpawns.push_back(
-            {unit, building.player, exitX, exitY,
-             building.spawnId});
-        if (building.player > 0 &&
-            (size_t)building.player <
-                reservedPopulation.size())
-            reservedPopulation[
-                (size_t)building.player] +=
-                population;
-        reservedProductionExits.push_back(
-            {exitX, exitY, collisionRadius(candidate),
-             isAirUnit(candidate) ? 1.0f : 0.0f});
-        if (building.player == localPlayer_ &&
-            unit->trainSound >= 0)
-            playWorldUnitSound(
-                building, unit->trainSound);
-        building.productionQueue.pop_front();
-        building.productionRemaining =
-            building.productionQueue.empty()
-                ? 0.0f
-                : forceBuildCheat_ &&
-                         building.player == localPlayer_
-                     ? 0.0f
-                : building.productionQueue.front().duration;
-    }
-    for (const ProductionSpawn &spawned : productionSpawns) {
-        Object *created = addObject(
-            spawned.unit, spawned.player, spawned.x, spawned.y,
-            -kPi * 0.5f, nextSpawnId_++);
-        if (created) {
-            created->wander = false;
-            created->state = State::Idle;
-            created->animTime = 0.0f;
-            created->stateTime = 0.0f;
-            created->initialFrame = 0;
-            const uint32_t createdId = created->spawnId;
-            classifyObject(objects_.size() - 1);
-            Object *building = findObject(spawned.buildingId);
-            Object *unit = findObject(createdId);
-            if (building && unit) sendToGatherPoint(*building, *unit);
-        }
-    }
-    updateConstruction(dt);
-    updateShields(dt);
-    rebuildMobileOccupancy();
-    updateLivestockOwnership();
-    updateGathering(dt);
-    updateRepairing(dt);
-    updateConversion(dt);
-    updateHolocrons(dt);
-    // Gate logic, following the original (battlegrounds_x1.exe 0x558390):
-    // the gate watches a 0.4-tile-wide corridor between its two end posts.
-    // A closed, unlocked gate swaps to its OPEN unit the moment a friendly
-    // unit is in the corridor; an open gate swaps back to CLOSED 0.5s after
-    // the corridor is empty of all units. There is no intermediate frame.
-    for (Object &gate : objects_) {
-        if (!gate.active || !gate.gate || !gate.gateClosedUnit ||
-            !gate.gateOpenUnit || gate.underConstruction)
-            continue;
-        const dat::Unit *layout = gate.gateClosedUnit;
-        float postX[2] = {gate.x, gate.x}, postY[2] = {gate.y, gate.y};
-        int posts = 0;
-        for (const dat::BuildingAnnex &annex : layout->annexes) {
-            if (annex.unitId < 0 || posts >= 2) continue;
-            postX[posts] = gate.x + annex.misplacementY;
-            postY[posts] = gate.y - annex.misplacementX;
-            posts++;
-        }
-        if (posts < 2) {
-            // No posts: use the long axis of the gate footprint.
-            const bool alongX = layout->collisionSize[0] >= layout->collisionSize[1];
-            const float half = std::max(layout->collisionSize[0], layout->collisionSize[1]);
-            postX[0] = gate.x - (alongX ? half : 0); postX[1] = gate.x + (alongX ? half : 0);
-            postY[0] = gate.y - (alongX ? 0 : half); postY[1] = gate.y + (alongX ? 0 : half);
-        }
-        const float segX = postX[1] - postX[0], segY = postY[1] - postY[0];
-        const float segLen2 = std::max(1e-4f, segX * segX + segY * segY);
-        int total = 0, friendly = 0;
-        for (uint32_t index : mobileObjectIndices_) {
-            const Object &unit = objects_[(size_t)index];
-            if (!unit.active || unit.hidden || isAirUnit(unit) ||
-                &unit == &gate)
-                continue;
-            const int cls = unit.unit->cls;
-            if (cls == 6 || cls == 8 || cls == 9 || cls == 10 || cls == 18)
-                continue;
-            const float t = std::max(0.0f, std::min(1.0f,
-                ((unit.x - postX[0]) * segX + (unit.y - postY[0]) * segY) / segLen2));
-            const float dx = unit.x - (postX[0] + segX * t);
-            const float dy = unit.y - (postY[0] + segY * t);
-            const float reach = 0.4f + collisionRadius(unit);
-            if (dx * dx + dy * dy > reach * reach) continue;
-            total++;
-            if (unit.player == gate.player || !isEnemy(gate, unit)) friendly++;
-        }
-        const bool open = gate.unit == gate.gateOpenUnit;
-        if (!open) {
-            if (!gate.locked && friendly > 0) {
-                gate.unit = gate.gateOpenUnit;
-                gate.gateOpenAmount = 1.0f;
-                gate.gateCloseTimer = 0.0f;
-                rebuildAdjacency();
-            }
-        } else if (total == 0) {
-            if (gate.gateCloseTimer <= 0.0f) {
-                gate.gateCloseTimer = 0.5f;
-            } else {
-                gate.gateCloseTimer -= dt;
-                if (gate.gateCloseTimer < 0.0f) {
-                    gate.gateCloseTimer = 0.0f;
-                    gate.unit = gate.gateClosedUnit;
-                    gate.gateOpenAmount = 0.0f;
-                    rebuildAdjacency();
-                }
-            }
-        }
-    }
-    commandMarkerTime_ = std::max(0.0f, commandMarkerTime_ - dt);
-    commandTargetTime_ = std::max(0.0f, commandTargetTime_ - dt);
-    selectionClickAge_ += dt;
-    animClock_ = std::fmod(animClock_ + dt, 3600.0f);
-    for (Object &object : objects_)
-        if (object.active && object.unit &&
-            isFarmUnit(*object.unit) &&
-            object.unit->type == dat::UT_Building)
-            syncFarmTerrain(object);
-    for (Object &worker : objects_) {
-        if (!worker.active || !worker.unit ||
-            (!isWorker(worker) &&
-             !isBuilder(worker) &&
-             !isRepairer(worker)))
-            continue;
-        if (worker.constructionTargetId) {
-            worker.jobKind = 1;
-            worker.jobUnit = builderUnit(worker);
-        } else if (worker.repairTargetId) {
-            worker.jobKind = 2;
-            worker.jobUnit = repairerUnit(worker);
-        } else if (worker.gatherTargetId) {
-            const Object *target = findObject(worker.gatherTargetId);
-            if (target && target->resourceType >= 0 && target->resourceType <= 3) {
-                worker.jobKind = 10 + target->resourceType;
-                if (const dat::Unit *gatherer = gathererUnit(worker)) worker.jobUnit = gatherer;
-            }
-        }
-    }
-    for (const PendingCarcass &pending : pendingCarcasses_) {
-        Object *carcass = addObject(pending.deadUnit, pending.owner, pending.x, pending.y,
-                                    pending.facing, nextSpawnId_++);
-        if (!carcass) continue;
-        carcass->resourceType = 0;
-        carcass->resourceAmount = pending.amount;
-        carcass->carcassClass = pending.animalClass;
-        carcass->carcassDecay = pending.decay;
-        carcass->carcassHidden = pending.dying;
-        carcass->wander = false;
-        if (Object *animal = findObject(pending.animalId)) animal->carcassId = carcass->spawnId;
-    }
-    pendingCarcasses_.clear();
-    // Carcasses rot away: their food decays until none is left.
-    for (Object &carcass : objects_) {
-        if (!carcass.active || carcass.carcassClass < 0) continue;
-        carcass.carcassHidden = std::max(0.0f, carcass.carcassHidden - dt);
-        carcass.resourceAmount -= carcass.carcassDecay * dt;
-        if (carcass.resourceAmount <= 0.001f) {
-            carcass.resourceAmount = 0.0f;
-            killObject(carcass, false);
-        }
-    }
-    // Animal Nursery (garrison type 16): each garrisoned animal adds the
-    // nursery's work rate in food per second to its owner.
-    for (const Object &nursery : objects_) {
-        const float rate =
-            animalNurseryFoodRate(nursery);
-        if (rate > 0.0f)
-            resources_[(size_t)nursery.player][0] +=
-                rate * dt;
-    }
-    // Damage graphics (fire/smoke stages) carry their own sound, played each
-    // animation cycle like any graphic sound while the building is heard.
-    for (Object &object : objects_) {
-        if (!object.active || object.hidden || !object.unit ||
-            object.unit->type != dat::UT_Building || object.underConstruction ||
-            object.maxHitPoints <= 0.0f)
-            continue;
-        const float damage = 100.0f * (1.0f - object.hitPoints / object.maxHitPoints);
-        const dat::DamageGraphic *stage = nullptr;
-        for (const dat::DamageGraphic &damageGraphic : object.unit->damageGraphics)
-            if (damage >= damageGraphic.damagePercent &&
-                (!stage || damageGraphic.damagePercent > stage->damagePercent))
-                stage = &damageGraphic;
-        if (!stage) {
-            object.damageSoundTime = 0.0f;
-            continue;
-        }
-        object.damageSoundTime -= dt;
-        if (object.damageSoundTime > 0.0f) continue;
-        const dat::Graphic *graphic = assets_.dat().graphic(stage->graphicId);
-        const float cycle = graphic ? graphic->frameCount * graphic->frameDuration +
-                                          graphic->replayDelay
-                                    : 0.0f;
-        object.damageSoundTime = std::max(2.0f, cycle);
-        playWorldUnitSound(object, graphicSound(stage->graphicId));
-    }
-    for (Object &object : objects_)
-        if (object.selected &&
-            (!isInspectable(object) ||
-             (!objectCurrentlyVisibleToPlayer(
-                  object, localPlayer_) &&
-              !(isGatherable(object) &&
-                objectVisibleToPlayer(
-                    object, localPlayer_)))))
-            object.selected = false;
-    syncSelectionOrder();
+    worldInput.in = &in;
+    worldInput.consumeWorldInput = consumeWorldInput;
+    worldInput.actionMenuControlConsumed = actionMenuControlConsumed;
+    updateStats_.inputUs =
+        elapsedUs(
+            updateStart,
+            UpdateClock::now());
+    return true;
+}
 
+// Selection, cursor and command input that update() handles after the
+// world phase (box select, clicks, cursor mode).
+void Game::handleWorldInput(const WorldInput &worldInput) {
+    const InputState &in = *worldInput.in;
+    const bool consumeWorldInput = worldInput.consumeWorldInput;
+    const bool actionMenuControlConsumed = worldInput.actionMenuControlConsumed;
     cursorVisible_ = in.cursorVisible;
     cursorX_ = in.pointerX;
     cursorY_ = in.pointerY;
@@ -21350,7 +22129,7 @@ void Game::update(float dt, const InputState &in) {
             bool selectedWorker = false;
             bool selectedBuilder = false;
             bool repairable = false;
-            for (const Object &object : objects_) {
+            for (const Object &object : prefetched(objects_)) {
                 if (!object.selected)
                     continue;
                 if (isGatherer(object))
@@ -21434,7 +22213,7 @@ void Game::update(float dt, const InputState &in) {
         const Object *cursorWorker = nullptr;
         bool selectedBuilder = false;
         const Object *cursorRepairer = nullptr;
-        for (const Object &object : objects_) {
+        for (const Object &object : prefetched(objects_)) {
             if (!object.selected)
                 continue;
             if (isGatherer(object)) {
@@ -21467,7 +22246,7 @@ void Game::update(float dt, const InputState &in) {
             effectiveGarrisonCapacity(
                 *hovered) > 0 &&
             (!selectedWorker || isTransport(*hovered)))
-            for (const Object &object : objects_)
+            for (const Object &object : prefetched(objects_))
                 if (object.selected && isSelectable(object) && canGarrison(object, *hovered)) {
                     garrisonable = true;
                     break;
@@ -21490,6 +22269,505 @@ void Game::update(float dt, const InputState &in) {
                       ? CursorMode::Attack
                       : CursorMode::Normal;
     }
+
+}
+
+// The world simulation for one step (triggers, AI, world, movement, final
+// passes). update() runs it after the input phase with the same dt.
+void Game::simulateStep(float dt, const WorldInput *worldInput) {
+    for (int chunk = 0; chunk < kSimulationChunks; ++chunk)
+        simulateChunk(dt, worldInput, chunk);
+}
+
+// One step of the world simulation in three parts, so a fixed-rate caller
+// can spread a step over several frames: 0 triggers and AI, 1 the world
+// passes and the selection/command input, 2 movement and the final passes.
+// Running 0, 1, 2 back to back is the original update order.
+void Game::simulateChunk(float dt, const WorldInput *worldInput, int chunk) {
+    using UpdateClock =
+        std::chrono::steady_clock;
+    auto elapsedUs =
+        [](UpdateClock::time_point from,
+           UpdateClock::time_point to) {
+            return (uint64_t)
+                std::chrono::duration_cast<
+                    std::chrono::microseconds>(
+                    to - from)
+                    .count();
+        };
+    if (gameSpeed_ == SkirmishGameSpeed::Slow)
+        dt *= 0.75f;
+    else if (gameSpeed_ ==
+             SkirmishGameSpeed::Fast)
+        dt *= 1.5f;
+    if (chunk == 0) {
+    // Read only by the simulation (time-limit victory) and the HUD, so it
+    // advances here rather than in the input phase.
+    simulationTime_ += dt;
+    const auto triggersStart =
+        UpdateClock::now();
+    updateTriggers(dt);
+    const auto aiStart =
+        UpdateClock::now();
+    simulationAiStart_ = aiStart;
+    updateStats_.triggersUs =
+        elapsedUs(
+            triggersStart,
+            aiStart);
+    updateAi(dt);
+        return;
+    }
+    if (chunk == 1) {
+    const auto worldStart =
+        UpdateClock::now();
+    simulationWorldStart_ = worldStart;
+    updateStats_.aiUs =
+        elapsedUs(
+            simulationAiStart_,
+            worldStart);
+    struct ProductionSpawn {
+        const dat::Unit *unit;
+        int player;
+        float x, y;
+        uint32_t buildingId;
+    };
+    std::vector<ProductionSpawn> productionSpawns;
+    std::vector<std::array<float, 4>>
+        reservedProductionExits;
+    // Population in use per player as the production pass starts. Nothing
+    // the pass does before a building's first completion changes it, so it
+    // is summed then (most frames nothing completes and the scan over every
+    // object is skipped).
+    std::array<float, 17> reservedPopulation{};
+    bool reservedPopulationReady = false;
+    auto prepareReservedPopulation = [&]() {
+        if (reservedPopulationReady) return;
+        reservedPopulationReady = true;
+        for (const Object &object : prefetched(objects_))
+            if (object.active &&
+                object.player > 0 &&
+                object.player < 17 &&
+                object.unit)
+                reservedPopulation[
+                    (size_t)object.player] +=
+                    populationUse(*object.unit);
+    };
+    const size_t productionObjectCount = objects_.size();
+    for (size_t index = 0; index < productionObjectCount;
+         index++) {
+        Object &building = objects_[index];
+        if (!building.active ||
+            building.productionQueue.empty())
+            continue;
+        if (forceBuildCheat_ && building.player == localPlayer_)
+            building.productionRemaining = 0.0f;
+        else {
+            const float rate =
+                isPowered(building) ? 1.0f : 0.25f;
+            building.productionRemaining -= dt * rate;
+        }
+        if (building.productionRemaining > 0) continue;
+        prepareReservedPopulation();
+        const ProductionItem item =
+            building.productionQueue.front();
+        if (item.technologyId >= 0) {
+            const bool researched =
+                researchTechnology(
+                    building.player,
+                    item.technologyId);
+            const bool techLevel =
+                item.technologyId >= 1 &&
+                item.technologyId <= 3;
+            if (researched && techLevel)
+                playInterfaceFeedback(
+                    kInterfaceTechLevelSound);
+            building.productionQueue.pop_front();
+            building.productionRemaining =
+                building.productionQueue.empty()
+                    ? 0.0f
+                    : building.productionQueue.front().duration;
+            if (researched &&
+                building.player == localPlayer_) {
+                statusMessage_ =
+                    technologyDisplayName(
+                        item.technologyId) +
+                    " COMPLETE";
+                statusTime_ = 3.0f;
+            } else if (researched && techLevel) {
+                statusMessage_ =
+                    playerDisplayName(
+                        building.player) +
+                    " ADVANCED TO " +
+                    technologyDisplayName(
+                        item.technologyId);
+                statusTime_ = 3.0f;
+            }
+            continue;
+        }
+        const dat::Unit *unit = item.unit;
+        if (!unit) {
+            building.productionQueue.pop_front();
+            building.productionRemaining =
+                building.productionQueue.empty()
+                    ? 0.0f
+                    : building.productionQueue.front().duration;
+            continue;
+        }
+        const float population =
+            populationUse(*unit);
+        const float capacity =
+            populationCapacity(building.player);
+        if (population > 0.0f &&
+            building.player > 0 &&
+            (size_t)building.player <
+                reservedPopulation.size() &&
+            reservedPopulation[
+                (size_t)building.player] +
+                    population >
+                capacity + 0.001f) {
+            building.productionRemaining = 0.0f;
+            if (!building.productionPopulationBlocked &&
+                building.player == localPlayer_) {
+                statusMessage_ =
+                    assets_.localizedString(3005);
+                if (statusMessage_.empty())
+                    statusMessage_ =
+                        "YOU NEED TO BUILD MORE SHELTERS";
+                statusTime_ = 3.0f;
+                playInterfaceFeedback(
+                    kInterfaceNeedHousingSound);
+            }
+            building.productionPopulationBlocked =
+                true;
+            continue;
+        }
+        building.productionPopulationBlocked = false;
+        float exitX = 0.0f;
+        float exitY = 0.0f;
+        if (!findProductionExit(
+                building, *unit,
+                reservedProductionExits,
+                exitX, exitY)) {
+            building.productionRemaining = 0;
+            continue;
+        }
+        Object candidate;
+        candidate.unit = unit;
+        candidate.player = building.player;
+        productionSpawns.push_back(
+            {unit, building.player, exitX, exitY,
+             building.spawnId});
+        if (building.player > 0 &&
+            (size_t)building.player <
+                reservedPopulation.size())
+            reservedPopulation[
+                (size_t)building.player] +=
+                population;
+        reservedProductionExits.push_back(
+            {exitX, exitY, collisionRadius(candidate),
+             isAirUnit(candidate) ? 1.0f : 0.0f});
+        if (building.player == localPlayer_ &&
+            unit->trainSound >= 0)
+            playWorldUnitSound(
+                building, unit->trainSound);
+        building.productionQueue.pop_front();
+        building.productionRemaining =
+            building.productionQueue.empty()
+                ? 0.0f
+                : forceBuildCheat_ &&
+                         building.player == localPlayer_
+                     ? 0.0f
+                : building.productionQueue.front().duration;
+    }
+    for (const ProductionSpawn &spawned : productionSpawns) {
+        Object *created = addObject(
+            spawned.unit, spawned.player, spawned.x, spawned.y,
+            -kPi * 0.5f, nextSpawnId_++);
+        if (created) {
+            created->wander = false;
+            created->state = State::Idle;
+            created->animTime = 0.0f;
+            created->stateTime = 0.0f;
+            created->initialFrame = 0;
+            const uint32_t createdId = created->spawnId;
+            classifyObject(objects_.size() - 1);
+            Object *building = findObject(spawned.buildingId);
+            Object *unit = findObject(createdId);
+            if (building && unit) sendToGatherPoint(*building, *unit);
+        }
+    }
+    const auto constructionStart =
+        UpdateClock::now();
+    updateStats_.worldProductionUs =
+        elapsedUs(
+            worldStart,
+            constructionStart);
+    updateConstruction(dt);
+    const auto shieldsStart =
+        UpdateClock::now();
+    updateStats_.worldConstructionUs =
+        elapsedUs(
+            constructionStart,
+            shieldsStart);
+    updateShields(dt);
+    const auto occupancyStart =
+        UpdateClock::now();
+    updateStats_.worldShieldsUs =
+        elapsedUs(
+            shieldsStart,
+            occupancyStart);
+    rebuildMobileOccupancy();
+    const auto workersStart =
+        UpdateClock::now();
+    updateStats_.worldOccupancyUs =
+        elapsedUs(
+            occupancyStart,
+            workersStart);
+    updateLivestockOwnership();
+    const auto gatheringStart =
+        UpdateClock::now();
+    updateStats_.worldLivestockUs =
+        elapsedUs(
+            workersStart,
+            gatheringStart);
+    updateGathering(dt);
+    const auto repairingStart =
+        UpdateClock::now();
+    updateStats_.worldGatheringUs =
+        elapsedUs(
+            gatheringStart,
+            repairingStart);
+    updateRepairing(dt);
+    const auto conversionStart =
+        UpdateClock::now();
+    updateStats_.worldRepairingUs =
+        elapsedUs(
+            repairingStart,
+            conversionStart);
+    updateConversion(dt);
+    const auto holocronsStart =
+        UpdateClock::now();
+    updateStats_.worldConversionUs =
+        elapsedUs(
+            conversionStart,
+            holocronsStart);
+    updateHolocrons(dt);
+    const auto maintenanceStart =
+        UpdateClock::now();
+    simulationMaintenanceStart_ = maintenanceStart;
+    updateStats_.worldHolocronsUs =
+        elapsedUs(
+            holocronsStart,
+            maintenanceStart);
+    updateStats_.worldWorkersUs =
+        elapsedUs(
+            workersStart,
+            maintenanceStart);
+    // Gate logic, following the original (battlegrounds_x1.exe 0x558390):
+    // the gate watches a 0.4-tile-wide corridor between its two end posts.
+    // A closed, unlocked gate swaps to its OPEN unit the moment a friendly
+    // unit is in the corridor; an open gate swaps back to CLOSED 0.5s after
+    // the corridor is empty of all units. There is no intermediate frame.
+    for (Object &gate : prefetched(objects_)) {
+        if (!gate.active || !gate.gate || !gate.gateClosedUnit ||
+            !gate.gateOpenUnit || gate.underConstruction)
+            continue;
+        const dat::Unit *layout = gate.gateClosedUnit;
+        float postX[2] = {gate.x, gate.x}, postY[2] = {gate.y, gate.y};
+        int posts = 0;
+        for (const dat::BuildingAnnex &annex : layout->annexes) {
+            if (annex.unitId < 0 || posts >= 2) continue;
+            postX[posts] = gate.x + annex.misplacementY;
+            postY[posts] = gate.y - annex.misplacementX;
+            posts++;
+        }
+        if (posts < 2) {
+            // No posts: use the long axis of the gate footprint.
+            const bool alongX = layout->collisionSize[0] >= layout->collisionSize[1];
+            const float half = std::max(layout->collisionSize[0], layout->collisionSize[1]);
+            postX[0] = gate.x - (alongX ? half : 0); postX[1] = gate.x + (alongX ? half : 0);
+            postY[0] = gate.y - (alongX ? 0 : half); postY[1] = gate.y + (alongX ? 0 : half);
+        }
+        const float segX = postX[1] - postX[0], segY = postY[1] - postY[0];
+        const float segLen2 = std::max(1e-4f, segX * segX + segY * segY);
+        int total = 0, friendly = 0;
+        for (uint32_t index : mobileObjectIndices_) {
+            const Object &unit = objects_[(size_t)index];
+            if (!unit.active || unit.hidden || isAirUnit(unit) ||
+                &unit == &gate)
+                continue;
+            const int cls = unit.unit->cls;
+            if (cls == 6 || cls == 8 || cls == 9 || cls == 10 || cls == 18)
+                continue;
+            const float t = std::max(0.0f, std::min(1.0f,
+                ((unit.x - postX[0]) * segX + (unit.y - postY[0]) * segY) / segLen2));
+            const float dx = unit.x - (postX[0] + segX * t);
+            const float dy = unit.y - (postY[0] + segY * t);
+            const float reach = 0.4f + collisionRadius(unit);
+            if (dx * dx + dy * dy > reach * reach) continue;
+            total++;
+            if (unit.player == gate.player || !isEnemy(gate, unit)) friendly++;
+        }
+        const bool open = gate.unit == gate.gateOpenUnit;
+        if (!open) {
+            if (!gate.locked && friendly > 0) {
+                gate.unit = gate.gateOpenUnit;
+                gate.gateOpenAmount = 1.0f;
+                gate.gateCloseTimer = 0.0f;
+                rebuildAdjacency();
+            }
+        } else if (total == 0) {
+            if (gate.gateCloseTimer <= 0.0f) {
+                gate.gateCloseTimer = 0.5f;
+            } else {
+                gate.gateCloseTimer -= dt;
+                if (gate.gateCloseTimer < 0.0f) {
+                    gate.gateCloseTimer = 0.0f;
+                    gate.unit = gate.gateClosedUnit;
+                    gate.gateOpenAmount = 0.0f;
+                    rebuildAdjacency();
+                }
+            }
+        }
+    }
+    commandMarkerTime_ = std::max(0.0f, commandMarkerTime_ - dt);
+    commandTargetTime_ = std::max(0.0f, commandTargetTime_ - dt);
+    selectionClickAge_ += dt;
+    animClock_ = std::fmod(animClock_ + dt, 3600.0f);
+    for (Object &object : prefetched(objects_))
+        if (object.active && object.unit &&
+            object.unit->type == dat::UT_Building &&
+            isFarmUnit(*object.unit))
+            syncFarmTerrain(object);
+    for (uint32_t workerIndex :
+         workerObjectIndices_) {
+        if ((size_t)workerIndex >=
+            objects_.size())
+            continue;
+        Object &worker =
+            objects_[(size_t)workerIndex];
+        if (!worker.active || !worker.unit ||
+            (!isWorker(worker) &&
+             !isBuilder(worker) &&
+             !isRepairer(worker)))
+            continue;
+        if (worker.constructionTargetId) {
+            worker.jobKind = 1;
+            worker.jobUnit = builderUnit(worker);
+        } else if (worker.repairTargetId) {
+            worker.jobKind = 2;
+            worker.jobUnit = repairerUnit(worker);
+        } else if (worker.gatherTargetId) {
+            const Object *target = findObject(worker.gatherTargetId);
+            if (target && target->resourceType >= 0 && target->resourceType <= 3) {
+                worker.jobKind = 10 + target->resourceType;
+                if (const dat::Unit *gatherer = gathererUnit(worker)) worker.jobUnit = gatherer;
+            }
+        }
+    }
+    for (const PendingCarcass &pending : pendingCarcasses_) {
+        Object *carcass = addObject(pending.deadUnit, pending.owner, pending.x, pending.y,
+                                    pending.facing, nextSpawnId_++);
+        if (!carcass) continue;
+        carcass->resourceType = 0;
+        carcass->resourceAmount = pending.amount;
+        carcass->carcassClass = pending.animalClass;
+        carcass->carcassDecay = pending.decay;
+        carcass->carcassHidden = pending.dying;
+        carcass->wander = false;
+        if (Object *animal = findObject(pending.animalId)) animal->carcassId = carcass->spawnId;
+    }
+    pendingCarcasses_.clear();
+    // Carcasses rot away: their food decays until none is left.
+    for (Object &carcass : prefetched(objects_)) {
+        if (!carcass.active || carcass.carcassClass < 0) continue;
+        carcass.carcassHidden = std::max(0.0f, carcass.carcassHidden - dt);
+        carcass.resourceAmount -= carcass.carcassDecay * dt;
+        if (carcass.resourceAmount <= 0.001f) {
+            carcass.resourceAmount = 0.0f;
+            killObject(carcass, false);
+        }
+    }
+    // Animal Nursery (garrison type 16): each garrisoned animal adds the
+    // nursery's work rate in food per second to its owner.
+    // Nursery food, damage-graphic sounds and the selection check share one
+    // pass over the objects. They touch disjoint state (resources, each
+    // building's damage sound timer and the sound queue, each object's
+    // selection), so doing them object by object is the same as three full
+    // passes; nursery income is added after the pass, in object order, once
+    // the garrisoned animals have all been counted (animalNurseryFoodRate()).
+    {
+        std::unordered_map<int32_t, size_t> nurseryAnimals;
+        std::vector<uint32_t> nurseries;
+        for (size_t objectIndex = 0; objectIndex < objects_.size(); ++objectIndex) {
+            Object &object = objects_[objectIndex];
+            prefetchObjectAhead(reinterpret_cast<const void *>(
+                reinterpret_cast<uintptr_t>(&object) + 6 * sizeof(Object)));
+            if (object.active && object.garrisonedInId >= 0 &&
+                object.unit && object.unit->cls == 1)
+                nurseryAnimals[object.garrisonedInId]++;
+            if (object.active &&
+                !object.underConstruction &&
+                object.player > 0 &&
+                object.unit &&
+                object.unit->type == dat::UT_Building &&
+                (object.unit->garrisonType & 16))
+                nurseries.push_back((uint32_t)objectIndex);
+            // Damage graphics (fire/smoke stages) carry their own sound,
+            // played each animation cycle like any graphic sound while the
+            // building is heard.
+            if (object.active && !object.hidden && object.unit &&
+                object.unit->type == dat::UT_Building && !object.underConstruction &&
+                object.maxHitPoints > 0.0f) {
+                const float damage = 100.0f * (1.0f - object.hitPoints / object.maxHitPoints);
+                const dat::DamageGraphic *stage = nullptr;
+                for (const dat::DamageGraphic &damageGraphic : object.unit->damageGraphics)
+                    if (damage >= damageGraphic.damagePercent &&
+                        (!stage || damageGraphic.damagePercent > stage->damagePercent))
+                        stage = &damageGraphic;
+                if (!stage) {
+                    object.damageSoundTime = 0.0f;
+                } else {
+                    object.damageSoundTime -= dt;
+                    if (object.damageSoundTime <= 0.0f) {
+                        const dat::Graphic *graphic = assets_.dat().graphic(stage->graphicId);
+                        const float cycle = graphic ? graphic->frameCount * graphic->frameDuration +
+                                                          graphic->replayDelay
+                                                    : 0.0f;
+                        object.damageSoundTime = std::max(2.0f, cycle);
+                        playWorldUnitSound(object, graphicSound(stage->graphicId));
+                    }
+                }
+            }
+            if (object.selected &&
+                (!isInspectable(object) ||
+                 (!objectCurrentlyVisibleToPlayer(
+                      object, localPlayer_) &&
+                  !(isGatherable(object) &&
+                    objectVisibleToPlayer(
+                        object, localPlayer_)))))
+                object.selected = false;
+        }
+        // Animal Nursery (garrison type 16): each garrisoned animal adds the
+        // nursery's work rate in food per second to its owner.
+        for (uint32_t nurseryIndex : nurseries) {
+            const Object &nursery = objects_[nurseryIndex];
+            const auto found = nurseryAnimals.find((int32_t)nursery.spawnId);
+            const size_t animals = found == nurseryAnimals.end() ? 0 : found->second;
+            const float rate =
+                std::max(0.0f, nursery.unit->workRate) * (float)animals;
+            if (rate > 0.0f)
+                resources_[(size_t)nursery.player][0] +=
+                    rate * dt;
+        }
+    }
+    syncSelectionOrder();
+
+    if (worldInput) handleWorldInput(*worldInput);
+        return;
+    }
+    const auto worldStart = simulationWorldStart_;
+    const auto maintenanceStart = simulationMaintenanceStart_;
 
     std::uniform_real_distribution<float> r01(0, 1);
     auto spreadBlockedMoveGoal = [&](Object &object) {
@@ -21515,7 +22793,7 @@ void Game::update(float dt, const InputState &in) {
                     continue; // must be on the goal's side of any wall
                 bool formationSlotOpen = true;
                 if (object.moveGroupId != 0)
-                    for (const Object &other : objects_) {
+                    for (const Object &other : prefetched(objects_)) {
                         if (&other == &object || !other.active ||
                             other.moveGroupId != object.moveGroupId ||
                             isAirUnit(other) != isAirUnit(object))
@@ -21552,7 +22830,7 @@ void Game::update(float dt, const InputState &in) {
         size_t movingMembers = 0;
     };
     std::unordered_map<uint32_t, GroupCohesion> groupCohesion;
-    for (const Object &object : objects_) {
+    for (const Object &object : prefetched(objects_)) {
         if (!object.active || !object.moveGoalActive ||
             object.moveGroupId == 0)
             continue;
@@ -21565,8 +22843,18 @@ void Game::update(float dt, const InputState &in) {
             std::min(cohesion.nearestRemaining, remaining);
         cohesion.movingMembers++;
     }
+    const auto movementStart =
+        UpdateClock::now();
+    updateStats_.worldMaintenanceUs =
+        elapsedUs(
+            maintenanceStart,
+            movementStart);
+    updateStats_.worldUs =
+        elapsedUs(
+            worldStart,
+            movementStart);
     updateMarchGroups(dt);
-    for (Object &o : objects_) {
+    for (Object &o : prefetched(objects_)) {
         if (!o.active) continue;
         o.animTime += dt;
         o.approachRetry = std::max(0.0f, o.approachRetry - dt);
@@ -22039,16 +23327,54 @@ void Game::update(float dt, const InputState &in) {
             }
         }
     }
+    const auto finalStart =
+        UpdateClock::now();
+    updateStats_.movementUs =
+        elapsedUs(
+            movementStart,
+            finalStart);
     updateGarrisoning();
+    const auto projectilesStart =
+        UpdateClock::now();
+    updateStats_.finalGarrisonUs =
+        elapsedUs(
+            finalStart,
+            projectilesStart);
     updateProjectiles(dt);
+    const auto remainsStart =
+        UpdateClock::now();
+    updateStats_.finalProjectilesUs =
+        elapsedUs(
+            projectilesStart,
+            remainsStart);
     updateRemains(dt);
+    const auto visibilityStart =
+        UpdateClock::now();
+    updateStats_.finalRemainsUs =
+        elapsedUs(
+            remainsStart,
+            visibilityStart);
     visibilityTime_ -= dt;
     if (visibilityTime_ <= 0.0f) {
         updateVisibility();
         visibilityTime_ = 0.15f;
     }
+    const auto victoryStart =
+        UpdateClock::now();
+    updateStats_.finalVisibilityUs =
+        elapsedUs(
+            visibilityStart,
+            victoryStart);
     updateConquest(dt);
     updateVictoryConditions(dt);
+    updateStats_.finalVictoryUs =
+        elapsedUs(
+            victoryStart,
+            UpdateClock::now());
+    updateStats_.finalUs =
+        elapsedUs(
+            finalStart,
+            UpdateClock::now());
 }
 
 // Picks the SLP frame for a graphic given a world-space facing and time.
@@ -22226,7 +23552,11 @@ void Game::drawGraphic(Renderer &r, int graphicId, float sx, float sy, float fac
 
 void Game::updateMinimapTexture(
     Renderer &renderer) {
+#if defined(__vita__) || defined(SWGB_VITA_PROFILE)
+    constexpr int textureSize = 64;
+#else
     constexpr int textureSize = 128;
+#endif
     if (mapSize_ <= 0) return;
     if (minimapRenderer_ != &renderer ||
         minimapTextureSize_ != textureSize) {
@@ -22243,7 +23573,11 @@ void Game::updateMinimapTexture(
     if (minimapTexture_ &&
         minimapRefreshTime_ > 0.0f)
         return;
+#if defined(__vita__) || defined(SWGB_VITA_PROFILE)
+    minimapRefreshTime_ = 0.5f;
+#else
     minimapRefreshTime_ = 0.25f;
+#endif
     const auto &terrains =
         assets_.dat().terrainBlock.terrains;
     const auto &palette = assets_.palette();
@@ -22357,7 +23691,13 @@ void Game::updateMinimapTexture(
                         offset + 2] = blue;
                 }
         };
-    for (const Object &object : objects_) {
+    for (uint32_t objectIndex :
+         minimapObjectIndices_) {
+        if ((size_t)objectIndex >=
+            objects_.size())
+            continue;
+        const Object &object =
+            objects_[(size_t)objectIndex];
         if (!object.active || object.hidden ||
             !object.draw || !object.unit ||
             object.unit->minimapMode == 0)
@@ -22412,7 +23752,11 @@ void Game::drawFogOverlay(
     Renderer &renderer, int screenW,
     int screenH, float originX,
     float originY) {
+#if defined(__vita__) || defined(SWGB_VITA_PROFILE)
+    constexpr int sampleSize = 8;
+#else
     constexpr int sampleSize = 4;
+#endif
     const int textureWidth =
         (screenW + sampleSize - 1) /
         sampleSize;
@@ -22451,19 +23795,33 @@ void Game::drawFogOverlay(
         fogVisibilityGeneration_ !=
             visibilityGeneration_;
     if (dirty) {
+        // Each tile's darkness is looked up once per redraw (the samples
+        // ask for the same few hundred tiles thousands of times).
+        const size_t fogTiles = (size_t)mapSize_ * mapSize_;
+        if (fogDarknessStamp_.size() != fogTiles) {
+            fogDarknessStamp_.assign(fogTiles, 0);
+            fogDarkness_.assign(fogTiles, 0);
+            fogDarknessGeneration_ = 0;
+        }
+        if (++fogDarknessGeneration_ == 0) {
+            std::fill(fogDarknessStamp_.begin(), fogDarknessStamp_.end(), 0);
+            fogDarknessGeneration_ = 1;
+        }
         const auto tileDarkness =
             [&](int x, int y) -> float {
                 if (x < 0 || y < 0 ||
                     x >= mapSize_ ||
                     y >= mapSize_)
                     return 255.0f;
-                if (tileVisible(
-                        localPlayer_, x, y))
-                    return 0.0f;
-                return tileExplored(
-                           localPlayer_, x, y)
-                           ? 138.0f
-                           : 255.0f;
+                const size_t tile = (size_t)y * mapSize_ + x;
+                if (fogDarknessStamp_[tile] != fogDarknessGeneration_) {
+                    fogDarknessStamp_[tile] = fogDarknessGeneration_;
+                    fogDarkness_[tile] =
+                        tileVisible(localPlayer_, x, y)
+                            ? 0
+                            : tileExplored(localPlayer_, x, y) ? 138 : 255;
+                }
+                return (float)fogDarkness_[tile];
             };
         const auto fogAt =
             [&](float screenX,
@@ -22515,9 +23873,9 @@ void Game::drawFogOverlay(
                 const float gridY =
                     worldY - 0.5f;
                 const int x =
-                    (int)std::floor(gridX);
+                    fastFloor(gridX);
                 const int y =
-                    (int)std::floor(gridY);
+                    fastFloor(gridY);
                 float fx = gridX - x;
                 float fy = gridY - y;
                 fx = fx * fx *
@@ -22538,7 +23896,7 @@ void Game::drawFogOverlay(
                         x + 1, y + 1) *
                         fx;
                 const int alpha =
-                    (int)std::lround(
+                    (int)fastRound(
                         top *
                             (1.0f - fy) +
                         bottom * fy);
@@ -22628,7 +23986,60 @@ void Game::drawGraphicNow(Renderer &r, int graphicId, float sx, float sy, float 
     g_draws.clear();
 }
 
+void Game::recordPreviousPositions() {
+    previousPositions_.clear();
+    for (uint32_t index : mobileObjectIndices_) {
+        const Object &object = objects_[(size_t)index];
+        if (object.active) previousPositions_.push_back({index, object.x, object.y});
+    }
+}
+
 void Game::render(Renderer &r, int screenW, int screenH) {
+    if (renderInterpolation_ >= 1.0f || previousPositions_.empty()) {
+        renderFrame(r, screenW, screenH);
+        return;
+    }
+    // Draw moving objects between their last two simulated positions, then
+    // put the simulated positions back.
+    const float alpha = std::max(0.0f, renderInterpolation_);
+    struct Saved {
+        uint32_t index;
+        float x, y;
+    };
+    std::vector<Saved> saved;
+    saved.reserve(previousPositions_.size());
+    for (const PreviousPosition &previous : previousPositions_) {
+        if (previous.index >= objects_.size()) continue;
+        Object &object = objects_[previous.index];
+        if (!object.active) continue;
+        const float dx = object.x - previous.x, dy = object.y - previous.y;
+        if (dx * dx + dy * dy > 9.0f || (dx == 0.0f && dy == 0.0f)) continue; // teleports, idle
+        saved.push_back({previous.index, object.x, object.y});
+        object.x = previous.x + dx * alpha;
+        object.y = previous.y + dy * alpha;
+    }
+    renderFrame(r, screenW, screenH);
+    for (const Saved &entry : saved) {
+        objects_[entry.index].x = entry.x;
+        objects_[entry.index].y = entry.y;
+    }
+}
+
+void Game::renderFrame(Renderer &r, int screenW, int screenH) {
+    using RenderClock =
+        std::chrono::steady_clock;
+    const auto elapsedRenderUs =
+        [](RenderClock::time_point from,
+           RenderClock::time_point to) {
+            return (uint64_t)
+                std::chrono::duration_cast<
+                    std::chrono::microseconds>(
+                    to - from)
+                    .count();
+        };
+    const auto renderStart =
+        RenderClock::now();
+    renderStats_ = RenderStats{};
     stats_ = FrameStats{};
     g_textScale = zoom_;
     assets_.beginTerrainFrame(textureBudget_);
@@ -22755,8 +24166,100 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     };
     static constexpr int neighborX[8] = {-1, 0, 1, 1, 1, 0, -1, -1};
     static constexpr int neighborY[8] = {-1, -1, -1, 0, 1, 1, 1, 0};
-    static constexpr int slopeNeighborX[8] = {-1, 1, 1, -1, 0, 1, 0, -1};
-    static constexpr int slopeNeighborY[8] = {-1, -1, 1, 1, -1, 0, 1, 0};
+    // Screen-direction neighbours in SlopeNeighbor order W,N,E,S,NW,NE,SE,SW.
+    // The exe table DAT_0069b790 is {-1,-1},{1,-1},{1,1},{-1,1},{0,-1},{1,0},{0,1},{-1,0}
+    // in ORIGINAL (x,y); engine (X,Y) = (y, mapSize - x), so (dx,dy) -> (dy,-dx).
+    // With toScreen(sx=X-Y, sy=X+Y) these are W=(-1,+1), N=(-1,-1), E=(+1,-1), ...
+    static constexpr int slopeNeighborX[8] = {-1, -1, 1, 1, -1, 0, 1, 0};
+    static constexpr int slopeNeighborY[8] = {1, -1, -1, 1, 0, -1, 0, 1};
+
+    // Terrain layer cache: valid while the view, the terrain options and the
+    // terrain/slope/elevation bytes of the visible tiles (plus a one-tile
+    // border for blends and slope lighting) are unchanged.
+    const bool terrainLayerSupported = r.supportsLayer();
+    TerrainLayerKey terrainKey;
+    terrainKey.renderer = &r;
+    terrainKey.ox = ox;
+    terrainKey.oy = oy;
+    terrainKey.zoom = zoom_;
+    terrainKey.screenW = screenW;
+    terrainKey.screenH = screenH;
+    terrainKey.x0 = x0;
+    terrainKey.y0 = y0;
+    terrainKey.x1 = x1;
+    terrainKey.y1 = y1;
+    terrainKey.mapSize = mapSize_;
+    terrainKey.reducedLighting = reducedTerrainLighting;
+    terrainKey.blends = drawTerrainBlends;
+    bool terrainLayerReuse = false;
+    if (terrainLayerSupported) {
+        terrainLayerScratch_.clear();
+        const int bx0 = std::max(0, x0 - 1), by0 = std::max(0, y0 - 1);
+        const int bx1 = std::min(mapSize_ - 1, x1 + 1), by1 = std::min(mapSize_ - 1, y1 + 1);
+        for (int ty = by0; ty <= by1; ty++)
+            for (int tx = bx0; tx <= bx1; tx++) {
+                const size_t tileIndex = (size_t)ty * mapSize_ + tx;
+                terrainLayerScratch_.push_back(terrain_[tileIndex]);
+                terrainLayerScratch_.push_back(tileSlope_[tileIndex]);
+                terrainLayerScratch_.push_back(tileElevation_[tileIndex]);
+            }
+        terrainLayerReuse = terrainLayerValid_ && terrainKey == terrainLayerKey_ &&
+                            terrainLayerScratch_ == terrainLayerBytes_;
+    }
+    const size_t terrainBuildsBeforePrepare = assets_.buildCount() + assets_.slopeBuildCount();
+    if (!terrainLayerReuse) {
+    // Base terrain is essential; slope blends are optional detail. Populate
+    // every visible base request first so the three-build Vita budget cannot
+    // be consumed by masks while later tiles remain transparent.
+    for (int ty = y0; ty <= y1; ty++) {
+        for (int tx = x0; tx <= x1; tx++) {
+            float sx, sy;
+            toScreen((float)tx, (float)ty, sx, sy);
+            const size_t tileIndex =
+                (size_t)ty * mapSize_ + tx;
+            const int slope = tileSlope_[tileIndex];
+            sy -= tileElevation_[tileIndex] *
+                  assets_.dat().terrainBlock.elevHeight;
+            sx -= ox;
+            sy -= oy;
+            if (sx + kTileHalfW < 0 ||
+                sx - kTileHalfW > viewW ||
+                sy > viewH + 48 ||
+                sy + 3 * kTileHalfH < 0)
+                continue;
+            std::array<int8_t, 8> neighborSlopes;
+            neighborSlopes.fill(
+                reducedTerrainLighting ? 0 : -1);
+            if (!reducedTerrainLighting)
+                for (size_t i = 0;
+                     i < neighborSlopes.size();
+                     ++i) {
+                    const int nx =
+                        tx + slopeNeighborX[i];
+                    const int ny =
+                        ty + slopeNeighborY[i];
+                    if (nx >= 0 && ny >= 0 &&
+                        nx < mapSize_ &&
+                        ny < mapSize_)
+                        neighborSlopes[i] =
+                            tileSlope_[
+                                (size_t)ny *
+                                    mapSize_ +
+                                nx];
+                }
+            const dat::Terrain &draw =
+                drawTerrain(
+                    terrains,
+                    terrainAt(tx, ty));
+            const SpriteSheet *flat =
+                assets_.terrainSheet(draw.slp);
+            assets_.terrainSlopeFrame(
+                draw.slp, slope,
+                frameIndexFor(
+                    flat, tx, ty, slope),
+                neighborSlopes);
+        }
+    }
 
     // VitaGL texture creation during an active frame can expose uninitialized
     // tiles for one swap. Populate every visible cache entry before beginFrame.
@@ -22823,12 +24326,47 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             }
         }
     }
+    }
+    const size_t terrainBuildsDuringPrepare =
+        assets_.buildCount() + assets_.slopeBuildCount() - terrainBuildsBeforePrepare;
 
+    const auto objectPrepareStart =
+        RenderClock::now();
+    renderStats_.prepareTerrainUs =
+        elapsedRenderUs(
+            renderStart,
+            objectPrepareStart);
     g_draws.clear();
-    for (const Object &o : objects_) {
+    screenPickObjectIndices_.clear();
+    // Elevation only lifts a sprite by elevation * elevHeight, so objects far
+    // outside the view can be rejected before interpolating it.
+    float elevationLiftMin = 0.0f, elevationLiftMax = 0.0f;
+    if (!cornerElevation_.empty()) {
+        const auto range = std::minmax_element(
+            cornerElevation_.begin(), cornerElevation_.end());
+        const float height = assets_.dat().terrainBlock.elevHeight;
+        elevationLiftMin = std::min(*range.first * height, *range.second * height);
+        elevationLiftMax = std::max(*range.first * height, *range.second * height);
+        elevationLiftMin = std::min(0.0f, elevationLiftMin);
+        elevationLiftMax = std::max(0.0f, elevationLiftMax);
+    }
+    for (size_t objectIndex = 0;
+         objectIndex < objects_.size();
+         ++objectIndex) {
+        const Object &o =
+            objects_[objectIndex];
+        prefetchObjectAhead(reinterpret_cast<const void *>(reinterpret_cast<uintptr_t>(&o) + 6 * sizeof(Object)));
         if (!o.active || o.hidden || !o.draw || o.carcassHidden > 0.0f) continue;
         float sx, sy;
         toScreen(o.x, o.y, sx, sy);
+        {
+            const float cullX = sx - ox;
+            if (cullX < -400 || cullX > viewW + 400) continue;
+            const float baseY = sy - oy;
+            if (baseY - elevationLiftMax > viewH + 501.0f ||
+                baseY - elevationLiftMin < -101.0f)
+                continue;
+        }
         sy -= elevationAt(o.x, o.y) * assets_.dat().terrainBlock.elevHeight;
         sx -= ox;
         sy -= oy;
@@ -22837,6 +24375,10 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         if (!objectVisibleToPlayer(
                 o, localPlayer_))
             continue;
+        if (isInspectable(o) ||
+            isGatherable(o))
+            screenPickObjectIndices_.push_back(
+                (uint32_t)objectIndex);
         if (overview &&
             (o.unit->type == dat::UT_Trees || o.unit->type == dat::UT_AoeTrees)) {
             const uint32_t x = (uint32_t)std::lround(o.x * 2.0f);
@@ -23213,8 +24755,30 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                         0, 0, false, viewW, viewH);
         }
     }
+    const auto beginFrameStart =
+        RenderClock::now();
+    renderStats_.prepareObjectsUs =
+        elapsedRenderUs(
+            objectPrepareStart,
+            beginFrameStart);
     r.beginFrame(screenW, screenH, zoom_, 0, 0, 0);
+    const auto terrainDrawStart =
+        RenderClock::now();
+    renderStats_.beginFrameUs =
+        elapsedRenderUs(
+            beginFrameStart,
+            terrainDrawStart);
 
+    // A still camera over unchanged terrain redraws the cached layer.
+    bool terrainLayerDrawing = false;
+    bool terrainLayerComplete = true;
+    const size_t terrainBuildsBeforeDraw = assets_.buildCount() + assets_.slopeBuildCount();
+    const int terrainTilesBefore = stats_.tiles;
+    if (terrainLayerReuse) {
+        r.drawLayer();
+        stats_.tiles += terrainLayerTiles_;
+    } else {
+    terrainLayerDrawing = terrainLayerSupported && r.beginLayer();
     for (int ty = y0; ty <= y1; ty++) {
         for (int tx = x0; tx <= x1; tx++) {
             float sx, sy;
@@ -23242,12 +24806,27 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             const size_t terrainFrame = frameIndexFor(flatBase, tx, ty, slope);
             const SpriteFrame *baseFrame =
                 assets_.terrainSlopeFrame(draw.slp, slope, terrainFrame, neighborSlopes);
-            if (!baseFrame) continue;
+            bool flatFallback = false;
+            if (!baseFrame && flatBase &&
+                !flatBase->frames.empty()) {
+                baseFrame =
+                    &flatBase->frames[
+                        terrainFrame %
+                        flatBase->frames.size()];
+                flatFallback = true;
+                terrainLayerComplete = false;
+            }
+            if (!baseFrame) { terrainLayerComplete = false; continue; }
             const SpriteFrame &f = *baseFrame;
-            const int deltaY = slope < (int)assets_.dat().terrainBlock.tileSizes.size()
+            const int deltaY = !flatFallback &&
+                                       slope < (int)assets_.dat().terrainBlock.tileSizes.size()
                                    ? assets_.dat().terrainBlock.tileSizes[(size_t)slope].deltaY
                                    : 0;
-            const float tileY = sy - deltaY - (slope ? 12.0f : 0.0f);
+            const float tileY =
+                sy - deltaY -
+                (!flatFallback && slope
+                     ? 12.0f
+                     : 0.0f);
             Quad q{sx - kTileHalfW, tileY, (float)f.w, (float)f.h, f.u, f.v, f.u + f.w, f.v + f.h};
             r.draw(f.tex, q);
             stats_.tiles++;
@@ -23287,7 +24866,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 const size_t overlayFrame = frameIndexFor(flatOverlay, tx, ty, slope);
                 const SpriteFrame *overlay =
                     assets_.terrainSlopeFrame(drawOverlay.slp, slope, overlayFrame, neighborSlopes);
-                if (!overlay) continue;
+                if (!overlay) { terrainLayerComplete = false; continue; }
                 Quad overlayQ{sx - kTileHalfW, tileY, (float)overlay->w, (float)overlay->h,
                               overlay->u, overlay->v, overlay->u + overlay->w, overlay->v + overlay->h};
                 std::array<int, 5> maskIds;
@@ -23295,7 +24874,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                 int mode = blendModeFor(t.blendType, overlayTerrain.blendType);
                 for (int i = 0; i < maskCount; i++) {
                     const SpriteFrame *mask = assets_.blendMask(mode, maskIds[i], slope);
-                    if (!mask) continue;
+                    if (!mask) { terrainLayerComplete = false; continue; }
                     Quad maskQ{0, 0, (float)mask->w, (float)mask->h,
                                mask->u, mask->v, mask->u + mask->w, mask->v + mask->h};
                     r.drawMasked(overlay->tex, overlayQ, mask->tex, maskQ);
@@ -23303,9 +24882,30 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             }
         }
     }
+        if (terrainLayerDrawing) {
+            r.endLayer();
+            r.drawLayer();
+            terrainLayerValid_ =
+                terrainLayerComplete &&
+                assets_.buildCount() + assets_.slopeBuildCount() - terrainBuildsBeforeDraw +
+                        terrainBuildsDuringPrepare == 0;
+            terrainLayerKey_ = terrainKey;
+            terrainLayerBytes_.swap(terrainLayerScratch_);
+            terrainLayerTiles_ = stats_.tiles - terrainTilesBefore;
+        } else {
+            terrainLayerValid_ = false;
+        }
+    }
+
+    const auto worldDrawStart =
+        RenderClock::now();
+    renderStats_.drawTerrainUs =
+        elapsedRenderUs(
+            terrainDrawStart,
+            worldDrawStart);
 
     // Selection footprints sit on the terrain so foreground sprites occlude them.
-    for (const Object &object : objects_) {
+    for (const Object &object : prefetched(objects_)) {
         if (!object.active || object.hidden || !object.draw)
             continue;
         // The target of a gather/attack/build/garrison command blinks a
@@ -23409,7 +25009,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
     {
         const Object *flagOwner = nullptr;
         size_t selectedCount = 0;
-        for (const Object &object : objects_)
+        for (const Object &object : prefetched(objects_))
             if (object.active && object.selected) {
                 selectedCount++;
                 flagOwner = &object;
@@ -23687,7 +25287,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                    coreWidth, coreHeight, 255, 230, 135, 255);
     }
 
-    for (const Object &object : objects_) {
+    for (const Object &object : prefetched(objects_)) {
         if (!object.active || object.hidden || !object.draw || object.flashTime <= 0) continue;
         if (!objectVisibleToPlayer(
                 object, localPlayer_))
@@ -23710,7 +25310,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             r, screenW, screenH,
             ox, oy);
 
-    for (const Object &object : objects_) {
+    for (const Object &object : prefetched(objects_)) {
         if (!object.active || object.hidden || !object.draw || !object.selected) continue;
         if (!objectVisibleToPlayer(
                 object, localPlayer_))
@@ -23783,6 +25383,12 @@ void Game::render(Renderer &r, int screenW, int screenH) {
         }
     }
 
+    const auto uiDrawStart =
+        RenderClock::now();
+    renderStats_.drawWorldUs =
+        elapsedRenderUs(
+            worldDrawStart,
+            uiDrawStart);
     constexpr float minimapSize = 168.0f;
     constexpr float minimapTop = 10.0f;
     const float minimapLeft =
@@ -24647,7 +26253,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             panelObject->unit->type ==
                 dat::UT_Building) {
             size_t iconIndex = 0;
-            for (const Object &unit : objects_) {
+            for (const Object &unit : prefetched(objects_)) {
                 if (!unit.active ||
                     unit.garrisonedInId !=
                         (int32_t)panelObject->spawnId)
@@ -25092,7 +26698,7 @@ void Game::render(Renderer &r, int screenW, int screenH) {
                     .count(technologyId))
                 techLevel = technologyId + 1;
         float techProgress = -1.0f;
-        for (const Object &building : objects_) {
+        for (const Object &building : prefetched(objects_)) {
             if (!building.active ||
                 building.player != localPlayer_ ||
                 building.productionQueue.empty())
@@ -26695,7 +28301,17 @@ void Game::render(Renderer &r, int screenW, int screenH) {
             subtitleScale,
             220, 226, 232);
     }
+    const auto endFrameStart =
+        RenderClock::now();
+    renderStats_.drawUiUs =
+        elapsedRenderUs(
+            uiDrawStart,
+            endFrameStart);
     r.endFrame();
+    renderStats_.endFrameUs =
+        elapsedRenderUs(
+            endFrameStart,
+            RenderClock::now());
 }
 
 } // namespace swgb

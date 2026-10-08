@@ -2313,8 +2313,11 @@ bool Game::loadMatch(
     enemyIntelligenceCheat_ =
         enemyIntelligence;
     techGeneration_ = techGeneration;
+    attributeCacheGeneration_ = {};
+    unitAttributeOps_.clear();
     reseedQueue_ = reseedQueue;
     terrain_ = std::move(terrain);
+    preloadTerrainArt();
     cornerElevation_ =
         std::move(cornerElevation);
     tileElevation_ =
@@ -2322,6 +2325,7 @@ bool Game::loadMatch(
     tileSlope_ = std::move(tileSlope);
     exploredTiles_ = std::move(exploredTiles);
     visibleTiles_ = std::move(visibleTiles);
+    visibilityTouched_.fill(true);
     players_ = std::move(players);
     resources_ = std::move(resources);
     researchedTechs_ =

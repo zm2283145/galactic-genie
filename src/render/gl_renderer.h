@@ -29,6 +29,14 @@ public:
                   uint8_t r, uint8_t g, uint8_t b, uint8_t a) override;
     void fillRect(float x, float y, float w, float h, uint8_t r, uint8_t g, uint8_t b, uint8_t a) override;
     void endFrame() override;
+    bool supportsLayer() const override { return layersEnabled_; }
+    bool beginLayer() override;
+    void endLayer() override;
+    void drawLayer() override;
+    void setLayersEnabled(bool enabled) { layersEnabled_ = enabled; }
+    // The layer texture's rows can come out flipped relative to the screen
+    // depending on the GL implementation; true samples it bottom-up.
+    void setLayerFlipped(bool flipped) { layerFlipped_ = flipped; }
 
     int drawCalls() const { return drawCalls_; }
     int quads() const { return quads_; }
@@ -49,6 +57,13 @@ private:
     Texture *currentMask_ = nullptr;
     Texture *white_ = nullptr;
     int drawCalls_ = 0, quads_ = 0;
+    int frameW_ = 0, frameH_ = 0;
+    float frameScale_ = 1.0f;
+    float clear_[3] = {0, 0, 0};
+    unsigned layerFbo_ = 0, layerTexture_ = 0;
+    int layerW_ = 0, layerH_ = 0;
+    bool layersEnabled_ = false, inLayer_ = false, layerReady_ = false;
+    bool layerFlipped_ = true;
 };
 
 } // namespace swgb

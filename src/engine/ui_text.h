@@ -16,6 +16,7 @@ void drawUiText(
     float x, float y, float scale,
     uint8_t red = 255,
     uint8_t green = 255,
-    uint8_t blue = 255);
+    uint8_t blue = 255,
+    uint8_t alpha = 255);
 
 } // namespace swgb

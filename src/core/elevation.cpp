@@ -56,17 +56,30 @@ uint8_t ElevationMaps::colorIndex(size_t map, uint8_t r, uint8_t g, uint8_t b) c
 
 uint8_t ElevationMaps::lightIndex(uint16_t textureIndex, const uint8_t *patterns,
                                   size_t patternCount) const {
+    // battlegrounds_x1.exe FUN_0060fe60 (case 2/3): start from the slope's base
+    // mask (>>2), drop duplicate extra masks (a duplicate is replaced by the last
+    // entry), then apply the extras from LAST to FIRST. Bit0 = leave pixel alone,
+    // bit1 = max, otherwise min. The result & 0x1f picks the LightMaps.dat entry.
     if (textureIndex >= 4096 || patternCount == 0) return 4;
     uint8_t first = patterns[0];
     if (first >= patternMasks_.size()) return 4;
-    uint8_t result = (patternMasks_[first][textureIndex] >> 2) & 0x1F;
-    for (size_t i = 1; i < patternCount; i++) {
-        uint8_t pattern = patterns[i];
-        if (pattern >= patternMasks_.size()) continue;
-        uint8_t pixel = patternMasks_[pattern][textureIndex];
+    uint8_t extras[16];
+    size_t count = 0;
+    for (size_t i = 1; i < patternCount && count < sizeof extras; i++)
+        if (patterns[i] < patternMasks_.size()) extras[count++] = patterns[i];
+    for (size_t i = 0; i + 1 < count; i++)
+        for (size_t j = i + 1; j < count; j++)
+            if (extras[i] == extras[j]) {
+                if (j < count - 1) extras[j] = extras[count - 1];
+                count--;
+                j--;
+            }
+    uint8_t result = patternMasks_[first][textureIndex] >> 2;
+    for (size_t i = count; i-- > 0;) {
+        uint8_t pixel = patternMasks_[extras[i]][textureIndex];
+        if (pixel & 1) continue;
         uint8_t brightness = pixel >> 2;
-        if (!(pixel & 1) && ((pixel & 2) ? brightness > result : brightness < result))
-            result = brightness;
+        if ((pixel & 2) ? brightness > result : brightness < result) result = brightness;
     }
     result &= 0x1F;
     return result < lightMaps_.size() ? lightMaps_[result][textureIndex] : 4;

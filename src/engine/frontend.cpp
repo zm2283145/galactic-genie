@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "frontend.h"
+#include "campaign_scene.h"
 #include "menu_framework.h"
 #include "ui_text.h"
 
@@ -15,19 +16,76 @@ constexpr float kMenuTop = 154.0f;
 constexpr float kMenuRow = 46.0f;
 constexpr float kLobbyTop = 91.0f;
 constexpr float kLobbyRow = 28.0f;
-constexpr float kOriginalMenuTop = 120.0f;
-constexpr float kOriginalMenuRow = 48.0f;
+constexpr float kOriginalMenuTop = 93.0f;
+constexpr float kOriginalMenuRow = 58.5f;
+constexpr float kOriginalMenuEntryHeight = 38.0f;
 constexpr float kOriginalMissionTop = 108.0f;
 constexpr float kOriginalMissionRow = 43.0f;
-constexpr std::array<std::array<float, 2>, 6>
-    kCampaignIconPositions{{
-        {{368.0f, 82.0f}},
-        {{540.0f, 150.0f}},
-        {{548.0f, 300.0f}},
-        {{368.0f, 362.0f}},
-        {{190.0f, 300.0f}},
-        {{184.0f, 150.0f}},
+struct OriginalHotspot {
+    float x;
+    float y;
+    float w;
+    float h;
+};
+// Internal order keeps Single Player as the default controller selection.
+constexpr std::array<OriginalHotspot, 8>
+    kOriginalMainHotspots{{
+        {282.0f, 170.0f, 174.0f, 153.0f},
+        {272.0f, 54.0f, 177.0f, 147.0f},
+        {55.0f, 58.0f, 185.0f, 90.0f},
+        {16.0f, 176.0f, 141.0f, 169.0f},
+        {55.0f, 306.0f, 100.0f, 124.0f},
+        {190.0f, 370.0f, 214.0f, 74.0f},
+        {198.0f, 474.0f, 138.0f, 80.0f},
+        {0.0f, 540.0f, 93.0f, 50.0f},
     }};
+constexpr std::array<OriginalHotspot, 8>
+    kExpandingFrontsMainHotspots{{
+        {283.0f, 195.0f, 125.0f, 93.0f},
+        {282.0f, 97.0f, 122.0f, 77.0f},
+        {100.0f, 92.0f, 107.0f, 79.0f},
+        {37.0f, 212.0f, 100.0f, 90.0f},
+        {31.0f, 369.0f, 111.0f, 119.0f},
+        {206.0f, 363.0f, 184.0f, 110.0f},
+        {183.0f, 518.0f, 123.0f, 74.0f},
+        {0.0f, 541.0f, 93.0f, 50.0f},
+    }};
+
+const std::array<OriginalHotspot, 8> &
+mainHotspots(bool expandingFronts) {
+    return expandingFronts
+               ? kExpandingFrontsMainHotspots
+               : kOriginalMainHotspots;
+}
+struct OriginalCampaignPlacement {
+    float iconX;
+    float iconY;
+    float labelCenterX;
+    float labelY;
+    size_t labelWidth;
+};
+constexpr std::array<OriginalCampaignPlacement, 6>
+    kOriginalCampaignPlacements{{
+        {130.0f, 297.0f, 242.0f, 369.0f, 18},
+        {138.0f, 184.0f, 269.0f, 255.0f, 20},
+        {240.0f, 95.0f, 331.0f, 166.0f, 20},
+        {481.0f, 95.0f, 479.0f, 166.0f, 20},
+        {565.0f, 184.0f, 510.0f, 255.0f, 22},
+        {594.0f, 297.0f, 579.0f, 369.0f, 20},
+    }};
+
+size_t originalCampaignSlot(
+    const CampaignInfo &campaign) {
+    switch (campaign.originalNumber) {
+    case 8: return 0;
+    case 1: return 1;
+    case 2: return 2;
+    case 3: return 3;
+    case 4: return 4;
+    case 5: return 5;
+    default: return kOriginalCampaignPlacements.size();
+    }
+}
 
 void centeredText(
     Renderer &renderer, const std::string &value,
@@ -237,6 +295,7 @@ void Frontend::moveSelection(
         (selection_ + count +
          (direction < 0 ? count - 1 : 1)) %
         count;
+    if (sounds_) sounds_(50301);
 }
 
 size_t Frontend::rowFromPointer(
@@ -523,36 +582,61 @@ FrontendAction Frontend::update(
     }
 
     if (screen_ == FrontendScreen::MainMenu) {
-        constexpr size_t count = 6;
-        const float scaleY =
-            input.screenH > 0
-                ? input.screenH / 600.0f
-                : 1.0f;
-        const size_t touched =
-            rowFromPointer(
-                input, kOriginalMenuTop * scaleY,
-                kOriginalMenuRow * scaleY, count);
+        constexpr size_t count = 8;
+        const auto &hotspots =
+            mainHotspots(expandingFrontsMenu_);
+        size_t touched = count;
+        if (input.pointerTap &&
+            input.screenW > 0 &&
+            input.screenH > 0) {
+            const float x =
+                input.pointerX * 800.0f /
+                input.screenW;
+            const float y =
+                input.pointerY * 600.0f /
+                input.screenH;
+            for (size_t index = 0;
+                 index < count; ++index) {
+                const OriginalHotspot &hotspot =
+                     hotspots[index];
+                if (x >= hotspot.x &&
+                    x < hotspot.x + hotspot.w &&
+                    y >= hotspot.y &&
+                    y < hotspot.y + hotspot.h) {
+                    touched = index;
+                    break;
+                }
+            }
+        }
         if (touched < count) selection_ = touched;
         if (input.menuUp) moveSelection(-1, count);
         if (input.menuDown) moveSelection(1, count);
         if (input.menuActivate || touched < count) {
+            if (sounds_) sounds_(50300);
             if (selection_ == 0) {
                 screen_ = FrontendScreen::SinglePlayer;
                 selection_ = 0;
             } else if (selection_ == 1) {
-                message_ = "MULTIPLAYER IS UNAVAILABLE IN THIS BUILD";
+                message_ = "BASIC TRAINING IS NOT YET AVAILABLE";
+                if (sounds_) sounds_(50303);
             } else if (selection_ == 2) {
+                message_ = "COMMUNITY SERVICES ARE UNAVAILABLE";
+                if (sounds_) sounds_(50303);
+            } else if (selection_ == 3) {
+                screen_ = FrontendScreen::DataStatus;
+                selection_ = 0;
+            } else if (selection_ == 4) {
+                optionsReturnScreen_ = FrontendScreen::MainMenu;
+                screen_ = FrontendScreen::Options;
+                selection_ = 0;
+            } else if (selection_ == 5) {
+                message_ = "MULTIPLAYER IS UNAVAILABLE IN THIS BUILD";
+                if (sounds_) sounds_(50303);
+            } else if (selection_ == 6) {
                 screen_ = FrontendScreen::ScenarioEditor;
                 selection_ = 0;
                 message_.clear();
                 return FrontendAction::OpenScenarioEditor;
-            } else if (selection_ == 3) {
-                optionsReturnScreen_ = FrontendScreen::MainMenu;
-                screen_ = FrontendScreen::Options;
-                selection_ = 0;
-            } else if (selection_ == 4) {
-                screen_ = FrontendScreen::DataStatus;
-                selection_ = 0;
             } else {
                 beginConfirmation(
                     FrontendAction::Quit,
@@ -565,78 +649,26 @@ FrontendAction Frontend::update(
     }
 
     if (screen_ == FrontendScreen::SinglePlayer) {
-        constexpr size_t count = 4;
-        const float scaleY =
-            input.screenH > 0
-                ? input.screenH / 600.0f
-                : 1.0f;
-        const size_t touched =
-            rowFromPointer(
-                input, kOriginalMenuTop * scaleY,
-                kOriginalMenuRow * scaleY, count);
-        if (touched < count) selection_ = touched;
-        if (input.menuUp) moveSelection(-1, count);
-        if (input.menuDown) moveSelection(1, count);
-        if (input.menuBack) {
-            screen_ = FrontendScreen::MainMenu;
-            selection_ = 0;
-        } else if (input.menuActivate || touched < count) {
-            if (selection_ == 0) {
-                if (!catalog_ ||
-                    catalog_->campaigns().empty()) {
-                    message_ =
-                        "NO VALID ORIGINAL CAMPAIGNS WERE DISCOVERED";
-                } else {
-                    screen_ = FrontendScreen::CampaignBrowser;
-                    selection_ = campaignSelection_;
-                }
-            } else if (selection_ == 1) {
-                screen_ = FrontendScreen::SkirmishLobby;
-                selection_ = 0;
-                lobbyPage_ = 0;
-                refreshLobbyPreview();
-            } else if (selection_ == 2) {
-                if (!continueAvailable_) {
-                    message_ = "NO VALID SAVE IS AVAILABLE";
-                } else {
-                    screen_ = FrontendScreen::Loading;
-                    message_ =
-                        continueKind_ == MatchSaveKind::Campaign
-                            ? "LOADING CAMPAIGN SAVE..."
-                            : "LOADING SKIRMISH SAVE...";
-                    return FrontendAction::LoadMatch;
-                }
-            } else {
-                screen_ = FrontendScreen::MainMenu;
-                selection_ = 0;
-            }
-        }
-        return FrontendAction::None;
-    }
-
-    if (screen_ == FrontendScreen::CampaignBrowser) {
-        const size_t count =
-            catalog_ ? catalog_->campaigns().size() : 0;
+        constexpr size_t count = 5;
         size_t touched = count;
         if (input.pointerTap &&
-            input.screenW > 0 && input.screenH > 0) {
-            const float logicalX =
+            input.screenW > 0 &&
+            input.screenH > 0) {
+            const float x =
                 input.pointerX * 800.0f /
                 input.screenW;
-            const float logicalY =
+            const float y =
                 input.pointerY * 600.0f /
                 input.screenH;
             for (size_t index = 0;
-                 index < std::min(
-                     count,
-                     kCampaignIconPositions.size());
-                 ++index) {
-                const auto &position =
-                    kCampaignIconPositions[index];
-                if (logicalX >= position[0] &&
-                    logicalX < position[0] + 63.0f &&
-                    logicalY >= position[1] &&
-                    logicalY < position[1] + 57.0f) {
+                 index < count; ++index) {
+                const float rowY =
+                    kOriginalMenuTop +
+                    index * kOriginalMenuRow;
+                if (x >= 442.0f && x < 764.0f &&
+                    y >= rowY &&
+                    y < rowY +
+                            kOriginalMenuEntryHeight) {
                     touched = index;
                     break;
                 }
@@ -646,6 +678,108 @@ FrontendAction Frontend::update(
         if (input.menuUp) moveSelection(-1, count);
         if (input.menuDown) moveSelection(1, count);
         if (input.menuBack) {
+            screen_ = FrontendScreen::MainMenu;
+            selection_ = 0;
+            if (sounds_) sounds_(50301);
+        } else if (input.menuActivate || touched < count) {
+            if (sounds_) sounds_(50300);
+            if (selection_ <= 1) {
+                if (!catalog_ ||
+                    catalog_->campaigns().empty()) {
+                    message_ =
+                        "NO VALID ORIGINAL CAMPAIGNS WERE DISCOVERED";
+                    if (sounds_) sounds_(50303);
+                } else {
+                    screen_ = FrontendScreen::CampaignBrowser;
+                    campaignSelection_ =
+                        selection_ == 0
+                            ? 0
+                            : std::min<size_t>(
+                                  3,
+                                  catalog_->campaigns().size() - 1);
+                    selection_ = campaignSelection_;
+                }
+            } else if (selection_ == 2) {
+                screen_ = FrontendScreen::SkirmishLobby;
+                selection_ = 0;
+                lobbyPage_ = 0;
+                refreshLobbyPreview();
+            } else if (selection_ == 3) {
+                message_ =
+                    "CUSTOM CAMPAIGNS ARE NOT YET AVAILABLE";
+                if (sounds_) sounds_(50303);
+            } else {
+                if (!continueAvailable_) {
+                    message_ = "NO VALID SAVE IS AVAILABLE";
+                    if (sounds_) sounds_(50303);
+                } else {
+                    screen_ = FrontendScreen::Loading;
+                    message_ =
+                        continueKind_ == MatchSaveKind::Campaign
+                            ? "LOADING CAMPAIGN SAVE..."
+                            : "LOADING SKIRMISH SAVE...";
+                    return FrontendAction::LoadMatch;
+                }
+            }
+        }
+        return FrontendAction::None;
+    }
+
+    if (screen_ == FrontendScreen::CampaignBrowser) {
+        const size_t count =
+            catalog_ ? catalog_->campaigns().size() : 0;
+        size_t touched = count;
+        bool touchedBack = false;
+        if (input.pointerTap &&
+            input.screenW > 0 && input.screenH > 0) {
+            const float logicalX =
+                input.pointerX * 800.0f /
+                input.screenW;
+            const float logicalY =
+                input.pointerY * 600.0f /
+                input.screenH;
+            touchedBack =
+                logicalX < 187.0f &&
+                logicalY < 44.0f;
+            for (size_t index = 0;
+                 index < count;
+                 ++index) {
+                const size_t slot =
+                    originalCampaignSlot(
+                        catalog_->campaigns()[index]);
+                if (slot >=
+                    kOriginalCampaignPlacements.size())
+                    continue;
+                const auto &placement =
+                    kOriginalCampaignPlacements[slot];
+                const SpriteFrame *frame =
+                    index <
+                            originalCampaignIcons_
+                                .size()
+                        ? originalCampaignIcons_[
+                              index][0]
+                        : nullptr;
+                const float width =
+                    frame ? (float)frame->w
+                          : 63.0f;
+                const float height =
+                    frame ? (float)frame->h
+                          : 57.0f;
+                if (logicalX >= placement.iconX &&
+                    logicalX <
+                        placement.iconX + width &&
+                    logicalY >= placement.iconY &&
+                    logicalY <
+                        placement.iconY + height) {
+                    touched = index;
+                    break;
+                }
+            }
+        }
+        if (touched < count) selection_ = touched;
+        if (input.menuUp) moveSelection(-1, count);
+        if (input.menuDown) moveSelection(1, count);
+        if (input.menuBack || touchedBack) {
             screen_ = FrontendScreen::SinglePlayer;
             selection_ = 0;
         } else if ((input.menuActivate || touched < count) &&
@@ -667,16 +801,44 @@ FrontendAction Frontend::update(
                 : nullptr;
         const size_t count =
             campaign ? campaign->missions.size() : 0;
-        const float scaleY =
-            input.screenH > 0
-                ? input.screenH / 600.0f
-                : 1.0f;
-        const size_t touched =
-            rowFromPointer(
-                input,
-                kOriginalMissionTop * scaleY,
-                kOriginalMissionRow * scaleY,
-                count);
+        size_t touched = count;
+        if (input.pointerTap &&
+            input.screenW > 0 &&
+            input.screenH > 0 &&
+            originalMissionNodeCount_ >= count) {
+            const float x =
+                input.pointerX * 800.0f /
+                input.screenW;
+            const float y =
+                input.pointerY * 600.0f /
+                input.screenH;
+            for (size_t index = 0;
+                 index < count; ++index) {
+                const OriginalMissionNode &node =
+                    originalMissionNodes_[index];
+                const SpriteFrame *frame =
+                    node.frames[0];
+                if (frame &&
+                    x >= node.x &&
+                    x < node.x + frame->w &&
+                    y >= node.y &&
+                    y < node.y + frame->h) {
+                    touched = index;
+                    break;
+                }
+            }
+        } else {
+            const float scaleY =
+                input.screenH > 0
+                    ? input.screenH / 600.0f
+                    : 1.0f;
+            touched =
+                rowFromPointer(
+                    input,
+                    kOriginalMissionTop * scaleY,
+                    kOriginalMissionRow * scaleY,
+                    count);
+        }
         if (touched < count) selection_ = touched;
         if (input.menuUp) moveSelection(-1, count);
         if (input.menuDown) moveSelection(1, count);
@@ -713,6 +875,25 @@ FrontendAction Frontend::update(
         return FrontendAction::None;
     }
 
+    if (screen_ == FrontendScreen::CampaignBriefing &&
+        campaignScene_ && campaignScene_->loaded()) {
+        // The mission's opening scene (Multimedia Screen): it starts the
+        // mission when it ends; X/tap skips it, O goes back.
+        if (input.menuBack) {
+            screen_ = FrontendScreen::CampaignMissions;
+            selection_ = missionSelection_;
+            return FrontendAction::None;
+        }
+        if (input.menuActivate || input.pointerTap || campaignScene_->finished()) {
+            campaignMatch_ = true;
+            screen_ = FrontendScreen::Loading;
+            const CampaignMission *mission = selectedCampaignMission();
+            message_ = mission ? "INITIALIZING " + mission->title + "..."
+                               : "INITIALIZING CAMPAIGN...";
+            return FrontendAction::StartCampaign;
+        }
+        return FrontendAction::None;
+    }
     if (screen_ == FrontendScreen::CampaignBriefing) {
         constexpr size_t count = 2;
         size_t touched = count;
@@ -835,6 +1016,9 @@ FrontendAction Frontend::update(
                     screen_ = FrontendScreen::Gameplay;
                 } else if (selection_ == 1) {
                     screen_ = FrontendScreen::Objectives;
+                    objectivesReturnScreen_ =
+                        FrontendScreen::Pause;
+                    objectivesPage_ = 0;
                     selection_ = 0;
                 } else if (selection_ == 2) {
                     message_ = "SAVING PLAYTEST SNAPSHOT...";
@@ -874,6 +1058,9 @@ FrontendAction Frontend::update(
                 screen_ = FrontendScreen::Gameplay;
             } else if (selection_ == 1) {
                 screen_ = FrontendScreen::Objectives;
+                objectivesReturnScreen_ =
+                    FrontendScreen::Pause;
+                objectivesPage_ = 0;
                 selection_ = 0;
             } else if (selection_ == 2) {
                 message_ = "SAVING MATCH...";
@@ -912,10 +1099,50 @@ FrontendAction Frontend::update(
     }
 
     if (screen_ == FrontendScreen::Objectives) {
-        if (input.menuBack || input.menuActivate ||
-            input.pausePressed) {
-            screen_ = FrontendScreen::Pause;
-            selection_ = 1;
+        constexpr size_t count = 4;
+        size_t touched = count;
+        if (input.pointerTap &&
+            input.screenW > 0 &&
+            input.screenH > 0) {
+            const float logicalX =
+                input.pointerX * 960.0f /
+                input.screenW;
+            const float logicalY =
+                input.pointerY * 544.0f /
+                input.screenH;
+            if (logicalY >= 411.0f &&
+                logicalY < 453.0f &&
+                logicalX >= 259.0f &&
+                logicalX < 701.0f)
+                touched = std::min<size_t>(
+                    3,
+                    (size_t)((logicalX -
+                              259.0f) /
+                             111.0f));
+        }
+        if (touched < count)
+            selection_ = touched;
+        if (input.menuLeft || input.menuUp)
+            moveSelection(-1, count);
+        if (input.menuRight || input.menuDown)
+            moveSelection(1, count);
+        if ((input.menuActivate ||
+             touched < count) &&
+            selection_ < 3) {
+            objectivesPage_ = selection_;
+            if (sounds_) sounds_(50300);
+        }
+        if (input.menuBack || input.pausePressed ||
+            ((input.menuActivate ||
+              touched < count) &&
+             selection_ == 3)) {
+            if (sounds_) sounds_(50301);
+            screen_ = objectivesReturnScreen_;
+            selection_ =
+                objectivesReturnScreen_ ==
+                        FrontendScreen::Pause
+                    ? 1
+                    : 0;
         }
         return FrontendAction::None;
     }
@@ -1083,8 +1310,16 @@ FrontendAction Frontend::update(
 void Frontend::loadingFinished(
     bool success, const std::string &error) {
     if (success) {
-        screen_ = FrontendScreen::Gameplay;
-        selection_ = 0;
+        if (campaignMatch_) {
+            screen_ = FrontendScreen::Objectives;
+            objectivesReturnScreen_ =
+                FrontendScreen::Gameplay;
+            objectivesPage_ = 2;
+            selection_ = 2;
+        } else {
+            screen_ = FrontendScreen::Gameplay;
+            selection_ = 0;
+        }
         message_.clear();
     } else {
         screen_ = playtestMatch_
@@ -1231,39 +1466,69 @@ void Frontend::render(
                 actualScale,
                 red, green, blue);
         };
-    const auto drawOriginalList =
-        [&](const std::string &title,
-            const std::vector<std::string> &entries) {
-            drawOriginalFrame(
-                originalMenuLogo_, 0, 0,
-                142, 61);
-            centerOriginalText(
-                title, 590, 19, 1.22f,
-                215, 226, 233);
-            for (size_t index = 0;
-                 index < entries.size(); ++index) {
-                const float y =
-                    kOriginalMenuTop +
-                    index * kOriginalMenuRow;
+    const auto drawOriginalHotspots =
+        [&]() {
+            if (originalMenuLogo_)
                 drawOriginalFrame(
-                    index == selection_
-                        ? originalMenuSelectedButton_
-                        : originalMenuButton_,
-                    414, y - 11, 32, 32);
-                drawOriginalText(
-                    entries[index],
-                    454, y, 1.18f,
-                    index == selection_ ? 255 : 190,
-                    index == selection_ ? 226 : 210,
-                    index == selection_ ? 122 : 222);
+                    originalMenuLogo_, 0, 0,
+                    originalMenuLogo_->w,
+                    originalMenuLogo_->h);
+            const size_t selectedHotspot =
+                screen_ ==
+                        FrontendScreen::SinglePlayer
+                    ? 0
+                    : selection_;
+            const auto &hotspots =
+                mainHotspots(expandingFrontsMenu_);
+            for (size_t index = 0;
+                 index < hotspots.size();
+                 ++index) {
+                const OriginalHotspot &hotspot =
+                    hotspots[index];
+                size_t state = 0;
+                if (screen_ ==
+                        FrontendScreen::SinglePlayer &&
+                    index == 0)
+                    state = 2;
+                else if (index == selectedHotspot)
+                    state = 1;
+                drawOriginalFrame(
+                    originalMainHotspots_[index][state],
+                    hotspot.x, hotspot.y,
+                    hotspot.w, hotspot.h);
             }
-            const std::string footer =
-                message_.empty()
-                    ? "X: SELECT    O: BACK"
-                    : message_;
-            drawOriginalText(
-                footer, 414, 531, 0.72f,
-                167, 193, 211);
+        };
+    const auto drawOriginalPaneEntry =
+        [&](const std::string &value,
+            size_t index) {
+            const float y =
+                kOriginalMenuTop +
+                index * kOriginalMenuRow;
+            renderer.fillRect(
+                442.0f * originalScaleX,
+                y * originalScaleY,
+                322.0f * originalScaleX,
+                kOriginalMenuEntryHeight *
+                    originalScaleY,
+                index == selection_ ? 20 : 8,
+                index == selection_ ? 56 : 29,
+                index == selection_ ? 74 : 48,
+                225);
+            renderer.fillRect(
+                442.0f * originalScaleX,
+                y * originalScaleY,
+                322.0f * originalScaleX,
+                1.0f * originalScaleY,
+                index == selection_ ? 205 : 81,
+                index == selection_ ? 55 : 118,
+                index == selection_ ? 43 : 145,
+                255);
+            centerOriginalText(
+                value, 603.0f, y + 9.0f,
+                0.96f,
+                index == selection_ ? 255 : 210,
+                index == selection_ ? 239 : 220,
+                index == selection_ ? 214 : 230);
         };
 
     const auto drawMenu =
@@ -1324,40 +1589,127 @@ void Frontend::render(
         renderer.fillRect(
             230, 321, 360, 4, 222, 183, 76, 255);
     } else if (screen_ == FrontendScreen::MainMenu) {
-        drawOriginalList(
-            text(11241, "MAIN MENU"),
-            {text(9202, "SINGLE PLAYER"),
-             text(9203, "MULTIPLAYER") + " - UNAVAILABLE",
-             text(9206, "SCENARIO EDITOR"),
-             text(9274, "OPTIONS"),
-             text(9209, "CREDITS / DATA STATUS"),
-             text(9207, "EXIT")});
+        drawOriginalHotspots();
+        const std::array<const char *, 8>
+            descriptions{{
+                "Play campaigns, standard games, or saved games.",
+                "Learn the fundamentals of Galactic Battlegrounds.",
+                "Community services are not available on Vita.",
+                "View original-data and implementation status.",
+                "Configure audio and controls.",
+                "Multiplayer is unavailable in this build.",
+                "Create and play custom scenarios.",
+                "Exit Galactic Battlegrounds.",
+            }};
+        wrappedText(
+            renderer, message_.empty()
+                          ? descriptions[selection_]
+                          : message_,
+            405 * originalScaleX,
+            511 * originalScaleY,
+            0.66f * originalScaleY,
+            54, 3, 201, 216, 228);
     } else if (screen_ == FrontendScreen::SinglePlayer) {
-        drawOriginalList(
+        drawOriginalHotspots();
+        centerOriginalText(
             text(9202, "SINGLE PLAYER"),
-            {text(11242, "CAMPAIGNS"),
-             text(9226, "SKIRMISH"),
-             text(9276, "LOAD / CONTINUE") +
-                 (continueAvailable_ ? "" : " - NONE"),
-             text(11241, "MAIN MENU")});
+            589, 14, 1.15f,
+            215, 226, 233);
+        centerOriginalText(
+            "Player", 589, 39, 0.68f,
+            151, 177, 199);
+        const std::array<std::string, 5>
+            entries{{
+                "Original Campaigns",
+                "Expansion Campaigns",
+                "Standard Game",
+                "Custom Campaign",
+                "Saved Game",
+            }};
+        for (size_t index = 0;
+             index < entries.size(); ++index)
+            drawOriginalPaneEntry(
+                entries[index], index);
+        if (!message_.empty())
+            wrappedText(
+                renderer, message_,
+                405 * originalScaleX,
+                511 * originalScaleY,
+                0.66f * originalScaleY,
+                54, 3, 201, 216, 228);
     } else if (screen_ == FrontendScreen::CampaignBrowser) {
         centerOriginalText(
             text(11242, "CAMPAIGNS"),
-            400, 18, 1.3f,
+            405, 13, 1.3f,
             215, 226, 233);
+        centerOriginalText(
+            text(11241, "MAIN MENU"),
+            92, 17, 0.9f,
+            151, 177, 199);
         if (catalog_)
             for (size_t index = 0;
                  index < std::min(
                      catalog_->campaigns().size(),
                      originalCampaignIcons_.size());
                  ++index) {
-                const auto &position =
-                    kCampaignIconPositions[index];
+                const size_t slot =
+                    originalCampaignSlot(
+                        catalog_->campaigns()[index]);
+                if (slot >=
+                    kOriginalCampaignPlacements.size())
+                    continue;
+                const auto &placement =
+                    kOriginalCampaignPlacements[slot];
                 drawOriginalFrame(
                     originalCampaignIcons_[index][
                         index == selection_ ? 1 : 0],
-                    position[0], position[1],
-                    63, 57);
+                    placement.iconX,
+                    placement.iconY);
+                std::string label =
+                    std::to_string(slot + 1) +
+                    ": " +
+                    catalog_->campaigns()[index].title;
+                std::vector<std::string> lines;
+                size_t start = 0;
+                while (start < label.size() &&
+                       lines.size() < 3) {
+                    size_t end = std::min(
+                        label.size(),
+                        start + placement.labelWidth);
+                    if (end < label.size()) {
+                        const size_t breakAt =
+                            label.rfind(' ', end);
+                        if (breakAt !=
+                                std::string::npos &&
+                            breakAt > start)
+                            end = breakAt;
+                    }
+                    lines.push_back(
+                        label.substr(
+                            start, end - start));
+                    start = end;
+                    while (start < label.size() &&
+                           label[start] == ' ')
+                        ++start;
+                }
+                const float scale =
+                    0.66f * originalScaleY;
+                for (size_t line = 0;
+                     line < lines.size(); ++line)
+                    drawUiText(
+                        renderer, {lines[line]},
+                        placement.labelCenterX *
+                                originalScaleX -
+                            uiTextWidth(
+                                lines[line], scale) *
+                                0.5f,
+                        (placement.labelY +
+                         line * 17.0f) *
+                            originalScaleY,
+                        scale,
+                        index == selection_ ? 255 : 225,
+                        index == selection_ ? 236 : 225,
+                        index == selection_ ? 164 : 225);
             }
         if (catalog_ &&
             selection_ < catalog_->campaigns().size()) {
@@ -1381,56 +1733,165 @@ void Frontend::render(
                         catalog_->campaigns().size()
                 ? &catalog_->campaigns()[campaignSelection_]
                 : nullptr;
-        std::vector<std::string> entries;
-        if (campaign)
-            for (size_t i = 0; i < campaign->missions.size(); ++i) {
-                const bool unlocked =
-                    profile_ &&
-                    profile_->isUnlocked(*campaign, i);
-                const bool complete =
-                    profile_ &&
-                    profile_->isCompleted(
-                        campaign->missions[i].key);
-                entries.push_back(
-                    std::string(complete ? "[DONE] " : "") +
-                    campaign->missions[i].title +
-                    (unlocked ? "" : " [LOCKED]"));
-            }
         centerOriginalText(
             campaign ? campaign->title : "CAMPAIGN",
             400, 18, 1.3f,
             215, 226, 233);
-        for (size_t index = 0;
-             index < entries.size(); ++index) {
-            const float y =
-                kOriginalMissionTop +
-                index * kOriginalMissionRow;
-            if (index == selection_)
-                renderer.fillRect(
-                    54 * originalScaleX,
-                    (y - 7) * originalScaleY,
-                    405 * originalScaleX,
-                    31 * originalScaleY,
-                    18, 38, 53, 205);
-            drawOriginalText(
-                entries[index], 72, y, 0.92f,
-                index == selection_ ? 255 : 190,
-                index == selection_ ? 226 : 210,
-                index == selection_ ? 122 : 222);
+        const size_t missionCount =
+            campaign ? campaign->missions.size() : 0;
+        if (campaign &&
+            originalMissionNodeCount_ >= missionCount) {
+            for (size_t index = 0;
+                 index < missionCount; ++index) {
+                const bool unlocked =
+                    profile_ &&
+                    profile_->isUnlocked(
+                        *campaign, index);
+                const bool complete =
+                    profile_ &&
+                    profile_->isCompleted(
+                        campaign->missions[index].key);
+                size_t state = 0;
+                if (!unlocked)
+                    state = 3;
+                else if (index == selection_)
+                    state = 1;
+                else if (complete)
+                    state = 2;
+                const OriginalMissionNode &node =
+                    originalMissionNodes_[index];
+                const SpriteFrame *frame =
+                    node.frames[state];
+                if (frame)
+                    drawOriginalFrame(
+                        frame, node.x, node.y,
+                        frame->w, frame->h);
+                const std::string &title =
+                    campaign->missions[index].title;
+                std::vector<std::string> lines;
+                const bool titleBox = node.textX >= 0.0f && node.textW > 0.0f;
+                const float labelScale =
+                    0.48f * originalScaleY;
+                // Characters per line from the box (or button) width.
+                const float boxWidth =
+                    titleBox ? node.textW : frame ? (float)frame->w : 100.0f;
+                const float charWidth =
+                    std::max(1.0f, uiTextWidth("M", labelScale) / originalScaleX);
+                const size_t lineLength =
+                    std::max<size_t>(8, (size_t)(boxWidth / (charWidth * 0.8f)));
+                size_t start = 0;
+                while (start < title.size() &&
+                       lines.size() < 3) {
+                    size_t end =
+                        std::min(
+                            title.size(),
+                            start + lineLength);
+                    if (end < title.size()) {
+                        const size_t breakAt =
+                            title.rfind(' ', end);
+                        if (breakAt !=
+                                std::string::npos &&
+                            breakAt > start)
+                            end = breakAt;
+                    }
+                    lines.push_back(
+                        title.substr(
+                            start, end - start));
+                    start = end;
+                    while (start < title.size() &&
+                           title[start] == ' ')
+                        ++start;
+                }
+                const float labelCenter =
+                    (titleBox ? node.textX + node.textW * 0.5f
+                              : node.x + (frame ? frame->w * 0.5f : 0.0f)) *
+                    originalScaleX;
+                const float labelY =
+                    (titleBox ? node.textY
+                              : node.y + (frame ? frame->h : 0) + 2.0f) *
+                    originalScaleY;
+                for (size_t line = 0;
+                     line < lines.size(); ++line)
+                    drawUiText(
+                        renderer, {lines[line]},
+                        labelCenter -
+                            uiTextWidth(
+                                lines[line],
+                                labelScale) *
+                                0.5f,
+                        labelY +
+                            line * 9.0f *
+                                originalScaleY,
+                        labelScale,
+                        index == selection_
+                            ? 255
+                            : 215,
+                        index == selection_
+                            ? 226
+                            : 226,
+                        index == selection_
+                            ? 122
+                            : 233);
+            }
+            if (selection_ < missionCount)
+                wrappedText(
+                    renderer,
+                    campaign->missions[selection_].title,
+                    600 * originalScaleX,
+                    458 * originalScaleY,
+                    0.64f * originalScaleY,
+                    19, 2,
+                    215, 226, 233);
+        } else {
+            for (size_t index = 0;
+                 index < missionCount; ++index) {
+                const bool unlocked =
+                    profile_ &&
+                    profile_->isUnlocked(
+                        *campaign, index);
+                const bool complete =
+                    profile_ &&
+                    profile_->isCompleted(
+                        campaign->missions[index].key);
+                const std::string entry =
+                    std::string(
+                        complete ? "[DONE] " : "") +
+                    campaign->missions[index].title +
+                    (unlocked ? "" : " [LOCKED]");
+                const float y =
+                    kOriginalMissionTop +
+                    index * kOriginalMissionRow;
+                if (index == selection_)
+                    renderer.fillRect(
+                        54 * originalScaleX,
+                        (y - 7) * originalScaleY,
+                        405 * originalScaleX,
+                        31 * originalScaleY,
+                        18, 38, 53, 205);
+                drawOriginalText(
+                    entry, 72, y, 0.92f,
+                    index == selection_ ? 255 : 190,
+                    index == selection_ ? 226 : 210,
+                    index == selection_ ? 122 : 222);
+            }
         }
-        centerOriginalText(
+        // Vita: difficulty (L/R) and progression mode under the selected
+        // mission's title, inside the screen's info box.
+        drawOriginalText(
             std::string("DIFFICULTY: ") +
-                    difficultyName(
-                        profile_
-                            ? profile_->difficulty
-                            : 2) +
-                    "   L/R CHANGE   " +
-                    (profile_ &&
-                             profile_->developmentAccess
-                         ? "DEVELOPMENT ACCESS"
-                         : "SEQUENTIAL PROGRESSION"),
-            400, 531, 0.68f,
-            151, 177, 199);
+                difficultyName(profile_ ? profile_->difficulty : 2) + "  (L/R)",
+            600, 484, 0.5f, 151, 177, 199);
+        drawOriginalText(
+            profile_ && profile_->developmentAccess ? "ALL MISSIONS OPEN"
+                                                    : "SEQUENTIAL PROGRESSION",
+            600, 494, 0.5f, 151, 177, 199);
+    } else if (screen_ == FrontendScreen::CampaignBriefing &&
+               campaignScene_ && campaignScene_->loaded()) {
+        campaignScene_->render(renderer, screenW, screenH, [&](int id) {
+            return strings_ ? strings_(id, std::string()) : std::string();
+        });
+        // Vita controls hint, in the top border of the scene frame.
+        drawOriginalText("X  START MISSION     O  BACK", 24, 6, 0.55f, 205, 214, 222);
     } else if (screen_ ==
                FrontendScreen::CampaignBriefing) {
         const CampaignMission *mission =
@@ -1683,25 +2144,8 @@ void Frontend::render(
                                             : 120.0f,
             playtestMatch_ ? 42.0f : 39.0f);
     } else if (screen_ == FrontendScreen::Objectives) {
-        centeredText(
-            renderer, "OBJECTIVES", 25, 2.5f,
-            screenW, 235, 213, 145);
-        panel(renderer, 90, 112, 780, 330);
-        const CampaignMission *mission =
-            selectedCampaignMission();
-        wrappedText(
-            renderer,
-            playtestMatch_ &&
-                    !playtestObjectives_.empty()
-                ? playtestObjectives_
-                : mission && !mission->objectives.empty()
-                ? mission->objectives
-                : "Complete the active match victory conditions.",
-            115, 145, 1.0f, 88, 12,
-            210, 222, 231);
-        centeredText(
-            renderer, "X / O / START: RETURN", 484,
-            0.95f, screenW, 151, 177, 199);
+        renderObjectivesOverlay(
+            renderer, screenW, screenH);
     } else if (screen_ == FrontendScreen::Options) {
         centeredText(
             renderer, text(9274, "OPTIONS"), 25, 2.5f,
@@ -1802,6 +2246,110 @@ void Frontend::render(
             renderer, message_, 516, 0.85f,
             screenW, 255, 130, 91);
     renderer.endFrame();
+}
+
+void Frontend::renderObjectivesOverlay(
+    Renderer &renderer, int screenW,
+    int screenH) const {
+    const float scaleX = screenW / 960.0f;
+    const float scaleY = screenH / 544.0f;
+    const float x = 250.0f * scaleX;
+    const float y = 76.0f * scaleY;
+    const float width = 460.0f * scaleX;
+    const float height = 390.0f * scaleY;
+    drawModernPanel(
+        renderer, x, y, width, height);
+
+    static constexpr std::array<
+        const char *, 3>
+        titles{{
+            "OBJECTIVES", "INTELLIGENCE",
+            "RECONNAISSANCE",
+        }};
+    const CampaignMission *mission =
+        selectedCampaignMission();
+    std::string body;
+    if (playtestMatch_) {
+        body = playtestObjectives_.empty()
+                   ? "Complete the active match victory conditions."
+                   : playtestObjectives_;
+    } else if (mission) {
+        if (objectivesPage_ == 0)
+            body = mission->objectives;
+        else if (objectivesPage_ == 1)
+            body = mission->intelligence;
+        else
+            body = mission->reconnaissance;
+    }
+    if (body.empty())
+        body = objectivesPage_ == 0
+                   ? "Complete the active match victory conditions."
+                   : "No additional mission information is available.";
+
+    const float titleScale = 1.35f * scaleY;
+    drawUiText(
+        renderer, {titles[std::min<size_t>(
+                      objectivesPage_, 2)]},
+        x + (width -
+             uiTextWidth(
+                 titles[std::min<size_t>(
+                     objectivesPage_, 2)],
+                 titleScale)) *
+                0.5f,
+        y + 20.0f * scaleY,
+        titleScale, 235, 239, 241);
+    wrappedText(
+        renderer, body,
+        x + 34.0f * scaleX,
+        y + 76.0f * scaleY,
+        0.78f * scaleY,
+        57, 13, 221, 228, 233);
+
+    static constexpr std::array<
+        const char *, 4>
+        tabs{{
+            "Objectives", "Intelligence",
+            "Reconnaissance", "OK",
+        }};
+    for (size_t index = 0;
+         index < tabs.size(); ++index) {
+        const float tabX =
+            (259.0f + index * 111.0f) *
+            scaleX;
+        const float tabY = 411.0f * scaleY;
+        renderer.fillRect(
+            tabX, tabY,
+            104.0f * scaleX,
+            34.0f * scaleY,
+            index == selection_ ? 27 : 10,
+            index == selection_ ? 68 : 39,
+            index == selection_ ? 91 : 59,
+            245);
+        renderer.fillRect(
+            tabX, tabY,
+            104.0f * scaleX,
+            2.0f * scaleY,
+            index == selection_ ? 208 : 74,
+            index == selection_ ? 185 : 137,
+            index == selection_ ? 86 : 168,
+            255);
+        const float textScale =
+            (index == 2 ? 0.58f : 0.68f) *
+            scaleY;
+        drawUiText(
+            renderer, {tabs[index]},
+            tabX +
+                (104.0f * scaleX -
+                 uiTextWidth(
+                     tabs[index],
+                     textScale)) *
+                    0.5f,
+            tabY + 10.0f * scaleY,
+            textScale,
+            index == selection_ ? 255 : 210,
+            index == selection_ ? 239 : 220,
+            index == selection_ ? 190 : 230);
+    }
 }
 
 } // namespace swgb

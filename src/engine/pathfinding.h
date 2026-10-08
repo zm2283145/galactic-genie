@@ -40,8 +40,29 @@ public:
     // a unit can travel between the centres of (x, y) and its east (dir 0)
     // or south (dir 1) neighbour; this is the original's per-cell
     // edge-passable bits, which catch footprints that are not tile aligned.
-    void build(int size, const std::function<bool(int, int)> &passable,
-               const std::function<bool(int, int, int)> &edgeClear = {});
+    // Templated so the per-tile callbacks inline (a grid build calls them
+    // about 3 * size^2 times).
+    template <class Passable, class EdgeClear>
+    void build(int size, const Passable &passable, const EdgeClear &edgeClear) {
+        size_ = size > 0 ? size : 0;
+        passable_.assign((size_t)size_ * size_, 0);
+        edges_.assign((size_t)size_ * size_, 0);
+        for (int y = 0; y < size_; y++)
+            for (int x = 0; x < size_; x++)
+                passable_[(size_t)y * size_ + x] = passable(x, y) ? 1 : 0;
+        for (int y = 0; y < size_; y++)
+            for (int x = 0; x < size_; x++) {
+                if (!passable_[(size_t)y * size_ + x]) continue;
+                uint8_t bits = 0;
+                if (this->passable(x + 1, y) && edgeClear(x, y, 0)) bits |= 1;
+                if (this->passable(x, y + 1) && edgeClear(x, y, 1)) bits |= 2;
+                edges_[(size_t)y * size_ + x] = bits;
+            }
+        buildMoves();
+    }
+    void build(int size, const std::function<bool(int, int)> &passable) {
+        build(size, passable, [](int, int, int) { return true; });
+    }
     int size() const { return size_; }
     bool passable(int x, int y) const {
         return x >= 0 && y >= 0 && x < size_ && y < size_ &&
@@ -61,12 +82,29 @@ private:
     int size_ = 0;
     std::vector<uint8_t> passable_;
     std::vector<uint8_t> edges_; // bit0: east clear, bit1: south clear
+    // Per tile, bit d set when find() may step in direction kDirs[d] from it
+    // (target passable, edge clear, no corner cutting); precomputed by
+    // build() from passable_/edges_ exactly as find() used to test per step.
+    std::vector<uint8_t> moves_;
     bool edge(int x, int y, int dx, int dy) const;
+    void buildMoves();
+    void buildMovesReference(std::vector<uint8_t> &moves) const;
     // Search scratch, reused between searches.
-    std::vector<float> cost_;
-    std::vector<int32_t> parent_;
-    std::vector<uint32_t> stamp_;
-    std::vector<uint8_t> closed_;
+    // Per-tile search state in one record (one cache line per visited tile).
+    struct NodeState {
+        float cost;
+        int32_t parent;
+        uint32_t stamp;
+        uint8_t closed;
+    };
+    std::vector<NodeState> nodes_;
+    struct OpenNode {
+        float f;
+        float h;
+        int index;
+        int16_t x, y; // index % size_, index / size_ (no divide per pop)
+    };
+    std::vector<OpenNode> open_;
     uint32_t generation_ = 0;
 };
 

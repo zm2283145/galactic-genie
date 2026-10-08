@@ -44,6 +44,16 @@ public:
                           uint8_t r, uint8_t g, uint8_t b, uint8_t a) = 0;
     virtual void fillRect(float x, float y, float w, float h, uint8_t r, uint8_t g, uint8_t b, uint8_t a) = 0;
     virtual void endFrame() = 0;
+
+    // Optional persistent full-screen layer used to cache the terrain between
+    // frames. beginLayer() redirects drawing into the layer, which starts
+    // filled with the current frame's clear colour; endLayer() returns to the
+    // frame; drawLayer() replaces the frame's pixels with the layer. Only
+    // valid right after beginFrame(), before anything else is drawn.
+    virtual bool supportsLayer() const { return false; }
+    virtual bool beginLayer() { return false; }
+    virtual void endLayer() {}
+    virtual void drawLayer() {}
 };
 
 } // namespace swgb

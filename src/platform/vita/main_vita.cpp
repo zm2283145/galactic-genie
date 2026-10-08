@@ -4,6 +4,8 @@
 #include "../../core/scenario.h"
 #include "../../engine/assets.h"
 #include "../../engine/campaign.h"
+#include "../../engine/campaign_layout.h"
+#include "../../engine/campaign_scene.h"
 #include "../../engine/editor.h"
 #include "../../engine/frontend.h"
 #include "../../engine/game.h"
@@ -12,10 +14,16 @@
 #include "../../engine/ui_text.h"
 #include "../../render/gl_renderer.h"
 #include "vita_audio.h"
+#include "vita_video.h"
 
 #include <psp2/ctrl.h>
+#include <psp2/kernel/clib.h>
+#include <atomic>
+#include <psp2/io/fcntl.h>
+#include <psp2/kernel/sysmem.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/threadmgr.h>
 #include <psp2/power.h>
 #include <psp2/touch.h>
 #include <vitaGL.h>
@@ -26,6 +34,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <memory>
+#include <cstdlib>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -34,6 +43,8 @@
 // modules and allocations made before main(). A 256 MiB newlib heap exhausts
 // the partition during vitaGL's static initialization.
 int _newlib_heap_size_user = 192 * 1024 * 1024;
+
+namespace swgb { extern void (*g_glTrace)(const char *); extern bool g_skipGlClear; }
 
 namespace {
 
@@ -56,15 +67,31 @@ const char *kScenarioImport =
 const int kScreenW = 960, kScreenH = 544;
 
 FILE *g_log = nullptr;
+// Vita3K only writes host files out when they are closed, so in Vita3K mode
+// every line reopens the log; on hardware lines are buffered and flushed with
+// the 5-second frame stats (a flush per line cost ~1 ms on the memory card).
+bool g_logReopen = false;
+std::atomic<bool> g_quitRequested{false};
 
 void logf(const char *fmt, ...) {
-    if (!g_log) return;
+    char line[2048];
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(g_log, fmt, ap);
+    vsnprintf(line, sizeof(line), fmt, ap);
     va_end(ap);
+    if (g_logReopen) sceClibPrintf("swgb: %s\n", line);
+    if (!g_log) return;
+    fprintf(g_log, "[%7.3f] ", sceKernelGetProcessTimeWide() / 1e6);
+    fputs(line, g_log);
     fputc('\n', g_log);
-    fflush(g_log);
+    if (g_logReopen) {
+        fclose(g_log);
+        g_log = fopen("ux0:data/swgb/swgb.log", "a");
+    }
+}
+
+void flushLog() {
+    if (g_log && !g_logReopen) fflush(g_log);
 }
 
 float axis(uint8_t v) {
@@ -110,8 +137,12 @@ void startupCard(
     const std::string &message,
     uint8_t red = 2, uint8_t green = 6,
     uint8_t blue = 15) {
+    static int cardTrace = 0;
+    const bool trace = cardTrace++ < 2;
+    if (trace) logf("startupCard: begin '%s'", title.c_str());
     renderer.beginFrame(
         kScreenW, kScreenH, 1.0f, red, green, blue);
+    if (trace) logf("startupCard: beginFrame done");
     renderer.fillRect(
         0, 0, kScreenW, kScreenH,
         red, green, blue, 255);
@@ -144,8 +175,11 @@ void startupCard(
     swgb::drawUiText(
         renderer, lines, 55, 275, 1.05f,
         209, 222, 232);
+    if (trace) logf("startupCard: text queued");
     renderer.endFrame();
+    if (trace) logf("startupCard: endFrame done");
     vglSwapBuffers(GL_FALSE);
+    if (trace) logf("startupCard: swap done");
 }
 
 bool startupErrorScreen(
@@ -175,6 +209,22 @@ void runStartupPresentation(
     flow.dataFinished(true);
     SceCtrlData pad{}, previous{};
     uint64_t last = sceKernelGetProcessTimeWide();
+    // The original start-up movies (xlogo1.avi, then xintro.avi), converted
+    // to MP4 in ux0:data/swgb/Video; START skips each one. Without them the
+    // title cards below stand in.
+    auto movieLog = [](const std::string &message) {
+        logf("%s", message.c_str());
+        flushLog();
+    };
+    // Dev: encoding tests ux0:data/swgb/Video/test/t1.mp4 ... t9.mp4.
+    for (int i = 1; i <= 9; ++i) {
+        const std::string test = "ux0:data/swgb/Video/test/t" + std::to_string(i) + ".mp4";
+        if (fileExists(test.c_str())) swgb::playMovie(test, renderer, kScreenW, kScreenH, movieLog);
+    }
+    if (swgb::playMovie("ux0:data/swgb/Video/xlogo1.mp4", renderer, kScreenW, kScreenH, movieLog)) {
+        swgb::playMovie("ux0:data/swgb/Video/xintro.mp4", renderer, kScreenW, kScreenH, movieLog);
+        return;
+    }
     while (flow.stage() == swgb::StartupStage::Logo ||
            flow.stage() == swgb::StartupStage::Intro) {
         const uint64_t now =
@@ -218,13 +268,51 @@ int main() {
         "ux0:data/swgb/Scenarios/recovery", 0777);
     g_log = fopen("ux0:data/swgb/swgb.log", "w");
     logf("swgb-vita starting");
+    {
+        // Remote close for test runs: a file uploaded over FTP as
+        // ux0:data/swgb/quit.txt ends the app within about a second, whatever
+        // screen it is on (vitacompanion's destroy does not close it).
+        sceIoRemove("ux0:data/swgb/quit.txt");
+        const SceUID thread = sceKernelCreateThread(
+            "swgb_quit_watch",
+            [](SceSize, void *) -> int {
+                for (;;) {
+                    sceKernelDelayThread(1000000);
+                    SceIoStat stat{};
+                    if (sceIoGetstat("ux0:data/swgb/quit.txt", &stat) >= 0) {
+                        sceIoRemove("ux0:data/swgb/quit.txt");
+                        // The game thread exits at the top of its next frame;
+                        // exiting from here while it is drawing crashes.
+                        g_quitRequested = true;
+                        sceKernelDelayThread(10000000);
+                        sceKernelExitProcess(0); // game thread stuck
+                    }
+                }
+                return 0;
+            },
+            0x10000100, 0x2000, 0, 0, nullptr);
+        if (thread >= 0) sceKernelStartThread(thread, 0, nullptr);
+    }
+    {
+        // Keep the game thread on core 0: the audio and sprite-sheet workers
+        // run below its priority on cores 1 and 2, and would be starved
+        // whenever the scheduler placed the busy game thread on their core.
+        const SceUID self = sceKernelGetThreadId();
+        const int before = sceKernelGetThreadCpuAffinityMask(self);
+        const int result = sceKernelChangeThreadCpuAffinityMask(self, SCE_KERNEL_CPU_MASK_USER_0);
+        logf("main thread affinity 0x%x -> core 0 (result %d)", before, result);
+    }
 
     scePowerSetArmClockFrequency(444);
     scePowerSetBusClockFrequency(222);
     scePowerSetGpuClockFrequency(222);
     scePowerSetGpuXbarClockFrequency(166);
 
-    GLboolean fallback = vglInitExtended(0, kScreenW, kScreenH, 0x20000, SCE_GXM_MULTISAMPLE_NONE);
+    // As vglInitExtended, but physically contiguous RAM is left to the
+    // system until the start-up movies have played: SceAvPlayer's decoder
+    // allocates from it. vitaGL takes it afterwards (vglPhycontMemLazyInit).
+    GLboolean fallback = vglInitWithCustomThreshold(0, kScreenW, kScreenH, 0x20000, 256 * 1024,
+                                                    0x7FFFFFFF, 0, SCE_GXM_MULTISAMPLE_NONE);
     logf("vglInitExtended done (resolution fallback=%d)", (int)fallback);
     logf("vitaGL memory total vram/ram/phy/all=%.1f/%.1f/%.1f/%.1fMB free all=%.1fMB",
          vglMemTotal(VGL_MEM_VRAM) / 1048576.0, vglMemTotal(VGL_MEM_RAM) / 1048576.0,
@@ -235,7 +323,46 @@ int main() {
     sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
 
     {
+        swgb::g_glTrace = [](const char *what) { logf("gl: %s", what); };
+        // Development runs under Vita3K: ux0:data/swgb/vita3k.txt
+        if (FILE *marker = fopen("ux0:data/swgb/vita3k.txt", "r")) {
+            g_logReopen = true;
+            // The marker's number is a watchdog in seconds: the emulator only
+            // flushes its own log and our files when the app exits by itself.
+            int watchdogSeconds = 0;
+            if (fscanf(marker, "%d", &watchdogSeconds) != 1) watchdogSeconds = 0;
+            fclose(marker);
+            if (watchdogSeconds > 0) {
+                static int watchdogDelay = 0;
+                watchdogDelay = watchdogSeconds;
+                const SceUID thread = sceKernelCreateThread(
+                    "swgb_watchdog",
+                    [](SceSize, void *) -> int {
+                        sceKernelDelayThread((SceUInt)watchdogDelay * 1000000u);
+                        logf("watchdog: exiting after %d s", watchdogDelay);
+                        sceKernelExitProcess(0);
+                        return 0;
+                    },
+                    0x10000100, 0x4000, 0, 0, nullptr);
+                if (thread >= 0) sceKernelStartThread(thread, 0, nullptr);
+                logf("vita3k watchdog: %d s", watchdogSeconds);
+            }
+            swgb::g_skipGlClear = true;
+            logf("vita3k mode: glClear replaced by full-frame fills");
+        }
+        logf("creating renderer");
         swgb::GlRenderer renderer;
+        logf("renderer created");
+        {
+            // Cached terrain layer (render-to-texture). ux0:data/swgb/nolayer.txt
+            // turns it off; layerflip.txt samples the layer the other way up.
+            bool layers = true, flipped = true;
+            if (FILE *f = fopen("ux0:data/swgb/nolayer.txt", "r")) { fclose(f); layers = false; }
+            if (FILE *f = fopen("ux0:data/swgb/layerflip.txt", "r")) { fclose(f); flipped = false; }
+            renderer.setLayersEnabled(layers);
+            renderer.setLayerFlipped(flipped);
+            logf("terrain layer cache: %s%s", layers ? "on" : "off", flipped ? "" : " (unflipped)");
+        }
         std::string err;
         std::unique_ptr<swgb::Assets> assetOwner;
         swgb::CampaignCatalog catalog;
@@ -270,6 +397,7 @@ int main() {
                 }
             }
             if (valid) {
+                flushLog();
                 logf(
                     "original data loaded in %llu ms; %u campaigns, %u missions",
                     (unsigned long long)(
@@ -289,9 +417,19 @@ int main() {
         }
         swgb::Assets &assets = *assetOwner;
         runStartupPresentation(renderer);
+        {
+            SceKernelFreeMemorySizeInfo info{};
+            info.size = sizeof info;
+            sceKernelGetFreeMemorySize(&info);
+            const int reserve = 1024 * 1024;
+            if (info.size_phycont > reserve) vglPhycontMemLazyInit((size_t)(info.size_phycont - reserve));
+            logf("phycont pool after movies: %.1f MB", (info.size_phycont - reserve) / 1048576.0);
+        }
 
         swgb::Game game(assets);
         swgb::Frontend frontend;
+        // The original goes from the intro movie straight to the main menu.
+        frontend.showMainMenu();
         swgb::ScenarioEditor editor(
             assets, kScenarioRoot, kScenarioImport);
         frontend.setStringLookup(
@@ -313,6 +451,9 @@ int main() {
             frontend.reportMessage(
                 "CAMPAIGN PROFILE WAS CORRUPT; DEFAULTS RESTORED");
         }
+        // Opening scene of the selected campaign mission (Campaign/Media).
+        swgb::CampaignScene campaignScene;
+        frontend.setCampaignScene(&campaignScene);
         frontend.setCampaignData(
             &catalog, &campaignProfile);
         frontend.setDataStatus(
@@ -333,17 +474,36 @@ int main() {
                 "SETTINGS WERE CORRUPT; DEFAULTS RESTORED");
         }
         frontend.setUserSettings(userSettings);
+        const bool expandingFrontsMenu =
+            assets.interfaceFrame(
+                53233, 0, 53237) != nullptr;
+        const int mainMenuSlp =
+            expandingFrontsMenu ? 53233 : 50189;
+        const int mainMenuPalette =
+            expandingFrontsMenu ? 53237 : 50589;
+        frontend.setExpandingFrontsMenu(
+            expandingFrontsMenu);
         frontend.setOriginalMenuDecoration(
-            assets.interfaceFrame(50189, 49, 50589),
+            assets.interfaceFrame(
+                mainMenuSlp, 49,
+                mainMenuPalette),
             assets.interfaceFrame(50688, 4, 50589),
             assets.interfaceFrame(50688, 6, 50589));
-        constexpr std::array<size_t, 6>
-            campaignIconFrames{{1, 5, 9, 13, 17, 29}};
         for (size_t campaign = 0;
-             campaign < campaignIconFrames.size();
+             campaign < catalog.campaigns().size();
              ++campaign) {
-            const size_t frame =
-                campaignIconFrames[campaign];
+            size_t frame = 0;
+            switch (
+                catalog.campaigns()[campaign]
+                    .originalNumber) {
+            case 1: frame = 1; break;
+            case 2: frame = 5; break;
+            case 3: frame = 9; break;
+            case 4: frame = 13; break;
+            case 5: frame = 17; break;
+            case 8: frame = 29; break;
+            default: continue;
+            }
             frontend.setOriginalCampaignIcon(
                 campaign,
                 assets.interfaceFrame(
@@ -351,10 +511,44 @@ int main() {
                 assets.interfaceFrame(
                     53014, frame + 1, 53016));
         }
+        const std::array<size_t, 8>
+            mainHotspotFrames =
+                expandingFrontsMenu
+                    ? std::array<size_t, 8>{{
+                          34, 22, 18, 30,
+                          10, 14, 26, 46,
+                      }}
+                    : std::array<size_t, 8>{{
+                          30, 14, 18, 10,
+                          22, 26, 34, 46,
+                      }};
+        for (size_t hotspot = 0;
+             hotspot < mainHotspotFrames.size();
+             ++hotspot) {
+            const size_t frame =
+                mainHotspotFrames[hotspot];
+            frontend.setOriginalMainHotspot(
+                hotspot,
+                assets.interfaceFrame(
+                    mainMenuSlp, frame,
+                    mainMenuPalette),
+                assets.interfaceFrame(
+                    mainMenuSlp, frame + 1,
+                    mainMenuPalette),
+                assets.interfaceFrame(
+                    mainMenuSlp,
+                    frame +
+                        (expandingFrontsMenu &&
+                                 hotspot == 7
+                             ? 2
+                             : 3),
+                    mainMenuPalette));
+        }
         int frontendBackgroundSlp = -1;
         int frontendBackgroundPalette = -1;
         int frontendDialogSlp = -1;
         int frontendDialogPalette = -1;
+        int frontendMissionTheme = -1;
         auto campaignThemeNumber = [&]() {
             if (frontend.selectedCampaign() >=
                 catalog.campaigns().size())
@@ -384,8 +578,9 @@ int main() {
             case swgb::FrontendScreen::DataStatus:
             case swgb::FrontendScreen::Confirm:
             case swgb::FrontendScreen::Outcome:
-                backgroundSlp = 50189;
-                backgroundPalette = 50589;
+                backgroundSlp = mainMenuSlp;
+                backgroundPalette =
+                    mainMenuPalette;
                 break;
             case swgb::FrontendScreen::CampaignBrowser:
                 backgroundSlp = 53014;
@@ -414,6 +609,38 @@ int main() {
             default:
                 break;
             }
+            const bool missionNodesVisible =
+                frontend.screen() ==
+                swgb::FrontendScreen::
+                    CampaignMissions;
+            const int missionTheme =
+                missionNodesVisible
+                    ? campaignThemeNumber()
+                    : -1;
+            if (missionTheme != frontendMissionTheme) {
+                if (frontendMissionTheme >= 0) {
+                    const int oldSlp =
+                        53100 + frontendMissionTheme;
+                    const int oldPalette =
+                        53110 + frontendMissionTheme;
+                    const size_t oldMissionCount =
+                        frontendMissionTheme == 4
+                            ? 8
+                            : 7;
+                    frontend.clearOriginalMissionNodes();
+                    for (size_t frame = 1;
+                         frame <=
+                         oldMissionCount * 4;
+                         ++frame)
+                        assets.releaseInterfaceFrame(
+                            oldSlp, frame,
+                            oldPalette);
+                }
+                frontendMissionTheme = missionTheme;
+                if (const swgb::OriginalMissionLayout *layout =
+                        swgb::originalMissionLayout(missionTheme))
+                    swgb::applyOriginalMissionLayout(frontend, assets, *layout);
+            }
             if (backgroundSlp !=
                     frontendBackgroundSlp ||
                 backgroundPalette !=
@@ -424,14 +651,16 @@ int main() {
                               backgroundSlp, 0,
                               backgroundPalette)
                         : nullptr;
-                frontend.setOriginalMenuBackground(next);
-                if (frontendBackgroundSlp >= 0)
-                    assets.releaseInterfaceFrame(
-                        frontendBackgroundSlp, 0,
-                        frontendBackgroundPalette);
-                frontendBackgroundSlp = backgroundSlp;
-                frontendBackgroundPalette =
-                    backgroundPalette;
+                if (next || backgroundSlp < 0) {
+                    frontend.setOriginalMenuBackground(next);
+                    if (frontendBackgroundSlp >= 0)
+                        assets.releaseInterfaceFrame(
+                            frontendBackgroundSlp, 0,
+                            frontendBackgroundPalette);
+                    frontendBackgroundSlp = backgroundSlp;
+                    frontendBackgroundPalette =
+                        backgroundPalette;
+                }
             }
             if (dialogSlp != frontendDialogSlp ||
                 dialogPalette !=
@@ -442,19 +671,29 @@ int main() {
                               dialogSlp, 0,
                               dialogPalette)
                         : nullptr;
-                frontend.setOriginalBriefingDialog(next);
-                if (frontendDialogSlp >= 0)
-                    assets.releaseInterfaceFrame(
-                        frontendDialogSlp, 0,
-                        frontendDialogPalette);
-                frontendDialogSlp = dialogSlp;
-                frontendDialogPalette = dialogPalette;
+                if (next || dialogSlp < 0) {
+                    frontend.setOriginalBriefingDialog(next);
+                    if (frontendDialogSlp >= 0)
+                        assets.releaseInterfaceFrame(
+                            frontendDialogSlp, 0,
+                            frontendDialogPalette);
+                    frontendDialogSlp = dialogSlp;
+                    frontendDialogPalette = dialogPalette;
+                }
             }
         };
         refreshOriginalFrontendArt();
         logf(
             "original widescreen frontend art initialized");
         assets.setBuildsPerFrame(3);
+        {
+            // Unit sprite atlases decode on a worker core; syncsheets.txt
+            // turns that off for comparison runs.
+            bool asyncSheets = true;
+            if (FILE *f = fopen("ux0:data/swgb/syncsheets.txt", "r")) { fclose(f); asyncSheets = false; }
+            assets.setAsyncSheetBuilds(asyncSheets);
+            logf("sprite sheet builds: %s", asyncSheets ? "worker thread" : "main thread");
+        }
         swgb::MatchSaveMetadata savedMetadata;
         std::string saveProbeError;
         const bool saveAvailable =
@@ -478,30 +717,77 @@ int main() {
             userSettings.musicVolume,
             userSettings.dialogueVolume,
             userSettings.effectsVolume);
-        game.setSoundPlayer([&audio](const std::string &name) { return audio.play(name); });
+        // Time spent in the game's sound callbacks (read + decode), logged
+        // with the frame stats.
+        uint64_t soundUs = 0, soundMaxUs = 0;
+        struct SoundTimer {
+            uint64_t start;
+            uint64_t &total, &maximum;
+            const char *kind = "";
+            std::string name;
+            ~SoundTimer() {
+                const uint64_t us = sceKernelGetProcessTimeWide() - start;
+                total += us;
+                if (us > maximum) maximum = us;
+                if (us > 20000)
+                    logf("slow sound %s %s: %llu us", kind, name.c_str(), (unsigned long long)us);
+            }
+        };
+        game.setSoundPlayer([&](const std::string &name) {
+            SoundTimer timer{sceKernelGetProcessTimeWide(), soundUs, soundMaxUs, "voice", name};
+            return audio.play(name);
+        });
         game.setAmbientSoundPlayer(
-            [&audio](const std::string &name) {
+            [&](const std::string &name) {
+                SoundTimer timer{sceKernelGetProcessTimeWide(), soundUs, soundMaxUs, "ambient", name};
                 return audio.playAmbient(name);
             });
-        game.setInterfaceSoundPlayer([&](int resourceId) {
+        // The audio worker reads uncached effects from its own DRS handles.
+        auto workerSounds = std::make_shared<swgb::ResourceSet>();
+        auto workerInterface = std::make_shared<swgb::ResourceSet>();
+        for (const std::string &path : assets.soundArchivePaths()) workerSounds->add(path);
+        for (const std::string &path : assets.interfaceArchivePaths()) workerInterface->add(path);
+        audio.setEffectLoader(
+            [workerSounds, workerInterface](int resourceId, bool interfaceSound,
+                                            std::vector<uint8_t> &data) {
+                // Same lookup order as Assets::readSoundResource / readSound.
+                if (interfaceSound && workerInterface->read(resourceId, data)) return true;
+                return workerSounds->read(resourceId, data);
+            });
+        const auto playInterfaceSound =
+            [&](int resourceId) {
+            SoundTimer timer{sceKernelGetProcessTimeWide(), soundUs, soundMaxUs, "interface",
+                             std::to_string(resourceId)};
+            if (audio.playEffectById(resourceId, true)) return;
             std::vector<uint8_t> data;
             if (!assets.readSoundResource(resourceId, data)) {
                 logf("interface sound %d not found", resourceId);
                 return;
             }
             audio.playEffect(resourceId, data);
-        });
+        };
+        game.setInterfaceSoundPlayer(
+            playInterfaceSound);
+        frontend.setSoundPlayer(
+            playInterfaceSound);
         uint32_t unitSoundChoice = 0;
         game.setUnitSoundPlayer([&](int soundId, int civilization) {
-            std::vector<uint8_t> data;
+            SoundTimer timer{sceKernelGetProcessTimeWide(), soundUs, soundMaxUs, "unit",
+                             std::to_string(soundId)};
             int resourceId = -1;
             std::string fileName;
-            if (!assets.readSound(soundId, civilization, unitSoundChoice++, data,
-                                  &resourceId, &fileName)) {
+            // Choose the clip exactly as readSound would, then let the audio
+            // worker read and decode it if it is not cached yet.
+            if (!assets.selectSound(soundId, civilization, unitSoundChoice++,
+                                    &resourceId, &fileName)) {
                 logf("unit sound %d not found", soundId);
                 return;
             }
-            if (!audio.playEffect(resourceId, data))
+            if (audio.playEffectById(resourceId, false)) return;
+            std::shared_ptr<const std::vector<uint8_t>> data;
+            if (!assets.readSoundShared(soundId, civilization, unitSoundChoice - 1, data,
+                                        &resourceId, &fileName) ||
+                !audio.playEffect(resourceId, data))
                 logf("unit sound %s (%d) could not play", fileName.c_str(), resourceId);
         });
         game.setOiiaSoundPlayer(
@@ -635,6 +921,15 @@ int main() {
             }
             campaignMatch = true;
             frontend.setCampaignMatch(true);
+            {
+                // Read the mission's voice lines in the background.
+                std::vector<std::string> voices;
+                for (const swgb::ScenarioTrigger &trigger : campaignScenario.triggers)
+                    for (const swgb::ScenarioEffect &effect : trigger.effects)
+                        if (!effect.sound.empty()) voices.push_back(effect.sound);
+                audio.prefetchVoices(voices);
+                logf("prefetching %u voice clips", (unsigned)voices.size());
+            }
             logf(
                 "campaign %s entry %u loaded in %llu ms: %s, %ux%u, %u units",
                 mission->archiveName.c_str(),
@@ -685,11 +980,89 @@ int main() {
         uint64_t last = sceKernelGetProcessTimeWide();
         uint64_t budgetT = 0;
         uint64_t updateUs = 0, renderUs = 0, swapUs = 0;
+        swgb::UpdateStats updateTotals{};
+        swgb::UpdateStats maxUpdateStats{};
+        swgb::RenderStats renderTotals{};
+        swgb::RenderStats maxRenderStats{};
+        uint64_t maxUpdateUs = 0;
+        uint64_t maxRenderUs = 0;
+        uint32_t gameplayUpdates = 0;
+        uint32_t matchRenders = 0;
         size_t lastBuilds = 0;
         uint64_t statT = last;
         int frames = 0;
         swgb::FrontendScreen previousFrontendScreen =
             frontend.screen();
+        // Development autostart (ux0:data/swgb/autostart.txt) for unattended
+        // runs on hardware or in Vita3K:
+        //   campaign <archive substring> <scenario entry>   e.g. "campaign XCAM3 2"
+        //   exit_after <seconds of gameplay>                quit after logging
+        std::string autostartArchive;
+        int autostartEntry = -1;
+        int autostartSimRate = -1;
+        bool autostartScene = false;
+        float autostartQuitAfter = 0.0f; // wall seconds after start-up (menu tests)
+        float autostartExitAfter = 0.0f;
+        int autostartBattle = 0, autostartBattleEnemy = 5;
+        bool autostartPending = false;
+        uint64_t autostartGameplayStart = 0;
+        bool autostartLaunched = false;
+        if (FILE *autostart = fopen("ux0:data/swgb/autostart.txt", "r")) {
+            char key[64] = {}, value[128] = {};
+            int number = 0;
+            char line[256];
+            while (fgets(line, sizeof(line), autostart)) {
+                //   battle <units per side> <enemy player>          spawn a test fight
+                if (sscanf(line, "battle %d %d", &autostartBattle, &autostartBattleEnemy) >= 1)
+                    continue;
+                if (sscanf(line, "campaign %127s %d", value, &number) == 2) {
+                    autostartArchive = value;
+                    autostartEntry = number;
+                    autostartPending = true;
+                } else if (sscanf(line, "%63s %127s", key, value) == 2) {
+                    if (std::string(key) == "exit_after")
+                        autostartExitAfter = (float)atof(value);
+                    else if (std::string(key) == "simrate")
+                        autostartSimRate = atoi(value);
+                    else if (std::string(key) == "scene")
+                        autostartScene = atoi(value) != 0;
+                    else if (std::string(key) == "quit_after")
+                        autostartQuitAfter = (float)atof(value);
+                }
+            }
+            fclose(autostart);
+            logf("autostart: campaign %s entry %d exit_after %.0f s",
+                 autostartArchive.c_str(), autostartEntry, autostartExitAfter);
+        }
+        // Simulation rate: fixed steps per second (ux0:data/swgb/simrate.txt,
+        // or "simrate N" in autostart.txt); 0 = one variable step per frame
+        // as before.
+        int simHz = 15;
+        if (FILE *rate = fopen("ux0:data/swgb/simrate.txt", "r")) {
+            int value = -1;
+            if (fscanf(rate, "%d", &value) == 1 && value >= 0 && value <= 60) simHz = value;
+            fclose(rate);
+        }
+        if (autostartSimRate >= 0 && autostartSimRate <= 60) simHz = autostartSimRate;
+        float simAccumulator = 0.0f;
+        int simChunk = 0;                 // next part of the step in progress
+        uint64_t simStepUs = 0;
+        uint64_t simChunkUs[3] = {3000, 12000, 9000};
+        // Frame pacing: whole frames of 1/fpsCap s (ux0:data/swgb/fpscap.txt,
+        // default 30; 0 = as fast as vsync allows); the simulation gets what
+        // the frame has left after drawing.
+        int fpsCap = 30;
+        if (FILE *cap = fopen("ux0:data/swgb/fpscap.txt", "r")) {
+            int value = -1;
+            if (fscanf(cap, "%d", &value) == 1 && value >= 0 && value <= 60) fpsCap = value;
+            fclose(cap);
+        }
+        uint64_t simBudgetUs = fpsCap > 0 ? std::max<int64_t>(6000, 1000000 / fpsCap - 19000) : 12000;
+        uint64_t frameStartUs = sceKernelGetProcessTimeWide();
+        logf("frame pacing: %d fps cap, simulation budget %llu us", fpsCap,
+             (unsigned long long)simBudgetUs);
+        logf("simulation: %s", simHz > 0 ? (std::to_string(simHz) + " Hz fixed steps").c_str()
+                                          : "variable step per frame");
         std::vector<std::string> campaignNarration;
         size_t campaignNarrationIndex = 0;
         float campaignNarrationRemaining = 0;
@@ -877,27 +1250,143 @@ int main() {
             else
                 action = frontend.update(
                     in, game.victoryStateForTesting());
+            if (autostartPending &&
+                frontend.screen() == swgb::FrontendScreen::Title)
+                frontend.showMainMenu();
+            if (autostartPending &&
+                frontend.screen() == swgb::FrontendScreen::MainMenu) {
+                autostartPending = false;
+                bool found = false;
+                for (size_t c = 0; c < catalog.campaigns().size() && !found; ++c) {
+                    const swgb::CampaignInfo &campaign = catalog.campaigns()[c];
+                    if (campaign.archiveName.find(autostartArchive) == std::string::npos)
+                        continue;
+                    for (size_t m = 0; m < campaign.missions.size(); ++m)
+                        if ((int)campaign.missions[m].entry == autostartEntry) {
+                            frontend.selectCampaignMission(c, m);
+                            found = true;
+                            break;
+                        }
+                }
+                logf("autostart: mission %s", found ? "found" : "NOT FOUND");
+                if (found && autostartScene) {
+                    // Through the mission's opening scene, which starts it.
+                    frontend.showScreenForTesting(swgb::FrontendScreen::CampaignBriefing, 0);
+                    autostartLaunched = true;
+                } else if (found) {
+                    action = swgb::FrontendAction::StartCampaign;
+                    autostartLaunched = true;
+                }
+            }
+            // Skip the opening objectives pane so the mission runs unattended.
+            if (autostartLaunched && !autostartGameplayStart &&
+                frontend.screen() == swgb::FrontendScreen::Objectives) {
+                logf("autostart: dismissing objectives");
+                frontend.showGameplay();
+            }
+            if (g_quitRequested) {
+                logf("remote quit requested");
+                flushLog();
+                sceKernelExitProcess(0);
+            }
+            if (autostartQuitAfter > 0.0f && now / 1e6f >= autostartQuitAfter) {
+                logf("autostart: quitting after %.0f s", autostartQuitAfter);
+                flushLog();
+                sceKernelExitProcess(0);
+            }
+            if (autostartExitAfter > 0.0f &&
+                frontend.screen() == swgb::FrontendScreen::Gameplay) {
+                if (!autostartGameplayStart && autostartBattle > 0) {
+                    // Performance test fight at the map centre (dev only).
+                    const float centre = game.mapSizeForTesting() * 0.5f;
+                    int spawned = 0;
+                    for (int side = 0; side < 2; side++) {
+                        const int player = side == 0 ? 1 : autostartBattleEnemy;
+                        const int civ = game.civilizationForPlayerForTesting(player);
+                        for (int i = 0; i < autostartBattle; i++) {
+                            const float x = centre + (side == 0 ? -3.0f : 3.0f) +
+                                            (i / 8) * (side == 0 ? -0.8f : 0.8f);
+                            const float y = centre - 3.0f + (i % 8) * 0.8f;
+                            if (game.spawnObjectForTesting(civ, 460, player, x, y)) spawned++;
+                        }
+                    }
+                    game.lookAt(centre, centre);
+                    logf("autostart: battle spawned %d units vs player %d", spawned, autostartBattleEnemy);
+                }
+                if (!autostartGameplayStart) autostartGameplayStart = now;
+                if ((now - autostartGameplayStart) / 1e6f >= autostartExitAfter) {
+                    logf("autostart: exiting after %.0f s of gameplay", autostartExitAfter);
+                    if (g_log) fflush(g_log);
+                    sceKernelExitProcess(0);
+                }
+            }
             const swgb::FrontendScreen currentFrontendScreen =
                 frontend.screen();
+            // Music by screen (see VitaAudio::setMusic).
+            {
+                using Screen = swgb::FrontendScreen;
+                swgb::VitaAudio::Music music = swgb::VitaAudio::Music::Menu;
+                static bool matchMusic = false;
+                if (currentFrontendScreen == Screen::Gameplay ||
+                    currentFrontendScreen == Screen::Objectives ||
+                    currentFrontendScreen == Screen::Loading ||
+                    currentFrontendScreen == Screen::ScenarioEditor)
+                    matchMusic = true;
+                else if (currentFrontendScreen != Screen::Pause &&
+                         currentFrontendScreen != Screen::Options &&
+                         currentFrontendScreen != Screen::Confirm)
+                    matchMusic = false; // the in-game menus keep the game's music
+                if (matchMusic)
+                    music = swgb::VitaAudio::Music::Game;
+                else if (currentFrontendScreen == Screen::CampaignBriefing)
+                    music = swgb::VitaAudio::Music::None; // the scene's narration
+                else if (currentFrontendScreen == Screen::Outcome)
+                    music = game.victoryStateForTesting() == 1 ? swgb::VitaAudio::Music::Victory
+                                                               : swgb::VitaAudio::Music::Defeat;
+                audio.setMusic(music);
+            }
             if (currentFrontendScreen !=
                 previousFrontendScreen) {
                 if (currentFrontendScreen ==
                     swgb::FrontendScreen::CampaignBriefing) {
                     audio.resetSession();
-                    const std::string prefix =
-                        campaignNarrationPrefix(
-                            frontend.selectedCampaignMission());
-                    campaignNarration =
-                        audio.campaignBriefing(prefix);
+                    std::string sceneError;
+                    if (campaignScene.load(assets, std::string(kRoot) + "/Campaign/Media",
+                                           campaignThemeNumber(),
+                                           (int)frontend.selectedMission() + 1, true,
+                                           &sceneError)) {
+                        // The scene's SND lines start the narration on time;
+                        // read the files ahead on the audio worker.
+                        campaignNarration.clear();
+                        audio.prefetchVoices(campaignScene.soundNames());
+                        logf("campaign scene: campaign %d mission %d loaded",
+                             campaignThemeNumber(), (int)frontend.selectedMission() + 1);
+                    } else {
+                        logf("campaign scene unavailable (%s); narration only",
+                             sceneError.c_str());
+                        const std::string prefix =
+                            campaignNarrationPrefix(
+                                frontend.selectedCampaignMission());
+                        campaignNarration =
+                            audio.campaignBriefing(prefix);
+                    }
                     campaignNarrationIndex = 0;
                     campaignNarrationRemaining = 0;
                 } else if (previousFrontendScreen ==
                            swgb::FrontendScreen::CampaignBriefing) {
                     audio.resetSession();
                     campaignNarration.clear();
+                    campaignScene.release(assets);
                 }
                 previousFrontendScreen =
                     currentFrontendScreen;
+            }
+            if (currentFrontendScreen ==
+                    swgb::FrontendScreen::CampaignBriefing &&
+                campaignScene.loaded()) {
+                campaignScene.advance(dt);
+                for (const std::string &sound : campaignScene.takeDueSounds())
+                    audio.play(sound);
             }
             if (currentFrontendScreen ==
                     swgb::FrontendScreen::CampaignBriefing &&
@@ -1135,15 +1624,115 @@ int main() {
             }
             refreshOriginalFrontendArt();
             const uint64_t t0 = sceKernelGetProcessTimeWide();
+            const bool renderMatch =
+                frontend.screen() ==
+                    swgb::FrontendScreen::Gameplay ||
+                frontend.screen() ==
+                    swgb::FrontendScreen::Objectives;
+            // Simulation: either one variable step per frame (simrate 0, the
+            // original update), or fixed steps of 1/simHz with input handled
+            // every frame and moving objects drawn between steps.
+            auto recordUpdate = [&](uint64_t stepFrom, uint64_t stepTo) {
+                const swgb::UpdateStats &update =
+                    game.updateStats();
+                updateTotals.inputUs +=
+                    update.inputUs;
+                updateTotals.triggersUs +=
+                    update.triggersUs;
+                updateTotals.aiUs += update.aiUs;
+                updateTotals.worldUs +=
+                    update.worldUs;
+                updateTotals.worldProductionUs +=
+                    update.worldProductionUs;
+                updateTotals.worldConstructionUs +=
+                    update.worldConstructionUs;
+                updateTotals.worldShieldsUs +=
+                    update.worldShieldsUs;
+                updateTotals.worldOccupancyUs +=
+                    update.worldOccupancyUs;
+                updateTotals.worldWorkersUs +=
+                    update.worldWorkersUs;
+                updateTotals.worldMaintenanceUs +=
+                    update.worldMaintenanceUs;
+                updateTotals.worldLivestockUs +=
+                    update.worldLivestockUs;
+                updateTotals.worldGatheringUs +=
+                    update.worldGatheringUs;
+                updateTotals.worldRepairingUs +=
+                    update.worldRepairingUs;
+                updateTotals.worldConversionUs +=
+                    update.worldConversionUs;
+                updateTotals.worldHolocronsUs +=
+                    update.worldHolocronsUs;
+                updateTotals.movementUs +=
+                    update.movementUs;
+                updateTotals.finalUs +=
+                    update.finalUs;
+                gameplayUpdates++;
+                if (stepTo - stepFrom > 80000)
+                    logf("spike update %llu us: in/trg/ai/world/move/final=%llu/%llu/%llu/%llu/%llu/%llu",
+                         (unsigned long long)(stepTo - stepFrom), (unsigned long long)update.inputUs,
+                         (unsigned long long)update.triggersUs, (unsigned long long)update.aiUs,
+                         (unsigned long long)update.worldUs, (unsigned long long)update.movementUs,
+                         (unsigned long long)update.finalUs);
+                if (stepTo - stepFrom > maxUpdateUs) {
+                    maxUpdateUs = stepTo - stepFrom;
+                    maxUpdateStats = update;
+                }
+                        };
             if (frontend.screen() ==
-                swgb::FrontendScreen::Gameplay)
-                game.update(dt, in);
+                swgb::FrontendScreen::Gameplay) {
+                if (simHz <= 0) {
+                    game.update(dt, in);
+                    recordUpdate(t0, sceKernelGetProcessTimeWide());
+                } else {
+                    // Steps run in parts (Game::simulatePart) within a time
+                    // budget per frame, so the frame time stays even; the
+                    // moving objects are drawn between the last two steps.
+                    const float simStep = 1.0f / simHz;
+                    game.updateInput(dt, in);
+                    simAccumulator += dt;
+                    const uint64_t budgetStart = sceKernelGetProcessTimeWide();
+                    for (;;) {
+                        if (simChunk == 0) {
+                            if (simAccumulator < simStep || !game.simulationActive()) break;
+                            simAccumulator -= simStep;
+                            game.recordPreviousPositions();
+                            simStepUs = 0;
+                        }
+                        const uint64_t partStart = sceKernelGetProcessTimeWide();
+                        game.simulatePart(simStep, simChunk);
+                        const uint64_t partEnd = sceKernelGetProcessTimeWide();
+                        simStepUs += partEnd - partStart;
+                        simChunkUs[simChunk] = (simChunkUs[simChunk] * 3 + (partEnd - partStart)) / 4;
+                        simChunk = (simChunk + 1) % swgb::Game::kSimulationChunks;
+                        if (simChunk == 0) recordUpdate(0, simStepUs);
+                        // Next part only if it fits in this frame's budget.
+                        const uint64_t spent = partEnd - budgetStart;
+                        if (spent + simChunkUs[simChunk] > simBudgetUs) break;
+                    }
+                    // Far behind (a long hitch): slow the game down rather
+                    // than catch up in a burst.
+                    if (simAccumulator > 2.0f * simStep) simAccumulator = 2.0f * simStep;
+                    game.setRenderInterpolation(
+                        simChunk == 0 ? std::min(1.0f, simAccumulator / simStep) : 1.0f);
+                }
+            } else {
+                simAccumulator = 0.0f;
+                // A new match starts with a whole step (a paused match keeps
+                // its step in progress).
+                if (frontend.screen() == swgb::FrontendScreen::Loading) simChunk = 0;
+            }
             const uint64_t t1 = sceKernelGetProcessTimeWide();
-            if (frontend.screen() ==
-                swgb::FrontendScreen::Gameplay)
+            if (renderMatch) {
                 game.render(
                     renderer, kScreenW, kScreenH);
-            else if (frontend.screen() ==
+                if (frontend.screen() ==
+                    swgb::FrontendScreen::Objectives)
+                    frontend.renderObjectivesOverlay(
+                        renderer, kScreenW,
+                        kScreenH);
+            } else if (frontend.screen() ==
                      swgb::FrontendScreen::ScenarioEditor)
                 editor.render(
                     renderer, kScreenW, kScreenH);
@@ -1151,18 +1740,83 @@ int main() {
                 frontend.render(
                     renderer, kScreenW, kScreenH);
             const uint64_t t2 = sceKernelGetProcessTimeWide();
+            if (renderMatch) {
+                const swgb::RenderStats &render =
+                    game.renderStats();
+                renderTotals.prepareTerrainUs +=
+                    render.prepareTerrainUs;
+                renderTotals.prepareObjectsUs +=
+                    render.prepareObjectsUs;
+                renderTotals.beginFrameUs +=
+                    render.beginFrameUs;
+                renderTotals.drawTerrainUs +=
+                    render.drawTerrainUs;
+                renderTotals.drawWorldUs +=
+                    render.drawWorldUs;
+                renderTotals.drawUiUs +=
+                    render.drawUiUs;
+                renderTotals.endFrameUs +=
+                    render.endFrameUs;
+                matchRenders++;
+                if (t2 - t1 > maxRenderUs) {
+                    maxRenderUs = t2 - t1;
+                    maxRenderStats = render;
+                }
+            }
+            if (fpsCap > 0 && simHz > 0 && renderMatch) {
+                // Hold the frame to 1/fpsCap: sleep until just before that
+                // vblank, then the swap lands on it.
+                const uint64_t period = 1000000 / fpsCap;
+                const uint64_t due = frameStartUs + period - 2500;
+                const uint64_t nowUs = sceKernelGetProcessTimeWide();
+                if (nowUs < due) sceKernelDelayThread((SceUInt)(due - nowUs));
+            }
             vglSwapBuffers(GL_FALSE);
             const uint64_t t3 = sceKernelGetProcessTimeWide();
+            frameStartUs = t3;
             updateUs += t1 - t0;
             renderUs += t2 - t1;
             swapUs += t3 - t2;
             frames++;
             if (now - statT >= 5000000) {
-                logf("fps=%.1f ms upd/rnd/swap=%.1f/%.1f/%.1f draws=%d quads=%d sprites=%d vis=%d sheets=%u tex=%.1fMB "
+                const uint64_t updateDivisor =
+                    std::max<uint32_t>(
+                        1, gameplayUpdates);
+                const uint64_t renderDivisor =
+                    std::max<uint32_t>(
+                        1, matchRenders);
+                logf("fps=%.1f ms upd/rnd/swap=%.1f/%.1f/%.1f phase-avg-us=%llu/%llu/%llu/%llu/%llu/%llu max-upd-us=%llu max-phase-us=%llu/%llu/%llu/%llu/%llu/%llu max-ai=%llu/%llu/%llu/%llu/%llu/%llu p%d:%llu max-final=%llu/%llu/%llu/%llu/%llu draws=%d quads=%d sprites=%d vis=%d sheets=%u tex=%.1fMB "
                      "builds=%u free vram/ram/phy=%.1f/%.1f/%.1fMB menu=%d sel=%u zoom=%.2f",
                      frames * 1e6 / (double)(now - statT),
                      frames ? updateUs / 1000.0 / frames : 0.0, frames ? renderUs / 1000.0 / frames : 0.0,
-                     frames ? swapUs / 1000.0 / frames : 0.0, renderer.drawCalls(), renderer.quads(),
+                     frames ? swapUs / 1000.0 / frames : 0.0,
+                     (unsigned long long)(updateTotals.inputUs / updateDivisor),
+                     (unsigned long long)(updateTotals.triggersUs / updateDivisor),
+                     (unsigned long long)(updateTotals.aiUs / updateDivisor),
+                     (unsigned long long)(updateTotals.worldUs / updateDivisor),
+                     (unsigned long long)(updateTotals.movementUs / updateDivisor),
+                     (unsigned long long)(updateTotals.finalUs / updateDivisor),
+                     (unsigned long long)maxUpdateUs,
+                     (unsigned long long)maxUpdateStats.inputUs,
+                     (unsigned long long)maxUpdateStats.triggersUs,
+                     (unsigned long long)maxUpdateStats.aiUs,
+                     (unsigned long long)maxUpdateStats.worldUs,
+                     (unsigned long long)maxUpdateStats.movementUs,
+                     (unsigned long long)maxUpdateStats.finalUs,
+                     (unsigned long long)maxUpdateStats.aiRulesUs,
+                     (unsigned long long)maxUpdateStats.aiEconomyUs,
+                     (unsigned long long)maxUpdateStats.aiDefenseUs,
+                     (unsigned long long)maxUpdateStats.aiStrategyUs,
+                     (unsigned long long)maxUpdateStats.aiMilitaryUs,
+                     (unsigned long long)maxUpdateStats.aiScoutingUs,
+                     maxUpdateStats.aiMaxPlayer,
+                     (unsigned long long)maxUpdateStats.aiMaxPlayerUs,
+                     (unsigned long long)maxUpdateStats.finalGarrisonUs,
+                     (unsigned long long)maxUpdateStats.finalProjectilesUs,
+                     (unsigned long long)maxUpdateStats.finalRemainsUs,
+                     (unsigned long long)maxUpdateStats.finalVisibilityUs,
+                     (unsigned long long)maxUpdateStats.finalVictoryUs,
+                     renderer.drawCalls(), renderer.quads(),
                      game.stats().sprites,
                      game.stats().visibilityChecks,
                      (unsigned)assets.sheetCount(),
@@ -1171,7 +1825,73 @@ int main() {
                      vglMemFree(VGL_MEM_VRAM) / 1048576.0, vglMemFree(VGL_MEM_RAM) / 1048576.0,
                      vglMemFree(VGL_MEM_PHYCONT) / 1048576.0, (int)game.actionMenuOpenForTesting(),
                      (unsigned)game.selectedObjectIds().size(), game.zoom());
+                {
+                    const auto build = assets.takeBuildTime();
+                    logf("audio worker: %s", audio.workerState().c_str());
+                    const swgb::Game::PathStats paths = game.takePathStats();
+                    logf("sheet-build-us=%llu/%llu sound-us=%llu/%llu path searches=%u/%llu us grid-builds=%u/%llu us "
+                         "(signature/blocked/tables/finder %llu/%llu/%llu/%llu)",
+                         (unsigned long long)build.first, (unsigned long long)build.second,
+                         (unsigned long long)soundUs, (unsigned long long)soundMaxUs,
+                         paths.searches, (unsigned long long)paths.findUs, paths.builds,
+                         (unsigned long long)paths.buildUs, (unsigned long long)paths.phaseUs[0],
+                         (unsigned long long)paths.phaseUs[1], (unsigned long long)paths.phaseUs[2],
+                         (unsigned long long)paths.phaseUs[3]);
+                    soundUs = soundMaxUs = 0;
+                }
+                logf(
+                    "world-phase-avg-us=%llu/%llu/%llu/%llu/%llu/%llu max-world-phase-us=%llu/%llu/%llu/%llu/%llu/%llu",
+                    (unsigned long long)(updateTotals.worldProductionUs / updateDivisor),
+                    (unsigned long long)(updateTotals.worldConstructionUs / updateDivisor),
+                    (unsigned long long)(updateTotals.worldShieldsUs / updateDivisor),
+                    (unsigned long long)(updateTotals.worldOccupancyUs / updateDivisor),
+                    (unsigned long long)(updateTotals.worldWorkersUs / updateDivisor),
+                    (unsigned long long)(updateTotals.worldMaintenanceUs / updateDivisor),
+                    (unsigned long long)maxUpdateStats.worldProductionUs,
+                    (unsigned long long)maxUpdateStats.worldConstructionUs,
+                    (unsigned long long)maxUpdateStats.worldShieldsUs,
+                    (unsigned long long)maxUpdateStats.worldOccupancyUs,
+                    (unsigned long long)maxUpdateStats.worldWorkersUs,
+                    (unsigned long long)maxUpdateStats.worldMaintenanceUs);
+                logf(
+                    "worker-phase-avg-us=%llu/%llu/%llu/%llu/%llu max-worker-phase-us=%llu/%llu/%llu/%llu/%llu",
+                    (unsigned long long)(updateTotals.worldLivestockUs / updateDivisor),
+                    (unsigned long long)(updateTotals.worldGatheringUs / updateDivisor),
+                    (unsigned long long)(updateTotals.worldRepairingUs / updateDivisor),
+                    (unsigned long long)(updateTotals.worldConversionUs / updateDivisor),
+                    (unsigned long long)(updateTotals.worldHolocronsUs / updateDivisor),
+                    (unsigned long long)maxUpdateStats.worldLivestockUs,
+                    (unsigned long long)maxUpdateStats.worldGatheringUs,
+                    (unsigned long long)maxUpdateStats.worldRepairingUs,
+                    (unsigned long long)maxUpdateStats.worldConversionUs,
+                    (unsigned long long)maxUpdateStats.worldHolocronsUs);
+                logf(
+                    "render-phase-avg-us=%llu/%llu/%llu/%llu/%llu/%llu/%llu max-render-us=%llu max-render-phase-us=%llu/%llu/%llu/%llu/%llu/%llu/%llu",
+                    (unsigned long long)(renderTotals.prepareTerrainUs / renderDivisor),
+                    (unsigned long long)(renderTotals.prepareObjectsUs / renderDivisor),
+                    (unsigned long long)(renderTotals.beginFrameUs / renderDivisor),
+                    (unsigned long long)(renderTotals.drawTerrainUs / renderDivisor),
+                    (unsigned long long)(renderTotals.drawWorldUs / renderDivisor),
+                    (unsigned long long)(renderTotals.drawUiUs / renderDivisor),
+                    (unsigned long long)(renderTotals.endFrameUs / renderDivisor),
+                    (unsigned long long)maxRenderUs,
+                    (unsigned long long)maxRenderStats.prepareTerrainUs,
+                    (unsigned long long)maxRenderStats.prepareObjectsUs,
+                    (unsigned long long)maxRenderStats.beginFrameUs,
+                    (unsigned long long)maxRenderStats.drawTerrainUs,
+                    (unsigned long long)maxRenderStats.drawWorldUs,
+                    (unsigned long long)maxRenderStats.drawUiUs,
+                    (unsigned long long)maxRenderStats.endFrameUs);
+                flushLog();
                 updateUs = renderUs = swapUs = 0;
+                updateTotals = {};
+                maxUpdateStats = {};
+                renderTotals = {};
+                maxRenderStats = {};
+                maxUpdateUs = 0;
+                maxRenderUs = 0;
+                gameplayUpdates = 0;
+                matchRenders = 0;
                 lastBuilds = assets.buildCount();
                 frames = 0;
                 statT = now;

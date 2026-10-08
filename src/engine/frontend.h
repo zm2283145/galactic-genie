@@ -14,6 +14,8 @@
 
 namespace swgb {
 
+class CampaignScene;
+
 enum class FrontendScreen : uint8_t {
     Title,
     MainMenu,
@@ -50,12 +52,17 @@ enum class FrontendAction : uint8_t {
 
 using FrontendStringLookup =
     std::function<std::string(int, const std::string &)>;
+using FrontendSoundPlayer =
+    std::function<void(int)>;
 
 class Frontend {
 public:
     FrontendAction update(
         const InputState &input, int matchOutcome);
     void render(
+        Renderer &renderer, int screenW,
+        int screenH) const;
+    void renderObjectivesOverlay(
         Renderer &renderer, int screenW,
         int screenH) const;
     void loadingFinished(
@@ -82,9 +89,17 @@ public:
     void setStringLookup(FrontendStringLookup lookup) {
         strings_ = std::move(lookup);
     }
+    void setSoundPlayer(FrontendSoundPlayer player) {
+        sounds_ = std::move(player);
+    }
     void setOriginalMenuBackground(
         const SpriteFrame *frame) {
         originalMenuBackground_ = frame;
+    }
+    // The opening scene shown on the campaign briefing screen (null or not
+    // loaded: the briefing dialog). Owned by the caller.
+    void setCampaignScene(const CampaignScene *scene) {
+        campaignScene_ = scene;
     }
     void setOriginalBriefingDialog(
         const SpriteFrame *frame) {
@@ -99,6 +114,19 @@ public:
         originalMenuSelectedButton_ =
             selectedButton;
     }
+    void setOriginalMainHotspot(
+        size_t hotspot,
+        const SpriteFrame *normal,
+        const SpriteFrame *selected,
+        const SpriteFrame *active) {
+        if (hotspot >= originalMainHotspots_.size())
+            return;
+        originalMainHotspots_[hotspot] = {
+            normal, selected, active};
+    }
+    void setExpandingFrontsMenu(bool enabled) {
+        expandingFrontsMenu_ = enabled;
+    }
     void setOriginalCampaignIcon(
         size_t campaign,
         const SpriteFrame *normal,
@@ -108,6 +136,34 @@ public:
             return;
         originalCampaignIcons_[campaign] = {
             normal, selected};
+    }
+    void clearOriginalMissionNodes() {
+        originalMissionNodeCount_ = 0;
+        for (auto &node : originalMissionNodes_)
+            node.frames.fill(nullptr);
+    }
+    void setOriginalMissionNode(
+        size_t mission, float x, float y,
+        const SpriteFrame *normal,
+        const SpriteFrame *selected,
+        const SpriteFrame *completed,
+        const SpriteFrame *locked,
+        float textX = -1.0f, float textY = -1.0f,
+        float textW = 0.0f, float textH = 0.0f) {
+        if (mission >= originalMissionNodes_.size())
+            return;
+        originalMissionNodes_[mission].x = x;
+        originalMissionNodes_[mission].y = y;
+        originalMissionNodes_[mission].textX = textX;
+        originalMissionNodes_[mission].textY = textY;
+        originalMissionNodes_[mission].textW = textW;
+        originalMissionNodes_[mission].textH = textH;
+        originalMissionNodes_[mission].frames = {
+            normal, selected, completed, locked};
+        if (originalMissionNodeCount_ <
+            mission + 1)
+            originalMissionNodeCount_ =
+                mission + 1;
     }
     void setDataStatus(
         size_t campaigns, size_t missions,
@@ -173,6 +229,11 @@ public:
     SkirmishSettings &settingsForTesting() {
         return settings_;
     }
+    // Tests and tools: jump straight to a screen.
+    void showScreenForTesting(FrontendScreen screen, size_t selection) {
+        screen_ = screen;
+        selection_ = selection;
+    }
     size_t selectionForTesting() const {
         return selection_;
     }
@@ -192,6 +253,22 @@ private:
     std::array<
         std::array<const SpriteFrame *, 2>, 6>
         originalCampaignIcons_{};
+    std::array<
+        std::array<const SpriteFrame *, 3>, 8>
+        originalMainHotspots_{};
+    bool expandingFrontsMenu_ = false;
+    struct OriginalMissionNode {
+        float x = 0.0f;
+        float y = 0.0f;
+        // Title box from the campaign screen table (textX < 0: none, the
+        // title goes under the button).
+        float textX = -1.0f, textY = -1.0f, textW = 0.0f, textH = 0.0f;
+        std::array<const SpriteFrame *, 4> frames{};
+    };
+    std::array<OriginalMissionNode, 8>
+        originalMissionNodes_{};
+    size_t originalMissionNodeCount_ = 0;
+    const CampaignScene *campaignScene_ = nullptr;
     void moveSelection(int direction, size_t count);
     void adjustLobbyValue(int direction);
     void refreshLobbyPreview();
@@ -230,6 +307,7 @@ private:
     const CampaignCatalog *catalog_ = nullptr;
     CampaignProfile *profile_ = nullptr;
     FrontendStringLookup strings_;
+    FrontendSoundPlayer sounds_;
     MatchSaveKind continueKind_ =
         MatchSaveKind::Skirmish;
     size_t dataCampaigns_ = 0;
@@ -241,6 +319,9 @@ private:
     bool continueAvailable_ = false;
     bool settingsChanged_ = false;
     bool profileChanged_ = false;
+    FrontendScreen objectivesReturnScreen_ =
+        FrontendScreen::Gameplay;
+    size_t objectivesPage_ = 0;
 };
 
 } // namespace swgb

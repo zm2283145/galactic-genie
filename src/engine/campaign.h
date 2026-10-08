@@ -21,6 +21,8 @@ struct CampaignMission {
     std::string title;
     std::string description;
     std::string objectives;
+    std::string intelligence;
+    std::string reconnaissance;
     std::string faction;
     uint32_t entry = 0;
     uint32_t civilization = 0;

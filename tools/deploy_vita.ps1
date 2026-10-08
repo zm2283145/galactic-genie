@@ -45,7 +45,10 @@ param(
     [switch]$AllRequiredData,
     [switch]$Verify,
     [switch]$ScenarioImport,
-    [switch]$PullLog
+    [switch]$PullLog,
+    # Install into a Vita3K pref path instead of uploading over FTP, e.g.
+    # -LocalRoot "$env:APPDATA\Vita3K\Vita3K" (ux0:/data/swgb -> <root>\ux0\data\swgb).
+    [string]$LocalRoot = ""
 )
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
@@ -67,7 +70,16 @@ if ($AllRequiredData) {
     $Verify = $true
 }
 
+function Local-Path($remote) {
+    $relative = ($remote -replace '^ux0:/?', 'ux0/') -replace '/', '\'
+    return Join-Path $LocalRoot $relative
+}
+
 function Ftp-MkDir($path) {
+    if ($LocalRoot) {
+        New-Item -ItemType Directory -Force (Local-Path $path) | Out-Null
+        return
+    }
     try {
         $r = [Net.FtpWebRequest]::Create("$base/$path")
         $r.Method = [Net.WebRequestMethods+Ftp]::MakeDirectory
@@ -78,6 +90,14 @@ function Ftp-MkDir($path) {
 
 function Ftp-Put($local, $remote) {
     $len = (Get-Item $local).Length
+    if ($LocalRoot) {
+        $target = Local-Path $remote
+        New-Item -ItemType Directory -Force (Split-Path -Parent $target) | Out-Null
+        if ((Test-Path $target) -and (Get-Item $target).Length -eq $len) { return }
+        Write-Host ("  {0} -> {1} ({2:N1} MB)" -f (Split-Path $local -Leaf), $target, ($len / 1MB))
+        Copy-Item -LiteralPath $local -Destination $target -Force
+        return
+    }
     $remoteUrl = ([Uri]"$base/$remote").AbsoluteUri
     Write-Host ("  {0} -> {1} ({2:N1} MB)" -f (Split-Path $local -Leaf), $remote, ($len / 1MB))
     if ($AllRequiredData) {
@@ -125,6 +145,7 @@ function Ftp-Get($remote, $local) {
 }
 
 function Ftp-Size($remote) {
+    if ($LocalRoot) { return (Get-Item (Local-Path $remote)).Length }
     # VitaShell's response to the FTP SIZE command is unreliable through
     # FtpWebRequest, while its RETR metadata reports the exact byte count.
     $remoteUrl = ([Uri]"$base/$remote").AbsoluteUri
@@ -157,8 +178,11 @@ Ftp-MkDir "ux0:/data/swgb/Scenarios/autosave"
 Ftp-MkDir "ux0:/data/swgb/Scenarios/recovery"
 if ($GameData) {
     Ftp-MkDir "ux0:/data/swgb/Data"
-    $files = "genie_x1.dat", "GRAPHICS.DRS", "graphics_x1.drs", "TERRAIN.DRS", "terrain_x1.drs",
-             "INTERFAC.DRS", "interfac_x1.drs", "blendomatic.dat", "STemplet.dat", "FilterMaps.dat",
+    $files = "genie_x1.dat", "GRAPHICS.DRS", "graphics_p1.drs", "graphics_x1.drs",
+             "graphics_x1_p1.drs", "TERRAIN.DRS", "terrain_p1.drs",
+             "terrain_x1.drs", "terrain_x1_p1.drs", "INTERFAC.DRS",
+             "interfac_p1.drs", "interfac_x1.drs", "interfac_x1_p1.drs", "interfac_x2.drs",
+             "blendomatic.dat", "STemplet.dat", "FilterMaps.dat",
              "VIEW_ICM.DAT", "lightMaps.dat", "PatternMasks.dat"
     foreach ($f in $files) { Ftp-Put (Join-Path $GameDir $f) "ux0:/data/swgb/Data/$($f.ToLower())" }
 }

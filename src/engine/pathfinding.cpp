@@ -8,23 +8,64 @@
 
 namespace swgb {
 
-void TilePathfinder::build(int size, const std::function<bool(int, int)> &passable,
-                           const std::function<bool(int, int, int)> &edgeClear) {
-    size_ = std::max(0, size);
-    passable_.assign((size_t)size_ * size_, 0);
-    edges_.assign((size_t)size_ * size_, 0);
-    for (int y = 0; y < size_; y++)
-        for (int x = 0; x < size_; x++)
-            passable_[(size_t)y * size_ + x] = passable(x, y) ? 1 : 0;
+static const int kDirs[8][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1},
+                                {1, 1}, {-1, 1}, {1, -1}, {-1, -1}};
+
+// Same bits as buildMovesReference(), read straight from edges_: an edge
+// bit is only ever set between two passable tiles, so edge() reduces to the
+// bit and passable() of a step's end tiles is implied by the edges tested.
+void TilePathfinder::buildMoves() {
+    moves_.assign((size_t)size_ * size_, 0);
+    const int n = size_;
+    auto east = [&](int x, int y) { // edge (x, y) -> (x + 1, y)
+        return x >= 0 && y >= 0 && x < n && y < n && (edges_[(size_t)y * n + x] & 1);
+    };
+    auto south = [&](int x, int y) { // edge (x, y) -> (x, y + 1)
+        return x >= 0 && y >= 0 && x < n && y < n && (edges_[(size_t)y * n + x] & 2);
+    };
+    auto horizontal = [&](int x, int y, int dx) { return dx > 0 ? east(x, y) : east(x - 1, y); };
+    auto vertical = [&](int x, int y, int dy) { return dy > 0 ? south(x, y) : south(x, y - 1); };
+    for (int y = 0; y < n; y++)
+        for (int x = 0; x < n; x++) {
+            uint8_t bits = 0;
+            if (east(x, y)) bits |= 1;
+            if (east(x - 1, y)) bits |= 2;
+            if (south(x, y)) bits |= 4;
+            if (south(x, y - 1)) bits |= 8;
+            for (int d = 4; d < 8; d++) {
+                const int dx = kDirs[d][0], dy = kDirs[d][1];
+                if (horizontal(x, y, dx) && vertical(x + dx, y, dy) && vertical(x, y, dy) &&
+                    horizontal(x, y + dy, dx))
+                    bits |= (uint8_t)(1u << d);
+            }
+            moves_[(size_t)y * n + x] = bits;
+        }
+#ifdef SWGB_CHECK_MOVES
+    std::vector<uint8_t> reference;
+    buildMovesReference(reference);
+    if (reference != moves_) __builtin_trap();
+#endif
+}
+
+void TilePathfinder::buildMovesReference(std::vector<uint8_t> &moves) const {
+    moves.assign((size_t)size_ * size_, 0);
     for (int y = 0; y < size_; y++)
         for (int x = 0; x < size_; x++) {
-            if (!passable_[(size_t)y * size_ + x]) continue;
             uint8_t bits = 0;
-            if (this->passable(x + 1, y) && (!edgeClear || edgeClear(x, y, 0)))
-                bits |= 1;
-            if (this->passable(x, y + 1) && (!edgeClear || edgeClear(x, y, 1)))
-                bits |= 2;
-            edges_[(size_t)y * size_ + x] = bits;
+            for (int d = 0; d < 8; d++) {
+                const int dx = kDirs[d][0], dy = kDirs[d][1];
+                if (!passable(x + dx, y + dy)) continue;
+                const bool diagonal = dx != 0 && dy != 0;
+                if (!diagonal) {
+                    if (!edge(x, y, dx, dy)) continue;
+                } else if (!passable(x + dx, y) || !passable(x, y + dy) ||
+                           !edge(x, y, dx, 0) || !edge(x + dx, y, 0, dy) ||
+                           !edge(x, y, 0, dy) || !edge(x, y + dy, dx, 0)) {
+                    continue;
+                }
+                bits |= (uint8_t)(1u << d);
+            }
+            moves[(size_t)y * size_ + x] = bits;
         }
 }
 
@@ -50,15 +91,12 @@ PathResult TilePathfinder::find(float sx, float sy, const PathGoal &goal,
     out.clear();
     if (size_ <= 0) return PathResult::Failed;
     const size_t count = (size_t)size_ * size_;
-    if (cost_.size() != count) {
-        cost_.assign(count, 0.0f);
-        parent_.assign(count, -1);
-        stamp_.assign(count, 0);
-        closed_.assign(count, 0);
+    if (nodes_.size() != count) {
+        nodes_.assign(count, NodeState{0.0f, -1, 0, 0});
         generation_ = 0;
     }
     if (++generation_ == 0) {
-        std::fill(stamp_.begin(), stamp_.end(), 0);
+        for (NodeState &node : nodes_) node.stamp = 0;
         generation_ = 1;
     }
     auto clampTile = [this](float v) {
@@ -77,37 +115,52 @@ PathResult TilePathfinder::find(float sx, float sy, const PathGoal &goal,
         const float dx = (float)(goalTileX - x), dy = (float)(goalTileY - y);
         return std::sqrt(dx * dx + dy * dy);
     };
-    struct Open {
-        float f;
-        int index;
-        bool operator<(const Open &o) const { return f > o.f; }
-    };
-    std::priority_queue<Open> open;
+    // Min-heap on f in a reused buffer (same push/pop order as a
+    // std::priority_queue: both use std::push_heap/pop_heap). h is kept with
+    // the entry so the pop does not recompute it.
+    std::vector<OpenNode> &heap = open_;
+    heap.clear();
+    const auto heapLess = [](const OpenNode &a, const OpenNode &b) { return a.f > b.f; };
+    struct OpenQueue {
+        std::vector<OpenNode> &v;
+        decltype(heapLess) less;
+        bool empty() const { return v.empty(); }
+        const OpenNode &top() const { return v.front(); }
+        void push(OpenNode node) {
+            v.push_back(node);
+            std::push_heap(v.begin(), v.end(), less);
+        }
+        void pop() {
+            std::pop_heap(v.begin(), v.end(), less);
+            v.pop_back();
+        }
+    } open{heap, heapLess};
     auto visit = [&](int index, float g, int parent) {
-        stamp_[(size_t)index] = generation_;
-        cost_[(size_t)index] = g;
-        parent_[(size_t)index] = parent;
-        closed_[(size_t)index] = 0;
+        NodeState &node = nodes_[(size_t)index];
+        node.stamp = generation_;
+        node.cost = g;
+        node.parent = parent;
+        node.closed = 0;
     };
     const bool startCentreClear =
         startClear && passable(startX, startY) && startClear(startX, startY);
     visit(start, 0.0f, -1);
-    open.push({heuristic(startX, startY), start});
+    open.push({heuristic(startX, startY), heuristic(startX, startY), start, (int16_t)startX,
+               (int16_t)startY});
     int best = start;
     float bestH = heuristic(startX, startY);
     int found = -1;
     int expansions = 0;
-    static const int dirs[8][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1},
-                                   {1, 1}, {-1, 1}, {1, -1}, {-1, -1}};
     while (!open.empty() && expansions < maxExpansions) {
-        const Open current = open.top();
+        const OpenNode current = open.top();
         open.pop();
         const int index = current.index;
-        if (stamp_[(size_t)index] != generation_ || closed_[(size_t)index]) continue;
-        closed_[(size_t)index] = 1;
+        NodeState &state = nodes_[(size_t)index];
+        if (state.stamp != generation_ || state.closed) continue;
+        state.closed = 1;
         expansions++;
-        const int cx = index % size_, cy = index / size_;
-        const float h = heuristic(cx, cy);
+        const int cx = current.x, cy = current.y;
+        const float h = current.h;
         if (h < bestH) {
             bestH = h;
             best = index;
@@ -116,12 +169,18 @@ PathResult TilePathfinder::find(float sx, float sy, const PathGoal &goal,
             found = index;
             break;
         }
-        const float g = cost_[(size_t)index];
-        for (const auto &d : dirs) {
-            const int nx = cx + d[0], ny = cy + d[1];
-            if (!passable(nx, ny)) continue;
-            const bool diagonal = d[0] != 0 && d[1] != 0;
-            if (index == start && startClear) {
+        const float g = state.cost;
+        // Steps to try, in direction order: the precomputed moves, or for the
+        // start tile the start rules (pure tests, so evaluating them before
+        // visiting any neighbour changes nothing).
+        unsigned candidates = moves_[(size_t)index];
+        if (index == start && startClear) {
+            candidates = 0;
+            for (int dirIndex = 0; dirIndex < 8; dirIndex++) {
+                const int *d = kDirs[dirIndex];
+                const int nx = cx + d[0], ny = cy + d[1];
+                const bool diagonal = d[0] != 0 && d[1] != 0;
+                if (!passable(nx, ny)) continue;
                 // The unit is somewhere inside its tile: test the real step,
                 // or a step via its own tile centre (the caller inserts that
                 // centre as a waypoint when the direct step is blocked).
@@ -132,26 +191,26 @@ PathResult TilePathfinder::find(float sx, float sy, const PathGoal &goal,
                                  edge(cx, cy, 0, d[1]) && edge(cx, cy + d[1], d[0], 0))
                               : edge(cx, cy, d[0], d[1]));
                 if (!viaCentre && !startClear(nx, ny)) continue;
-            } else if (!diagonal) {
-                if (!edge(cx, cy, d[0], d[1])) continue;
-            } else if (!passable(cx + d[0], cy) || !passable(cx, cy + d[1]) ||
-                       !edge(cx, cy, d[0], 0) || !edge(cx + d[0], cy, 0, d[1]) ||
-                       !edge(cx, cy, 0, d[1]) || !edge(cx, cy + d[1], d[0], 0)) {
-                continue; // no corner cutting
+                candidates |= 1u << dirIndex;
             }
+        }
+        for (; candidates; candidates &= candidates - 1) {
+            const int dirIndex = __builtin_ctz(candidates);
+            const int nx = cx + kDirs[dirIndex][0], ny = cy + kDirs[dirIndex][1];
             const int next = ny * size_ + nx;
-            const float ng = g + (diagonal ? 1.41421356f : 1.0f);
-            if (stamp_[(size_t)next] == generation_ &&
-                (closed_[(size_t)next] || ng >= cost_[(size_t)next]))
+            const float ng = g + (dirIndex >= 4 ? 1.41421356f : 1.0f);
+            const NodeState &nextState = nodes_[(size_t)next];
+            if (nextState.stamp == generation_ && (nextState.closed || ng >= nextState.cost))
                 continue;
             visit(next, ng, index);
-            open.push({ng + heuristic(nx, ny), next});
+            const float nh = heuristic(nx, ny);
+            open.push({ng + nh, nh, next, (int16_t)nx, (int16_t)ny});
         }
     }
     const int end = found >= 0 ? found : best;
     if (end == start) return found >= 0 ? PathResult::Complete : PathResult::Failed;
     std::vector<int> reverse;
-    for (int node = end; node != start && node >= 0; node = parent_[(size_t)node])
+    for (int node = end; node != start && node >= 0; node = nodes_[(size_t)node].parent)
         reverse.push_back(node);
     for (auto it = reverse.rbegin(); it != reverse.rend(); ++it)
         out.push_back({(*it % size_) + 0.5f, (*it / size_) + 0.5f});

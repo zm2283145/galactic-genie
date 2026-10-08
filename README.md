@@ -92,15 +92,23 @@ set it Closed, Human, or Computer, then choose its unique color, civilization, A
 difficulty, team, and allied-victory participation. X on the seed row advances to a safely bounded
 32-bit randomized seed; left/right provides exact seed adjustment. The cached minimap preview and
 hash update immediately when the map, size, player count, or seed changes. The main
-menu uses the original Clone Campaigns background, logo, control art, item order, and
-right-side layout, non-uniformly scaled from the original 800x600 coordinates to fill
-the Vita's complete 960x544 widescreen display. It exposes Single Player, visibly
-unavailable Multiplayer, the native Scenario Editor, Options, Credits/Data Status,
-and Exit. Campaign browsing uses the original campaign-root art and planet selectors;
+menu uses the original Clone Campaigns spatial hotspots and right-side pane,
+non-uniformly scaled from the original 800x600 coordinates to fill the Vita's complete
+960x544 widescreen display. Basic Training, Community, DataBank, Single Player,
+Options, Multiplayer, Scenario Editor, and Exit retain their original positions.
+The Single Player pane exposes Original Campaigns, Expansion Campaigns, Standard
+Game, Custom Campaign, and Saved Game in the original order; unavailable services
+remain visibly present rather than silently disappearing. Campaign browsing uses
+the original campaign-root art and reference-measured selector layout: Training
+occupies the lower-left position, XCAM1-XCAM5 continue through the middle-left,
+upper-left, upper-right, middle-right, and lower-right positions, with their
+localized labels beside the original selector graphics;
 mission and briefing screens use the selected campaign's original background,
 palette, and briefing-dialog frame with localized XCAM content. Only the current
 full-screen/dialog frame remains resident. L toggles sequential versus development
-mission access in the mission browser.
+mission access in the mission browser. Starting a stock mission opens the original
+Objectives / Intelligence / Reconnaissance tab flow over the live map and pauses
+simulation until the player selects OK.
 
 START pauses an active match. The shared pause framework can resume, show campaign objectives or
 skirmish status, save/load, restart, adjust options, surrender, and return to the campaign browser

@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -57,6 +58,49 @@ struct FrameStats {
     int sprites = 0;
     int tiles = 0;
     int visibilityChecks = 0;
+};
+
+struct UpdateStats {
+    uint64_t inputUs = 0;
+    uint64_t triggersUs = 0;
+    uint64_t aiUs = 0;
+    uint64_t worldUs = 0;
+    uint64_t movementUs = 0;
+    uint64_t finalUs = 0;
+    uint64_t aiRulesUs = 0;
+    uint64_t aiEconomyUs = 0;
+    uint64_t aiDefenseUs = 0;
+    uint64_t aiStrategyUs = 0;
+    uint64_t aiMilitaryUs = 0;
+    uint64_t aiScoutingUs = 0;
+    uint64_t aiMaxPlayerUs = 0;
+    int aiMaxPlayer = -1;
+    uint64_t worldProductionUs = 0;
+    uint64_t worldConstructionUs = 0;
+    uint64_t worldShieldsUs = 0;
+    uint64_t worldOccupancyUs = 0;
+    uint64_t worldWorkersUs = 0;
+    uint64_t worldMaintenanceUs = 0;
+    uint64_t worldLivestockUs = 0;
+    uint64_t worldGatheringUs = 0;
+    uint64_t worldRepairingUs = 0;
+    uint64_t worldConversionUs = 0;
+    uint64_t worldHolocronsUs = 0;
+    uint64_t finalGarrisonUs = 0;
+    uint64_t finalProjectilesUs = 0;
+    uint64_t finalRemainsUs = 0;
+    uint64_t finalVisibilityUs = 0;
+    uint64_t finalVictoryUs = 0;
+};
+
+struct RenderStats {
+    uint64_t prepareTerrainUs = 0;
+    uint64_t prepareObjectsUs = 0;
+    uint64_t beginFrameUs = 0;
+    uint64_t drawTerrainUs = 0;
+    uint64_t drawWorldUs = 0;
+    uint64_t drawUiUs = 0;
+    uint64_t endFrameUs = 0;
 };
 
 struct MovementStats {
@@ -396,6 +440,7 @@ public:
             aiUnit(player, symbol);
         return unit ? unit->id : -1;
     }
+    int mapSizeForTesting() const { return mapSize_; }
     int civilizationForPlayerForTesting(
         int player) const {
         return civilizationForPlayer(player);
@@ -727,7 +772,24 @@ public:
             player, surrendered);
     }
     void update(float dt, const InputState &in);
-    void render(Renderer &r, int screenW, int screenH);
+    // update() split for a fixed-rate simulation: updateInput() handles
+    // input, camera and HUD timers every frame (false once the match is
+    // decided); simulate() advances the world by one step. update(dt, in)
+    // is updateInput(dt, in) followed by the step with the same dt.
+    bool updateInput(float dt, const InputState &in);
+    void simulate(float dt);
+    // simulate() in parts (chunk 0, 1, 2 in order make one step), so a step
+    // can be spread over frames; input must not be applied mid-step.
+    static constexpr int kSimulationChunks = 3;
+    void simulatePart(float dt, int chunk) { simulateChunk(dt, nullptr, chunk); }
+    // False once the match is decided (no further steps should start).
+    bool simulationActive() const { return victoryState_ < 0; }    void render(Renderer &r, int screenW, int screenH);
+    // Fixed-rate simulation (Vita): recordPreviousPositions() before each
+    // step keeps where the moving objects were, and render() then draws them
+    // at previous + (current - previous) * alpha. alpha 1 (the default) draws
+    // the current state; the game state itself is never changed.
+    void recordPreviousPositions();
+    void setRenderInterpolation(float alpha) { renderInterpolation_ = alpha; }
     bool saveMatch(
         const std::string &path,
         std::string *err = nullptr) const;
@@ -928,6 +990,12 @@ public:
     size_t selectedMovingObjectCount() const;
     MovementStats movementStats() const;
     CombatStats combatStats() const;
+    const UpdateStats &updateStats() const {
+        return updateStats_;
+    }
+    const RenderStats &renderStats() const {
+        return renderStats_;
+    }
     float objectHitPoints(uint32_t spawnId) const;
     float objectMaxHitPoints(uint32_t spawnId) const;
     float objectShieldPoints(uint32_t spawnId) const;
@@ -1367,30 +1435,67 @@ private:
     };
 
     struct Object {
+        // Fields read by the per-frame passes over every object come first,
+        // packed so a pass touches as few cache lines per object as possible
+        // (Vita: 32-bit, 32-byte lines; most of the ~6,700 objects in a
+        // campaign are trees, which every pass still has to look at).
+        // Line 0: identity, position, flags.
         const dat::Unit *unit = nullptr;
-        const dat::Unit *gateClosedUnit = nullptr;
-        const dat::Unit *gateOpenUnit = nullptr;
-        const dat::Unit *gateEndUnit = nullptr;
-        std::deque<ProductionItem> productionQueue;
         int player = 0; // 0 = gaia
         float x = 0, y = 0;
-        float facing = 0; // radians, 0 = +x world axis
-        State state = State::Idle;
+        bool active = true;
+        bool hidden = false;
+        bool draw = true;
+        bool triggerAddressable = true;
+        bool felled = false; // carbon tree cut down, still holding resources
+        bool selected = false;
+        bool underConstruction = false;
+        bool gate = false;
+        int32_t garrisonedInId = -1;
+        float carcassHidden = 0.0f; // not drawn while the dying animation plays
+        // Line 1: timers and ids every object's update reads.
         float animTime = 0;
-        float stateTime = 0;
-        float targetX = 0, targetY = 0;
-        float hitPoints = 1, maxHitPoints = 1;
-        int triggerAttack = -1;
-        std::string triggerName;
+        float flashTime = 0;
+        float approachRetry = 0;
+        float attackCooldown = 0;
+        int volleyRemaining = 0;
+        int carcassClass = -1;    // on a carcass: the animal's class
+        uint32_t garrisonTargetId = 0;
+        uint32_t carriedHolocronId = 0;
+        // Line 2: shields (updated for every object) and friends.
+        uint32_t holocronTargetId = 0;
         float shieldPoints = 0, maxShieldPoints = 0;
         float shieldRegenerationTime = 0;
         float shieldDrainTime = 0;
+        float maxHitPoints = 1;
+        int resourceType = -1;
+        uint32_t spawnId = 0;
+        // Line 3: the production queue's begin/end pointers.
+        std::deque<ProductionItem> productionQueue;
+        State state = State::Idle;
+        bool moveGoalActive = false;
+        bool attackGroundActive = false;
+        bool attackShotPending = false;
+        float stateTime = 0;
+        float autoAcquireTime = 0;
+        float attackRepathTime = 0;
+        uint32_t attackTargetId = 0;
+        uint32_t moveGroupId = 0;
+        uint32_t conversionTargetId = 0;
+        bool attackAutomatic = false;
         float resourceAmount = 0;
+        const dat::Unit *gateClosedUnit = nullptr;
+        const dat::Unit *gateOpenUnit = nullptr;
+        const dat::Unit *gateEndUnit = nullptr;
+        float facing = 0; // radians, 0 = +x world axis
+        float targetX = 0, targetY = 0;
+        float hitPoints = 1;
+        int triggerAttack = -1;
+        std::string triggerName;
         float carriedAmount = 0;
         // Resources of other types kept when a worker switches jobs; a drop
         // site that accepts them takes them along with the carried load.
         std::array<float, 4> stash{};
-        int resourceType = -1;
         int carriedResourceType = -1;
         std::vector<std::array<float, 2>> path;
         size_t pathIndex = 0;
@@ -1399,23 +1504,15 @@ private:
         float moveStallTime = 0;
         float moveBestDistance = 0;
         float moveSpeedLimit = 0;
-        float attackCooldown = 0;
-        float attackRepathTime = 0;
         float attackApproachAngle = 0;
         float attackApproachDistance = 0;
         float attackStallTime = 0;
         float attackBestDistance = 0;
-        float autoAcquireTime = 0;
-        uint32_t attackTargetId = 0;
-        uint32_t moveGroupId = 0;
         uint8_t attackSlotRetries = 0;
         uint8_t moveSpreadRetries = 0;
         float homeX = 0, homeY = 0;
         float moveAnchorX = 0, moveAnchorY = 0;
         AttackMode attackMode = AttackMode::Aggressive;
-        bool attackAutomatic = false;
-        bool attackShotPending = false;
-        bool attackGroundActive = false;
         float attackGroundX = 0;
         float attackGroundY = 0;
         bool patrolActive = false;
@@ -1426,30 +1523,17 @@ private:
         float patrolEndY = 0;
         uint32_t guardTargetId = 0;
         uint32_t followTargetId = 0;
-        uint32_t conversionTargetId = 0;
         float conversionProgress = 0;
         float conversionRecharge = 0;
-        uint32_t holocronTargetId = 0;
-        uint32_t carriedHolocronId = 0;
         uint32_t carriedById = 0;
-        bool moveGoalActive = false;
         bool wander = false;
         bool drawShadows = true;
-        bool active = true;
-        bool hidden = false;
-        bool draw = true;
         bool frozen = false;
         bool locked = false;
-        bool gate = false;
-        bool underConstruction = false;
         bool manualDropOff = false;
-        bool selected = false;
-        bool triggerAddressable = true;
         uint8_t customKind = 0;
-        float flashTime = 0;
         float gateOpenAmount = 0;
         float gateCloseTimer = 0;
-        bool felled = false; // carbon tree cut down, still holding resources
         // Hunted/slaughtered animals leave a carcass object holding their food,
         // which decays at the animal's resource decay rate (per second).
         // A worker keeps the look and title of its last job (builder, ore
@@ -1459,9 +1543,7 @@ private:
         int jobKind = 0; // 0 none, 1 builder, 2 repairer, 10 + resource type
         uint32_t annexParentId = 0; // gate posts: the gate they belong to
         uint32_t carcassId = 0;   // on the dead animal: its carcass
-        int carcassClass = -1;    // on a carcass: the animal's class
         float carcassDecay = 0.0f;
-        float carcassHidden = 0.0f; // not drawn while the dying animation plays
         float huntTimer = 0.0f;
         uint32_t resourceWorkTargetId = 0;
         float resourceWorkTime = 0.0f;
@@ -1475,13 +1557,11 @@ private:
         float pathGoalClearance = 0;
         uint8_t repathCount = 0;
         float detourTime = 0;
-        float approachRetry = 0;
         // Gather (rally) point, command 0x78: building +0x214..0x228.
         bool rallyActive = false;
         float rallyX = 0, rallyY = 0;
         uint32_t rallyTargetId = 0;
         // Remaining garrison bolts of the current volley (0x55be20).
-        int volleyRemaining = 0;
         float volleyTimer = 0;
         uint32_t volleyTargetId = 0;
         // Marching formation (group update 0x47e780): the group this unit
@@ -1503,11 +1583,8 @@ private:
         uint32_t gatherTargetId = 0;
         uint32_t dropOffTargetId = 0;
         uint32_t repairTargetId = 0;
-        uint32_t garrisonTargetId = 0;
         bool garrisonDamageLocked = false;
-        uint32_t spawnId = 0;
         uint32_t discoveredByPlayers = 0;
-        int32_t garrisonedInId = -1;
         uint16_t initialFrame = 0;
     };
 
@@ -1681,6 +1758,10 @@ private:
         const Object &object, int player) const;
     void spawnBase(int player, int civ, char civLetter, float cx, float cy);
     const dat::Unit *findUnit(int civ, const std::string &name) const;
+    const dat::Unit *findUnitUncached(int civ, const std::string &name) const;
+    mutable std::unordered_map<std::string, const dat::Unit *> findUnitMemo_;
+    const dat::Task *firstUnitTask(int unitId, int actionType) const;
+    mutable std::vector<std::array<int32_t, 6>> unitTaskIndex_;
     const dat::Unit *findUnit(int civ, int id) const;
     Object *spawn(int civ, const std::string &name, int player, float x, float y, float facing);
     Object *addObject(const dat::Unit *unit, int player, float x, float y, float facing,
@@ -1725,8 +1806,47 @@ private:
     bool gateBlocks(const Object &gate, const Object &mover) const;
     void rebuildMobileOccupancy();
     void updateLivestockOwnership();
+    struct WorldInput {
+        const InputState *in = nullptr;
+        bool consumeWorldInput = false;
+        bool actionMenuControlConsumed = false;
+    };
+    bool updateInputPhase(float dt, const InputState &in, WorldInput &worldInput);
+    void handleWorldInput(const WorldInput &worldInput);
+    void simulateStep(float dt, const WorldInput *worldInput);
+    void simulateChunk(float dt, const WorldInput *worldInput, int chunk);
+    std::chrono::steady_clock::time_point simulationAiStart_{}, simulationWorldStart_{},
+        simulationMaintenanceStart_{};
     void updateTriggers(float dt);
     bool conditionMet(const ScenarioCondition &condition, float triggerElapsed);
+    // Compact copy of the trigger-addressable objects, valid while no trigger
+    // effect has run during the current updateTriggers() pass. Condition
+    // object counts scan it (bucketed by player) instead of every Object.
+    struct TriggerObjectEntry {
+        float x = 0.0f, y = 0.0f;
+        int player = 0;
+        int unitId = -1;
+        int cls = -1;
+        uint8_t typeBits = 0; // 1 building, 2 civilian, 4 military
+        bool hidden = false;
+    };
+    std::array<std::vector<TriggerObjectEntry>, 18> triggerObjectBuckets_{};
+    std::vector<TriggerObjectEntry> triggerObjectOther_;
+    bool triggerObjectsValid_ = false;
+    std::unordered_map<const dat::Unit *, uint8_t> triggerTypeBits_;
+    std::vector<std::pair<const dat::Unit *, uint8_t>> triggerTypeBitsByObject_;
+    void buildTriggerObjectSnapshot();
+    void preloadTerrainArt();
+    std::array<bool, 17> visibilityTouched_{{true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true}};
+    std::vector<uint32_t> fogDarknessStamp_;
+    std::vector<uint8_t> fogDarkness_;
+    uint32_t fogDarknessGeneration_ = 0;
+    struct UnitClassBits {
+        bool worker = false, livestock = false, gatherer = false, converter = false;
+        bool sight = false, discoverable = false, minimap = false, combat = false;
+    };
+    std::unordered_map<const dat::Unit *, UnitClassBits> unitClassMemo_;
+    std::map<std::pair<const dat::Unit *, int>, bool> repairerMemo_;
     void executeEffect(const ScenarioEffect &effect);
     void setTriggerEnabled(int id, bool enabled);
     std::vector<Object *> effectTargets(const ScenarioEffect &effect);
@@ -2175,6 +2295,25 @@ private:
     std::vector<uint8_t> cornerElevation_;
     std::vector<uint8_t> tileElevation_;
     std::vector<uint8_t> tileSlope_;
+    struct TerrainLayerKey {
+        const Renderer *renderer = nullptr;
+        float ox = 0, oy = 0, zoom = 0;
+        int screenW = 0, screenH = 0;
+        int x0 = 0, y0 = 0, x1 = -1, y1 = -1, mapSize = 0;
+        bool reducedLighting = false, blends = false;
+        bool operator==(const TerrainLayerKey &o) const {
+            return renderer == o.renderer && ox == o.ox && oy == o.oy && zoom == o.zoom &&
+                   screenW == o.screenW && screenH == o.screenH && x0 == o.x0 && y0 == o.y0 &&
+                   x1 == o.x1 && y1 == o.y1 && mapSize == o.mapSize &&
+                   reducedLighting == o.reducedLighting && blends == o.blends;
+        }
+    };
+    // Cached terrain layer (see Game::render): the key and the visible
+    // terrain/slope/elevation bytes it was drawn from.
+    TerrainLayerKey terrainLayerKey_;
+    std::vector<uint8_t> terrainLayerBytes_, terrainLayerScratch_;
+    bool terrainLayerValid_ = false;
+    int terrainLayerTiles_ = 0;
     std::vector<Object> objects_;
     std::unordered_map<uint32_t, size_t> objectIndices_;
     std::vector<Projectile> projectiles_;
@@ -2183,13 +2322,61 @@ private:
     std::vector<std::vector<uint32_t>> mobileObjectCells_;
     std::vector<uint32_t> combatObjectIndices_;
     std::vector<std::vector<uint32_t>> combatObjectCells_;
+    std::vector<uint32_t> gatherableObjectIndices_;
+    std::vector<uint32_t> workerObjectIndices_;
+    std::vector<uint32_t> livestockObjectIndices_;
+    std::vector<uint32_t> gathererObjectIndices_;
+    std::vector<uint32_t> repairerObjectIndices_;
+    std::vector<uint32_t> converterObjectIndices_;
+    std::vector<uint32_t> sightSourceObjectIndices_;
+    std::vector<uint32_t> discoverableObjectIndices_;
+    std::vector<uint32_t> minimapObjectIndices_;
+    std::vector<uint32_t> screenPickObjectIndices_;
     int mobileObjectGridWidth_ = 0;
     float maxMobileCollisionRadius_ = 0;
     std::vector<uint32_t> staticObstructionIndices_;
     std::vector<std::vector<uint32_t>> staticObstructionCells_;
     mutable std::vector<PathGridCache> pathGridCache_;
+    // Grids keyed by everything a build reads (terrain, static footprints,
+    // gate results for the mover, the mover's radius/restriction/air). A
+    // cache miss whose signature matches a stored grid reuses it: it is
+    // exactly what a fresh build would produce, so rebuildAdjacency()
+    // clearing pathGridCache_ no longer forces every player to rebuild.
+    struct StoredPathGrid {
+        uint64_t signatureA = 0, signatureB = 0;
+        TilePathfinder finder;
+    };
+    mutable std::vector<StoredPathGrid> pathGridStore_;
+    std::pair<uint64_t, uint64_t> pathGridSignature(const Object &object) const;
     mutable uint32_t pathSearches_ = 0;
+    // Path cost counters for the Vita frame log (takePathStats resets them).
+    mutable uint32_t pathGridBuilds_ = 0;
+    mutable uint64_t pathGridBuildUs_ = 0, pathFindUs_ = 0;
+    // Grid build split: signature (every cache miss), blocked tiles,
+    // terrain/occupancy tables, TilePathfinder::build.
+    mutable std::array<uint64_t, 4> pathGridPhaseUs_{};
+public:
+    struct PathStats {
+        uint32_t searches, builds;
+        uint64_t buildUs, findUs;
+        std::array<uint64_t, 4> phaseUs;
+    };
+    PathStats takePathStats() {
+        const PathStats stats{pathSearches_ - pathSearchesReported_, pathGridBuilds_, pathGridBuildUs_,
+                              pathFindUs_, pathGridPhaseUs_};
+        pathSearchesReported_ = pathSearches_;
+        pathGridBuilds_ = 0;
+        pathGridBuildUs_ = pathFindUs_ = 0;
+        pathGridPhaseUs_ = {};
+        return stats;
+    }
+private:
+    uint32_t pathSearchesReported_ = 0;
     mutable std::vector<uint32_t> shieldGeneratorIndices_;
+    // isPowered() answers during updateShields(), which changes no power
+    // state: -1 unknown, 0/1 cached.
+    mutable std::vector<int8_t> poweredMemo_;
+    mutable bool poweredMemoActive_ = false;
     mutable size_t shieldGeneratorCacheSize_ = (size_t)-1;
     mutable std::map<std::pair<int, int>, int>
         civilizationGraphicCache_;
@@ -2197,6 +2384,19 @@ private:
     std::array<std::map<int, float>, 17> resources_{};
     std::array<std::set<int>, 17> researchedTechs_{};
     std::array<AiPlayerState, 17> aiPlayers_{};
+    mutable std::array<
+        std::unordered_map<
+            std::string, const dat::Unit *>,
+        17>
+        aiUnitCache_{};
+    mutable std::array<
+        std::unordered_map<
+            std::string,
+            std::vector<const dat::Unit *>>,
+        9>
+        aiUnitLookup_{};
+    mutable std::array<bool, 9>
+        aiUnitLookupBuilt_{};
     std::array<std::set<int>, 17> disabledTechs_{};
     std::array<std::set<int>, 17> disabledUnits_{};
     std::vector<ScenarioTrigger> triggers_;
@@ -2208,6 +2408,13 @@ private:
     float instructionTime_ = 0;
     float attackAlertCooldown_ = 0;
     float simulationTime_ = 0;
+    struct PreviousPosition {
+        uint32_t index;
+        float x, y;
+    };
+    std::vector<PreviousPosition> previousPositions_;
+    float renderInterpolation_ = 1.0f;
+    void renderFrame(Renderer &r, int screenW, int screenH);
     uint32_t nextSpawnId_ = 1;
     uint32_t nextMoveGroupId_ = 1;
     int difficulty_ = 2;
@@ -2327,6 +2534,16 @@ private:
     bool fullTechTreeCheat_ = false;
     // Researched-tech derived caches (see unitAvailable/effectiveUnitForPlayer).
     uint64_t techGeneration_ = 1;
+    // playerAttribute() results per player, valid for one techGeneration_.
+    mutable std::array<std::vector<float>, 17> attributeCache_{};
+    mutable std::array<uint64_t, 17> attributeCacheGeneration_{};
+    mutable std::array<int, 17> attributeCacheCivilization_{};
+    struct UnitAttributeOps {
+        uint64_t generation = 0;
+        int player = -1, unitId = -1, cls = -1, attribute = -1;
+        std::vector<std::pair<int, float>> ops;
+    };
+    mutable std::unordered_map<uint64_t, UnitAttributeOps> unitAttributeOps_;
     mutable std::array<std::vector<int8_t>, 17> availableCache_{};
     mutable std::array<uint64_t, 17> availableCacheGeneration_{};
     mutable std::array<std::map<int, int>, 17> upgradeCache_{};
@@ -2391,6 +2608,8 @@ private:
     std::string campaignArchive_;
     uint32_t campaignEntry_ = 0;
     FrameStats stats_;
+    UpdateStats updateStats_;
+    RenderStats renderStats_;
     size_t attackOrdersIssued_ = 0;
     size_t attacksLanded_ = 0;
     size_t unitsKilled_ = 0;

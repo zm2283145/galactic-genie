@@ -15,6 +15,8 @@
 #include "../src/engine/ai_script.h"
 #include "../src/engine/editor.h"
 #include "../src/engine/frontend.h"
+#include "../src/engine/campaign_layout.h"
+#include "../src/engine/campaign_scene.h"
 #include "../src/engine/game.h"
 #include "../src/engine/startup.h"
 #include "../src/render/soft_renderer.h"
@@ -7565,7 +7567,8 @@ static int cmdTestSkirmish(const char *dataDir) {
     frontend.update(input, -1);
     input = {};
     input.menuDown = true;
-    frontend.update(input, -1);
+    for (int row = 0; row < 2; ++row)
+        frontend.update(input, -1);
     input = {};
     input.menuActivate = true;
     frontend.update(input, -1);
@@ -8197,6 +8200,36 @@ static int cmdTestInterface(const char *dataDir) {
     originalFrontend.setOriginalMenuDecoration(
         menuLogo, menuButton,
         selectedMenuButton);
+    constexpr std::array<size_t, 8>
+        hotspotFrames{{
+            30, 14, 18, 10,
+            22, 26, 34, 46,
+        }};
+    bool hotspotResources = true;
+    for (size_t hotspot = 0;
+         hotspot < hotspotFrames.size();
+         ++hotspot) {
+        const SpriteFrame *normal =
+            assets.interfaceFrame(
+                50189,
+                hotspotFrames[hotspot],
+                50589);
+        const SpriteFrame *selected =
+            assets.interfaceFrame(
+                50189,
+                hotspotFrames[hotspot] + 1,
+                50589);
+        const SpriteFrame *active =
+            assets.interfaceFrame(
+                50189,
+                hotspotFrames[hotspot] + 3,
+                50589);
+        hotspotResources =
+            hotspotResources &&
+            normal && selected && active;
+        originalFrontend.setOriginalMainHotspot(
+            hotspot, normal, selected, active);
+    }
     originalFrontend.showMainMenu();
     originalFrontend.render(
         renderer, 960, 544);
@@ -8206,7 +8239,8 @@ static int cmdTestInterface(const char *dataDir) {
         renderer.drawCalls() >= 8;
     report(
         "original-frontend-vita-widescreen",
-        widescreenOriginalFrontend,
+        widescreenOriginalFrontend &&
+            hotspotResources,
         std::to_string(renderer.drawCalls()) +
             " draws at 960x544");
 
@@ -10628,7 +10662,50 @@ static int cmdTestCampaign(
         frontend.selectedCampaign() == 0 &&
         frontend.selectedMission() == 0;
     report("campaign-menu-controller-touch", navigation);
+    Frontend selectorFrontend;
+    selectorFrontend.setCampaignData(
+        &catalog, &loadedProfile);
+    input = {};
+    input.menuActivate = true;
+    selectorFrontend.update(input, -1);
+    input = {};
+    input.menuActivate = true;
+    selectorFrontend.update(input, -1);
+    input = {};
+    input.menuActivate = true;
+    selectorFrontend.update(input, -1);
+    input = {};
+    input.pointerTap = true;
+    input.pointerX = 160.0f;
+    input.pointerY = 325.0f;
+    input.screenW = 800;
+    input.screenH = 600;
+    selectorFrontend.update(input, -1);
+    const size_t selectedAuthoredCampaign =
+        selectorFrontend.selectedCampaign();
+    report(
+        "campaign-selector-authored-layout",
+        selectorFrontend.screen() ==
+                FrontendScreen::CampaignMissions &&
+            selectedAuthoredCampaign <
+                catalog.campaigns().size() &&
+            catalog.campaigns()[
+                selectedAuthoredCampaign]
+                    .originalNumber == 8);
     frontend.loadingFinished(true);
+    const bool launchInformationPane =
+        frontend.screen() ==
+        FrontendScreen::Objectives;
+    frontend.render(renderer, 960, 544);
+    report(
+        "campaign-launch-information-pane",
+        launchInformationPane &&
+            renderer.drawCalls() >= 10,
+        std::to_string(renderer.drawCalls()) +
+            " draws");
+    input = {};
+    input.menuBack = true;
+    frontend.update(input, -1);
     frontend.update({}, 1);
     input = {};
     input.menuActivate = true;
@@ -10652,6 +10729,8 @@ static int cmdTestCampaign(
     bool breakingBreadBounded = false;
     size_t maximumBuilds = 0;
     int maximumVisibilityChecks = 0;
+    int finalVisibleTiles = 0;
+    uint64_t maximumAiUpdateUs = 0;
     for (size_t campaignIndex = 0;
          campaignIndex < catalog.campaigns().size() &&
          !breakingBreadBounded;
@@ -10699,13 +10778,111 @@ static int cmdTestCampaign(
                         maximumVisibilityChecks,
                         game.stats()
                             .visibilityChecks);
+                finalVisibleTiles =
+                    game.stats().tiles;
                 budgetHeld =
                     budgetHeld &&
                     frameBuilds <= 3;
             }
+            const auto updateStart =
+                std::chrono::steady_clock::now();
+            std::array<uint64_t, 6>
+                updateTotals{};
+            std::array<uint64_t, 6>
+                updateMaximums{};
+            uint64_t maximumAiRulesUs = 0;
+            uint64_t maximumVisibilityUs = 0;
+            for (int frame = 0; frame < 120;
+                 ++frame) {
+                game.update(
+                    1.0f / 60.0f,
+                    InputState{});
+                const UpdateStats &sample =
+                    game.updateStats();
+                const std::array<uint64_t, 6>
+                    phases{{
+                        sample.inputUs,
+                        sample.triggersUs,
+                        sample.aiUs,
+                        sample.worldUs,
+                        sample.movementUs,
+                        sample.finalUs,
+                    }};
+                for (size_t phase = 0;
+                     phase < phases.size();
+                     ++phase) {
+                    updateTotals[phase] +=
+                        phases[phase];
+                    updateMaximums[phase] =
+                        std::max(
+                            updateMaximums[phase],
+                            phases[phase]);
+                }
+                maximumAiUpdateUs =
+                    std::max(
+                        maximumAiUpdateUs,
+                        sample.aiUs);
+                maximumAiRulesUs =
+                    std::max(
+                        maximumAiRulesUs,
+                        sample.aiRulesUs);
+                maximumVisibilityUs =
+                    std::max(
+                        maximumVisibilityUs,
+                        sample.finalVisibilityUs);
+            }
+            const auto updateElapsed =
+                std::chrono::duration_cast<
+                    std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() -
+                    updateStart)
+                    .count();
+            const CombatStats combat =
+                game.combatStats();
+            const MovementStats movement =
+                game.movementStats();
+            printf(
+                "INFO breaking-bread-update-120-frames %lld ms total-us=%llu/%llu/%llu/%llu/%llu/%llu max-us=%llu/%llu/%llu/%llu/%llu/%llu max-ai-rules=%llu max-visibility=%llu paths=%zu moving=%zu auto-targets=%zu ai-orders=%u/%u/%u\n",
+                (long long)updateElapsed,
+                (unsigned long long)
+                    updateTotals[0],
+                (unsigned long long)
+                    updateTotals[1],
+                (unsigned long long)
+                    updateTotals[2],
+                (unsigned long long)
+                    updateTotals[3],
+                (unsigned long long)
+                    updateTotals[4],
+                (unsigned long long)
+                    updateTotals[5],
+                (unsigned long long)
+                    updateMaximums[0],
+                (unsigned long long)
+                    updateMaximums[1],
+                (unsigned long long)
+                    updateMaximums[2],
+                (unsigned long long)
+                    updateMaximums[3],
+                (unsigned long long)
+                    updateMaximums[4],
+                (unsigned long long)
+                    updateMaximums[5],
+                (unsigned long long)
+                    maximumAiRulesUs,
+                (unsigned long long)
+                    maximumVisibilityUs,
+                combat.attackPathsComputed,
+                movement.pathingObjects,
+                combat.automaticTargetsAcquired,
+                game.aiFormationOrdersForTesting(5),
+                game.aiFormationOrdersForTesting(6),
+                game.aiFormationOrdersForTesting(7));
             breakingBreadBounded =
                 budgetHeld &&
-                maximumVisibilityChecks < 2500;
+                maximumVisibilityChecks < 2500 &&
+                finalVisibleTiles >= 100 &&
+                maximumAiUpdateUs < 100000;
             break;
         }
     }
@@ -10718,7 +10895,12 @@ static int cmdTestCampaign(
             std::to_string(maximumBuilds) +
             " visibility-checks=" +
             std::to_string(
-                maximumVisibilityChecks));
+                maximumVisibilityChecks) +
+            " tiles=" +
+            std::to_string(finalVisibleTiles) +
+            " max-ai-us=" +
+            std::to_string(
+                maximumAiUpdateUs));
 
     bool transitions = discovered;
     if (discovered) {
@@ -11871,8 +12053,8 @@ static int cmdTestEditor(
     frontend.update(input, -1);
     input = {};
     input.menuDown = true;
-    frontend.update(input, -1);
-    frontend.update(input, -1);
+    for (int row = 0; row < 6; ++row)
+        frontend.update(input, -1);
     input = {};
     input.menuActivate = true;
     const FrontendAction openEditor =
@@ -11968,10 +12150,371 @@ static int cmdTestEditor(
     return failures ? 1 : 0;
 }
 
+namespace {
+// Renderer that records the work the engine submits without rasterizing,
+// so host timings reflect engine-side CPU cost only.
+struct NullTexture : Texture {};
+class NullRenderer : public Renderer {
+public:
+    Texture *createTexture(int w, int h, const uint8_t *) override {
+        auto *t = new NullTexture; t->width = w; t->height = h; return t;
+    }
+    Texture *createMaskTexture(int w, int h, const uint8_t *) override {
+        auto *t = new NullTexture; t->width = w; t->height = h; t->alphaOnly = true; return t;
+    }
+    bool updateTexture(Texture *, const uint8_t *) override { return true; }
+    void destroyTexture(Texture *t) override { delete t; }
+    void beginFrame(int, int, float, uint8_t, uint8_t, uint8_t) override { quads = 0; switches = 0; last = nullptr; }
+    void note(Texture *t) { quads++; if (t != last) { switches++; last = t; } }
+    void mix(const void *p, size_t n) {
+        const uint8_t *b = (const uint8_t *)p;
+        for (size_t i = 0; i < n; i++) hash = (hash ^ b[i]) * 1099511628211ull;
+    }
+    void mixTex(Texture *t) { int wh[3] = {t ? t->width : -1, t ? t->height : -1, t ? (int)t->alphaOnly : -1}; mix(wh, sizeof(wh)); }
+    void draw(Texture *t, const Quad &q) override { note(t); mixTex(t); mix(&q, sizeof(q)); }
+    void drawMasked(Texture *t, const Quad &q, Texture *m, const Quad &mq) override { note(t); mixTex(t); mix(&q, sizeof(q)); mixTex(m); mix(&mq, sizeof(mq)); }
+    void drawMaskedTinted(Texture *t, const Quad &q, Texture *m, const Quad &mq, uint8_t r, uint8_t g, uint8_t b, uint8_t a) override { note(t); mixTex(t); mix(&q, sizeof(q)); mixTex(m); mix(&mq, sizeof(mq)); uint8_t c[4]={r,g,b,a}; mix(c,4); }
+    void drawTinted(Texture *t, const Quad &q, uint8_t r, uint8_t g, uint8_t b, uint8_t a) override { note(t); mixTex(t); mix(&q, sizeof(q)); uint8_t c[4]={r,g,b,a}; mix(c,4); }
+    void drawLine(float x0, float y0, float x1, float y1, float th, uint8_t r, uint8_t g, uint8_t b, uint8_t a) override { note(nullptr); float f[5]={x0,y0,x1,y1,th}; mix(f,sizeof(f)); uint8_t c[4]={r,g,b,a}; mix(c,4); }
+    void fillRect(float x, float y, float w, float h, uint8_t r, uint8_t g, uint8_t b, uint8_t a) override { note(nullptr); float f[4]={x,y,w,h}; mix(f,sizeof(f)); uint8_t c[4]={r,g,b,a}; mix(c,4); }
+    uint64_t hash = 1469598103934665603ull;
+    void endFrame() override {}
+    // Pretend to support the cached terrain layer like the Vita renderer
+    // (SWGB_BENCH_NULLLAYER), so profiles skip the cached terrain the same way.
+#ifndef SWGB_BASE_BUILD
+    bool layers = getenv("SWGB_BENCH_NULLLAYER") != nullptr;
+    bool supportsLayer() const override { return layers; }
+    bool beginLayer() override { return layers; }
+    void endLayer() override {}
+    void drawLayer() override { note(nullptr); }
+#endif
+    size_t quads = 0, switches = 0;
+    Texture *last = nullptr;
+};
+} // namespace
+
+
+// render-campaign-scene <Data> <MediaDir> <campaign> <mission> <ms> <out.png> [end]
+// Draws a campaign mission scene (Campaign/Media .mm script) at a time.
+static int cmdRenderCampaignScene(int argc, char **argv) {
+    if (argc < 8) { fprintf(stderr, "usage: render-campaign-scene <Data> <MediaDir> <campaign> <mission> <ms> <out.png> [end]\n"); return 2; }
+    SoftRenderer soft;
+    Assets assets(&soft);
+    std::string err;
+    if (!assets.init(argv[2], &err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    CampaignScene scene;
+    if (!scene.load(assets, argv[3], atoi(argv[4]), atoi(argv[5]), argc < 9, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str()); return 1;
+    }
+    const float ms = (float)atof(argv[6]);
+    scene.advance(ms / 1000.0f);
+    for (const std::string &sound : scene.takeDueSounds()) printf("sound %s\n", sound.c_str());
+    soft.beginFrame(800, 600, 1.0f, 0, 0, 0);
+    scene.render(soft, 800, 600, [&](int id) { return assets.localizedString(id); });
+    soft.endFrame();
+    soft.savePng(argv[7]);
+    printf("t=%.0f ms finished=%d\n", ms, (int)scene.finished());
+    return 0;
+}
+
+// render-campaign-missions <Data> <Campaign> <out-prefix>: draws every
+// campaign's mission screen (original layout tables) with the software
+// renderer, one PNG per campaign, with mission 1 selected and mission 3
+// completed so all button states show.
+static int cmdRenderCampaignMissions(int argc, char **argv) {
+    if (argc < 5) { fprintf(stderr, "usage: render-campaign-missions <Data> <Campaign> <out-prefix>\n"); return 2; }
+    SoftRenderer soft;
+    Assets assets(&soft);
+    std::string err;
+    if (!assets.init(argv[2], &err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    CampaignCatalog catalog;
+    if (!catalog.discover(argv[3], [&](int id, const std::string &fb) {
+            const std::string &l = assets.localizedString(id); return l.empty() ? fb : l; }, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str()); return 1;
+    }
+    for (size_t c = 0; c < catalog.campaigns().size(); ++c) {
+        const CampaignInfo &campaign = catalog.campaigns()[c];
+        const int theme = campaign.originalNumber;
+        const OriginalMissionLayout *layout = originalMissionLayout(theme);
+        CampaignProfile profile;
+        profile.developmentAccess = true;
+        if (campaign.missions.size() > 2) profile.progress.push_back({campaign.missions[2].key, true});
+        Frontend frontend;
+        frontend.setCampaignData(&catalog, &profile);
+        frontend.setStringLookup([&](int id, const std::string &fallback) {
+            const std::string &text = assets.localizedString(id);
+            return text.empty() ? fallback : text;
+        });
+        frontend.setOriginalMenuBackground(assets.interfaceFrame(53100 + theme, 0, 53110 + theme));
+        if (layout) applyOriginalMissionLayout(frontend, assets, *layout);
+        frontend.selectCampaignMission(c, 1);
+        frontend.showScreenForTesting(FrontendScreen::CampaignMissions, 1);
+        soft.beginFrame(800, 600, 1.0f, 0, 0, 0);
+        frontend.render(soft, 800, 600);
+        soft.endFrame();
+        const std::string out = std::string(argv[4]) + "_" + std::to_string(theme) + ".png";
+        soft.savePng(out);
+        printf("%s: theme %d, %zu missions, layout %s -> %s\n", campaign.title.c_str(), theme,
+               campaign.missions.size(), layout ? "yes" : "NO", out.c_str());
+    }
+    return 0;
+}
+
+// bench-campaign <Data> <Campaign dir> <archive substring> <entry> <seconds> [dt]
+// Runs a campaign mission headless (update + render into a null renderer) and
+// prints Vita-log-style phase averages every 5 simulated seconds.
+static int cmdBenchCampaign(int argc, char **argv) {
+    if (argc < 7) { fprintf(stderr, "usage: bench-campaign <Data> <Campaign> <archive> <entry> <seconds> [dt]\n"); return 2; }
+    const char *dataDir = argv[2];
+    const std::filesystem::path campaignDir = argv[3];
+    const std::string archive = argv[4];
+    const uint32_t entry = (uint32_t)atoi(argv[5]);
+    const float seconds = (float)atof(argv[6]);
+    const float dt = argc > 7 ? (float)atof(argv[7]) : 1.0f / 30.0f;
+    NullRenderer renderer;
+    // SWGB_BENCH_SOFT=1 rasterizes with the software renderer and hashes every
+    // frame's pixels (SWGB_BENCH_LAYERS=1 also enables the terrain layer).
+    SoftRenderer soft;
+    const bool softMode = getenv("SWGB_BENCH_SOFT") != nullptr;
+#ifndef SWGB_BASE_BUILD
+    soft.setLayersEnabled(getenv("SWGB_BENCH_LAYERS") != nullptr);
+#endif
+    uint64_t pixelHash = 1469598103934665603ull;
+    Renderer &activeRenderer = softMode ? (Renderer &)soft : (Renderer &)renderer;
+    Assets assets(&activeRenderer);
+    std::string err;
+    if (!assets.init(dataDir, &err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    CampaignCatalog catalog;
+    if (!catalog.discover(campaignDir.string(), [&](int id, const std::string &fb) {
+            const std::string &l = assets.localizedString(id); return l.empty() ? fb : l; }, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str()); return 1;
+    }
+    const std::string aiDir = (campaignDir.parent_path() / "AI").string();
+    for (size_t c = 0; c < catalog.campaigns().size(); ++c) {
+        const CampaignInfo &campaign = catalog.campaigns()[c];
+        std::string upper = campaign.archiveName;
+        for (char &ch : upper) ch = (char)toupper((unsigned char)ch);
+        if (upper.find(archive) == std::string::npos) continue;
+        for (size_t m = 0; m < campaign.missions.size(); ++m) {
+            if (campaign.missions[m].entry != entry) continue;
+            Scenario scenario;
+            if (!catalog.loadScenario(c, m, scenario, &err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+            Game game(assets);
+            const auto initStart = std::chrono::steady_clock::now();
+            if (!game.initScenario(scenario, &err, campaign.archiveName, entry, 2, aiDir)) {
+                fprintf(stderr, "error: %s\n", err.c_str()); return 1;
+            }
+            printf("mission '%s' %ux%u units=%zu init=%lld ms\n", campaign.missions[m].title.c_str(),
+                   (unsigned)scenario.map.width, (unsigned)scenario.map.height, scenario.units.size(),
+                   (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - initStart).count());
+            assets.setBuildsPerFrame(3);
+#ifndef SWGB_BASE_BUILD
+            if (getenv("SWGB_BENCH_ASYNC")) assets.setAsyncSheetBuilds(true);
+#endif
+            UpdateStats ut{}; RenderStats rt{};
+            uint64_t updUs = 0, rndUs = 0, maxUpd = 0, maxRnd = 0; size_t quads = 0, sw = 0; int frames = 0;
+            uint64_t allUpd = 0, allRnd = 0; int allFrames = 0;
+            float simT = 0, windowT = 0;
+            auto us = [](auto a, auto b) { return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(b - a).count(); };
+            // SWGB_BENCH_HILLS=<prefix>: soft-render the hilliest spots after
+            // a few frames and save <prefix>_<n>.png (terrain checks).
+            if (const char *hills = getenv("SWGB_BENCH_HILLS"); hills && softMode) {
+                const int w = (int)scenario.map.width, h = (int)scenario.map.height;
+                std::vector<std::pair<int, std::pair<int, int>>> spots;
+                for (int y = 2; y + 2 < h; y += 6)
+                    for (int x = 2; x + 2 < w; x += 6) {
+                        int lo = 255, hi = 0;
+                        for (int dy = -2; dy <= 2; dy++)
+                            for (int dx = -2; dx <= 2; dx++) {
+                                const int e = scenario.map.tiles[(size_t)(y + dy) * w + x + dx].elevation;
+                                lo = std::min(lo, e);
+                                hi = std::max(hi, e);
+                            }
+                        spots.push_back({hi - lo, {x, y}});
+                    }
+                std::sort(spots.begin(), spots.end(), [](auto &a, auto &b) { return a.first > b.first; });
+                game.setVisibilityCheatsForTesting(true, true);
+                for (int i = 0; i < 4 && i < (int)spots.size(); i++) {
+                    const int sx = spots[(size_t)i].second.first, sy = spots[(size_t)i].second.second;
+                    // Engine X is the scenario's y; engine Y is mapSize - x.
+                    game.lookAt((float)sy + 0.5f, (float)w - sx - 0.5f);
+                    game.render(activeRenderer, 960, 544);
+                    soft.savePng(std::string(hills) + "_" + std::to_string(i) + "_first.png");
+                    for (int f = 0; f < 40; f++) game.render(activeRenderer, 960, 544);
+                    soft.savePng(std::string(hills) + "_" + std::to_string(i) + ".png");
+                    printf("hill %d at scenario %d,%d delta %d\n", i, sx, sy, spots[(size_t)i].first);
+                }
+                return 0;
+            }
+            // SWGB_BENCH_SPIKES=<us>: print game log lines and frames whose
+            // phases exceed the threshold.
+            const char *spikeEnv = getenv("SWGB_BENCH_SPIKES");
+            const uint64_t spikeUs = spikeEnv ? (uint64_t)atoll(spikeEnv) : 0;
+            std::vector<std::string> frameLog;
+            if (spikeUs) game.setLogger([&](const std::string &line) { frameLog.push_back(line); });
+            // SWGB_BENCH_BATTLE=<n>[,<enemy player>]: spawn n troopers for
+            // player 1 and n for the enemy facing each other mid-map, and
+            // watch the fight (combat/projectile cost).
+            if (const char *battle = getenv("SWGB_BENCH_BATTLE")) {
+                const int count = std::max(1, atoi(battle));
+                const char *comma = strchr(battle, ',');
+                const int enemy = comma ? atoi(comma + 1) : 3;
+                const float cx = scenario.map.width * 0.5f, cy = scenario.map.height * 0.5f;
+                int spawned = 0;
+                for (int side = 0; side < 2; side++) {
+                    const int player = side == 0 ? 1 : enemy;
+                    const int civ = game.civilizationForPlayerForTesting(player);
+                    for (int i = 0; i < count; i++) {
+                        const float x = cx + (side == 0 ? -3.0f : 3.0f) + (i / 8) * (side == 0 ? -0.8f : 0.8f);
+                        const float y = cy - 3.0f + (i % 8) * 0.8f;
+                        if (game.spawnObjectForTesting(civ, 460, player, x, y)) spawned++;
+                    }
+                }
+                game.lookAt(cx, cy);
+                printf("battle: spawned %d units (enemy player %d)\n", spawned, enemy);
+            }
+            const bool pan = getenv("SWGB_BENCH_PAN") != nullptr;
+            int benchFrame = 0;
+            float panX = 0.0f, panY = 0.0f;
+            // SWGB_BENCH_SIMHZ=<n>: fixed-rate simulation (see the Vita simrate).
+            const char *simHzEnv = getenv("SWGB_BENCH_SIMHZ");
+            const int benchSimHz = simHzEnv ? atoi(simHzEnv) : 0;
+            float benchSimAccumulator = 0.0f;
+            while (simT < seconds) {
+                // Optional camera tour: hold for a second, then jump, with a
+                // few one-frame nudges so cached layers must be redrawn.
+                if (pan && benchFrame % 30 == 0) {
+                    const int step = benchFrame / 30;
+                    const float size = (float)scenario.map.width;
+                    panX = size * (0.15f + 0.7f * (float)((step * 37) % 11) / 10.0f);
+                    panY = size * (0.15f + 0.7f * (float)((step * 53) % 7) / 6.0f);
+                    game.lookAt(panX, panY);
+                }
+                if (pan && benchFrame % 30 == 7)
+                    game.lookAt(panX + 0.25f, panY);
+                benchFrame++;
+                const auto t0 = std::chrono::steady_clock::now();
+                if (benchSimHz > 0) {
+                    // Fixed-rate simulation as on the Vita (simrate): input
+                    // every frame, world steps of 1/simHz, drawn in between.
+                    const float simStep = 1.0f / benchSimHz;
+                    game.updateInput(dt, InputState{});
+                    benchSimAccumulator += dt;
+                    int steps = 0;
+                    while (benchSimAccumulator >= simStep && steps < 3) {
+                        game.recordPreviousPositions();
+                        game.simulate(simStep);
+                        benchSimAccumulator -= simStep;
+                        ++steps;
+                    }
+                    if (steps == 3 && benchSimAccumulator > simStep) benchSimAccumulator = simStep;
+                    game.setRenderInterpolation(benchSimAccumulator / simStep);
+                } else {
+                    game.update(dt, InputState{});
+                }
+                const auto t1 = std::chrono::steady_clock::now();
+                game.render(activeRenderer, 960, 544);
+                const auto t2 = std::chrono::steady_clock::now();
+                if (softMode)
+                    for (uint8_t byte : soft.pixels()) pixelHash = (pixelHash ^ byte) * 1099511628211ull;
+                const UpdateStats &u = game.updateStats();
+                if (spikeUs) {
+                    if (u.triggersUs > spikeUs || u.aiUs > spikeUs || u.worldUs > spikeUs ||
+                        u.inputUs > spikeUs || u.finalUs > spikeUs || u.movementUs > spikeUs) {
+                        printf("SPIKE t=%.2f in/trg/ai/world/move/final=%llu/%llu/%llu/%llu/%llu/%llu\n", simT,
+                               (unsigned long long)u.inputUs, (unsigned long long)u.triggersUs,
+                               (unsigned long long)u.aiUs, (unsigned long long)u.worldUs,
+                               (unsigned long long)u.movementUs, (unsigned long long)u.finalUs);
+                        for (const std::string &line : frameLog) printf("   log: %s\n", line.c_str());
+                    }
+                    frameLog.clear();
+                }
+                ut.inputUs += u.inputUs; ut.triggersUs += u.triggersUs; ut.aiUs += u.aiUs; ut.worldUs += u.worldUs;
+                ut.movementUs += u.movementUs; ut.finalUs += u.finalUs;
+                ut.worldProductionUs += u.worldProductionUs; ut.worldConstructionUs += u.worldConstructionUs;
+                ut.worldShieldsUs += u.worldShieldsUs; ut.worldOccupancyUs += u.worldOccupancyUs;
+                ut.worldWorkersUs += u.worldWorkersUs; ut.worldMaintenanceUs += u.worldMaintenanceUs;
+                ut.finalVisibilityUs += u.finalVisibilityUs; ut.finalProjectilesUs += u.finalProjectilesUs;
+                const RenderStats &r = game.renderStats();
+                rt.prepareTerrainUs += r.prepareTerrainUs; rt.prepareObjectsUs += r.prepareObjectsUs;
+                rt.drawTerrainUs += r.drawTerrainUs; rt.drawWorldUs += r.drawWorldUs; rt.drawUiUs += r.drawUiUs;
+                const uint64_t a = us(t0, t1), b = us(t1, t2);
+                updUs += a; rndUs += b; maxUpd = std::max(maxUpd, a); maxRnd = std::max(maxRnd, b);
+                allUpd += a; allRnd += b; allFrames++;
+                quads += renderer.quads; sw += renderer.switches; frames++;
+                simT += dt; windowT += dt;
+                if (windowT >= 5.0f || simT >= seconds) {
+                    const uint64_t n = std::max(1, frames);
+                    printf("t=%5.1f upd/rnd=%.2f/%.2f ms max=%.1f/%.1f phase-us in/trg/ai/world/move/final=%llu/%llu/%llu/%llu/%llu/%llu "
+                           "world prod/cons/shld/occ/work/maint=%llu/%llu/%llu/%llu/%llu/%llu vis=%llu proj=%llu "
+                           "render prepT/prepO/terr/world/ui=%llu/%llu/%llu/%llu/%llu quads=%zu texsw=%zu\n",
+                           simT, updUs / 1000.0 / n, rndUs / 1000.0 / n, maxUpd / 1000.0, maxRnd / 1000.0,
+                           (unsigned long long)(ut.inputUs / n), (unsigned long long)(ut.triggersUs / n),
+                           (unsigned long long)(ut.aiUs / n), (unsigned long long)(ut.worldUs / n),
+                           (unsigned long long)(ut.movementUs / n), (unsigned long long)(ut.finalUs / n),
+                           (unsigned long long)(ut.worldProductionUs / n), (unsigned long long)(ut.worldConstructionUs / n),
+                           (unsigned long long)(ut.worldShieldsUs / n), (unsigned long long)(ut.worldOccupancyUs / n),
+                           (unsigned long long)(ut.worldWorkersUs / n), (unsigned long long)(ut.worldMaintenanceUs / n),
+                           (unsigned long long)(ut.finalVisibilityUs / n), (unsigned long long)(ut.finalProjectilesUs / n),
+                           (unsigned long long)(rt.prepareTerrainUs / n), (unsigned long long)(rt.prepareObjectsUs / n),
+                           (unsigned long long)(rt.drawTerrainUs / n), (unsigned long long)(rt.drawWorldUs / n),
+                           (unsigned long long)(rt.drawUiUs / n), quads / n, sw / n);
+                    fflush(stdout);
+                    ut = {}; rt = {}; updUs = rndUs = maxUpd = maxRnd = 0; quads = sw = 0; frames = 0; windowT = 0;
+                }
+            }
+            {
+                const CombatStats combat = game.combatStats();
+                printf("combat: attacks=%zu kills=%zu projectiles=%zu\n", combat.attacksLanded,
+                       combat.unitsKilled, combat.projectilesLaunched);
+            }
+            if (const char *savePath = getenv("SWGB_BENCH_SAVE"))
+                if (!game.saveMatch(savePath, &err)) fprintf(stderr, "save failed: %s\n", err.c_str());
+            {
+                const CombatStats combat = game.combatStats();
+                printf("combat orders=%zu landed=%zu killed=%zu projectiles=%zu paths=%zu\n",
+                       combat.ordersIssued, combat.attacksLanded, combat.unitsKilled,
+                       combat.projectilesLaunched, combat.attackPathsComputed);
+            }
+            printf("TOTAL frames=%d avg upd/rnd=%.3f/%.3f ms draw-hash=%016llx pixel-hash=%016llx\n", allFrames,
+                   allUpd / 1000.0 / std::max(1, allFrames), allRnd / 1000.0 / std::max(1, allFrames),
+                   (unsigned long long)renderer.hash, (unsigned long long)pixelHash);
+            return 0;
+        }
+    }
+    fprintf(stderr, "error: mission %s/%u not found\n", archive.c_str(), entry);
+    return 1;
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) return usage();
     const char *cmd = argv[1];
     if (!strcmp(cmd, "bench-ui")) return cmdBenchUi(argv[2]);
+    if (!strcmp(cmd, "bench-campaign")) return cmdBenchCampaign(argc, argv);
+    if (!strcmp(cmd, "render-campaign-missions")) return cmdRenderCampaignMissions(argc, argv);
+    if (!strcmp(cmd, "render-campaign-scene")) return cmdRenderCampaignScene(argc, argv);
+#ifndef SWGB_BASE_BUILD
+    if (!strcmp(cmd, "test-sound-select")) {
+        SoftRenderer renderer;
+        Assets assets(&renderer);
+        std::string err;
+        if (!assets.init(argv[2], &err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+        size_t checks = 0, mismatches = 0;
+        for (const dat::Sound &sound : assets.dat().sounds)
+            for (int civ = -1; civ < 10; civ++)
+                for (uint32_t choice = 0; choice < 12; choice++) {
+                    int a = -1, b = -1;
+                    std::shared_ptr<const std::vector<uint8_t>> data;
+                    const bool ra = assets.selectSound(sound.id, civ, choice, &a);
+                    const bool rb = assets.readSoundShared(sound.id, civ, choice, data, &b);
+                    checks++;
+                    if (ra != rb || a != b) mismatches++;
+                }
+        printf("sound selection checks=%zu mismatches=%zu\n", checks, mismatches);
+        return mismatches ? 1 : 0;
+    }
+#endif
     if (!strcmp(cmd, "info")) return cmdInfo(argv[2]);
     if (!strcmp(cmd, "terrain") && argc >= 4) return cmdTerrain(argv[2], atoi(argv[3]));
     if (!strcmp(cmd, "restriction") && argc >= 4) return cmdRestriction(argv[2], atoi(argv[3]));

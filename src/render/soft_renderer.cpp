@@ -53,10 +53,34 @@ void SoftRenderer::beginFrame(int screenW, int screenH, float scale, uint8_t r, 
     h_ = screenH;
     scale_ = scale;
     drawCalls_ = 0;
+    clear_[0] = r; clear_[1] = g; clear_[2] = b;
     fb_.resize((size_t)w_ * h_ * 4);
     for (size_t i = 0; i < fb_.size(); i += 4) {
         fb_[i] = r; fb_[i + 1] = g; fb_[i + 2] = b; fb_[i + 3] = 255;
     }
+}
+
+bool SoftRenderer::beginLayer() {
+    if (!layersEnabled_ || inLayer_) return false;
+    mainFb_.swap(fb_);
+    fb_.resize((size_t)w_ * h_ * 4);
+    for (size_t i = 0; i < fb_.size(); i += 4) {
+        fb_[i] = clear_[0]; fb_[i + 1] = clear_[1]; fb_[i + 2] = clear_[2]; fb_[i + 3] = 255;
+    }
+    inLayer_ = true;
+    return true;
+}
+
+void SoftRenderer::endLayer() {
+    if (!inLayer_) return;
+    layer_ = fb_;
+    fb_.swap(mainFb_);
+    inLayer_ = false;
+}
+
+void SoftRenderer::drawLayer() {
+    if (layer_.size() == fb_.size()) fb_ = layer_;
+    drawCalls_++;
 }
 
 static inline void blend(uint8_t *d, const uint8_t *s) {

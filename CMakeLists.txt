@@ -28,6 +28,7 @@ set(SWGB_CORE_SOURCES
     src/engine/editor.cpp
     src/engine/editor_document.cpp
     src/engine/frontend.cpp
+    src/engine/campaign_scene.cpp
     src/engine/game.cpp
     src/engine/game_save.cpp
     src/engine/menu_framework.cpp
@@ -46,23 +47,41 @@ if(VITA)
     set(VITA_VERSION "00.01")
     option(SWGB_VPK_LIVEAREA "Bundle LiveArea icon/background into the VPK" ON)
 
+    # SWGB_VITA3K builds a VPK that runs in the Vita3K emulator: vitashark's
+    # SceShaccCgExt shader-compiler extensions patch libshacccg through
+    # taiHEN, which Vita3K does not provide (the first draw jumps to 0).
+    option(SWGB_VITA3K "Build for the Vita3K emulator (no SceShaccCgExt)" OFF)
+    set(SWGB_VITA_EXTRA_SOURCES)
+    if(SWGB_VITA3K)
+        list(APPEND SWGB_VITA_EXTRA_SOURCES src/platform/vita/shacccg_ext_stub.c)
+    endif()
     add_executable(swgb
         ${SWGB_CORE_SOURCES}
+        ${SWGB_VITA_EXTRA_SOURCES}
         src/render/gl_renderer.cpp
         src/platform/vita/vita_audio.cpp
+        src/platform/vita/vita_video.cpp
         src/platform/vita/main_vita.cpp
     )
+    if(SWGB_VITA3K)
+        target_compile_definitions(swgb PRIVATE SWGB_VITA3K=1)
+        set(SWGB_SHACCCG_EXT_LIBS)
+    else()
+        set(SWGB_SHACCCG_EXT_LIBS SceShaccCgExt taihen_stub)
+    endif()
+    set(SWGB_VITA_OPT_FLAGS "-O2" CACHE STRING "Optimization flags for the Vita build (-O2 measured ~15% faster than -Os on hardware)")
+    separate_arguments(SWGB_VITA_OPT_FLAG_LIST UNIX_COMMAND "${SWGB_VITA_OPT_FLAGS}")
     target_compile_options(swgb PRIVATE
-        -Os -ffunction-sections -fdata-sections
+        ${SWGB_VITA_OPT_FLAG_LIST} -ffunction-sections -fdata-sections
         -Wall -Wno-psabi)
     # -Wl,-q keeps relocations; vita-elf-create needs them for a valid velf.
     target_link_options(swgb PRIVATE -Wl,-q,--gc-sections)
     target_link_libraries(swgb PRIVATE
-        vitaGL vitashark SceShaccCgExt taihen_stub mathneon z
+        vitaGL vitashark ${SWGB_SHACCCG_EXT_LIBS} mathneon z
         SceGxm_stub SceDisplay_stub SceCtrl_stub SceTouch_stub SceHid_stub
         SceAudio_stub SceCommonDialog_stub SceSysmodule_stub SceMotion_stub
         SceAppUtil_stub SceAppMgr_stub SceShaccCg_stub ScePower_stub
-        SceKernelDmacMgr_stub SceIme_stub
+        SceKernelDmacMgr_stub SceIme_stub SceAvPlayer_stub
         vorbisfile vorbis ogg stdc++ m)
 
     # 32MB phycont budget: without it vitaGL renders nothing on this setup.

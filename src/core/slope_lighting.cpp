@@ -39,7 +39,7 @@ bool nOrEUp(int slope) { return nUp(slope) || eUp(slope) || slope == NE_UP; }
 bool anySwUp(int slope) { return slope == SW_UP || slope == SWE_UP || slope == NSW_UP; }
 bool anyNwUp(int slope) { return slope == NW_UP || slope == NWE_UP || slope == NSW_UP; }
 bool anySeUp(int slope) { return slope == SE_UP || slope == SWE_UP || slope == NSE_UP; }
-bool anyNeUp(int slope) { return slope == NE_UP || slope == NWE_UP || slope == NSW_UP; }
+bool anyNeUp(int slope) { return slope == NE_UP || slope == NWE_UP || slope == NSE_UP; }
 
 struct Builder {
     SlopeLighting result;
@@ -198,7 +198,10 @@ SlopeLighting selectSlopeLighting(uint8_t slope, const std::array<int8_t, 8> &n)
             1)
             p.add(31);
         if (flat(n[SLOPE_NEIGHBOR_SE]) || anyNwUp(n[SLOPE_NEIGHBOR_SE])) p.add(9);
-        if (flat(n[SLOPE_NEIGHBOR_SW]) || anyNeUp(n[SLOPE_NEIGHBOR_SW])) p.add(6);
+        // exe FUN_00613690 tests SW for flat/NE_UP but SE (sic) for NWE_UP/NSE_UP.
+        if (flat(n[SLOPE_NEIGHBOR_SW]) || n[SLOPE_NEIGHBOR_SW] == NE_UP ||
+            n[SLOPE_NEIGHBOR_SE] == NWE_UP || n[SLOPE_NEIGHBOR_SE] == NSE_UP)
+            p.add(6);
         if (sUp(n[SLOPE_NEIGHBOR_S])) p.add(22);
         if (sUp(n[SLOPE_NEIGHBOR_SW]) || sUp(n[SLOPE_NEIGHBOR_NW])) p.add(23);
         if (sUp(n[SLOPE_NEIGHBOR_NE]) || sUp(n[SLOPE_NEIGHBOR_SE])) p.add(20);

@@ -67,7 +67,8 @@ void drawUiText(
     Renderer &renderer,
     const std::vector<std::string> &lines,
     float x, float y, float scale,
-    uint8_t red, uint8_t green, uint8_t blue) {
+    uint8_t red, uint8_t green, uint8_t blue,
+    uint8_t alpha) {
     int index = 0;
     const font::Face &face =
         pickFace(9.0f * scale, index);
@@ -100,7 +101,7 @@ void drawUiText(
                          (float)glyph.y,
                          (float)(glyph.x + glyph.w),
                          (float)(glyph.y + glyph.h)},
-                        r, g, b, 255);
+                        r, g, b, alpha);
                 }
                 penX += glyph.advance;
             }

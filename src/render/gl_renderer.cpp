@@ -92,11 +92,28 @@ void GlRenderer::destroyTexture(Texture *t) {
     delete gt;
 }
 
+void (*g_glTrace)(const char *) = nullptr;
+// Vita3K crashes inside vitaGL's glClear; callers cover the frame anyway.
+bool g_skipGlClear = false;
+#define GL_TRACE(x) do { if (g_glTrace && traceFrame) g_glTrace(x); } while (0)
+
 void GlRenderer::beginFrame(int screenW, int screenH, float scale, uint8_t r, uint8_t g, uint8_t b) {
+    static int frameCount = 0;
+    const bool traceFrame = frameCount++ < 2;
     drawCalls_ = quads_ = 0;
+    frameW_ = screenW;
+    frameH_ = screenH;
+    frameScale_ = scale;
+    clear_[0] = r / 255.0f;
+    clear_[1] = g / 255.0f;
+    clear_[2] = b / 255.0f;
+    GL_TRACE("viewport");
     glViewport(0, 0, screenW, screenH);
+    GL_TRACE("clearcolor");
     glClearColor(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    GL_TRACE("clear");
+    if (!g_skipGlClear) glClear(GL_COLOR_BUFFER_BIT);
+    GL_TRACE("matrix");
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     glOrtho(0, screenW / scale, screenH / scale, 0, -1, 1);
@@ -106,9 +123,12 @@ void GlRenderer::beginFrame(int screenW, int screenH, float scale, uint8_t r, ui
     glDisable(GL_CULL_FACE);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    GL_TRACE("blend done");
     glActiveTexture(GL_TEXTURE0);
     glEnable(GL_TEXTURE_2D);
+    GL_TRACE("texenv");
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    GL_TRACE("client arrays");
     glClientActiveTexture(GL_TEXTURE0);
     glEnableClientState(GL_VERTEX_ARRAY);
     glEnableClientState(GL_TEXTURE_COORD_ARRAY);
@@ -119,6 +139,7 @@ void GlRenderer::beginFrame(int screenW, int screenH, float scale, uint8_t r, ui
     glDisableClientState(GL_TEXTURE_COORD_ARRAY);
     glActiveTexture(GL_TEXTURE0);
     glClientActiveTexture(GL_TEXTURE0);
+    GL_TRACE("beginFrame end");
     current_ = currentMask_ = nullptr;
     verts_.clear();
 }
@@ -208,9 +229,13 @@ void GlRenderer::flush() {
         verts_.clear();
         return;
     }
+    static int flushCount = 0;
+    const bool traceFrame = flushCount++ < 3;
+    GL_TRACE("flush begin");
     glActiveTexture(GL_TEXTURE0);
     glEnable(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, static_cast<GlTexture *>(current_)->id);
+    GL_TRACE("flush bound");
     glClientActiveTexture(GL_TEXTURE0);
     glEnableClientState(GL_TEXTURE_COORD_ARRAY);
     glTexCoordPointer(2, GL_FLOAT, sizeof(Vertex), &verts_[0].u);
@@ -230,9 +255,95 @@ void GlRenderer::flush() {
     glClientActiveTexture(GL_TEXTURE0);
     glVertexPointer(2, GL_FLOAT, sizeof(Vertex), &verts_[0].x);
     glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), &verts_[0].r);
+    GL_TRACE("flush pointers set");
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)verts_.size());
+    GL_TRACE("flush drawn");
     drawCalls_++;
     verts_.clear();
+}
+
+bool GlRenderer::beginLayer() {
+    if (!layersEnabled_ || inLayer_ || frameW_ <= 0 || frameH_ <= 0) return false;
+    flush();
+    if (!layerFbo_ || layerW_ != frameW_ || layerH_ != frameH_) {
+        if (layerFbo_) {
+            glDeleteFramebuffers(1, &layerFbo_);
+            glDeleteTextures(1, &layerTexture_);
+            layerFbo_ = layerTexture_ = 0;
+        }
+        glGenTextures(1, &layerTexture_);
+        glBindTexture(GL_TEXTURE_2D, layerTexture_);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, frameW_, frameH_, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glGenFramebuffers(1, &layerFbo_);
+        glBindFramebuffer(GL_FRAMEBUFFER, layerFbo_);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, layerTexture_, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        current_ = currentMask_ = nullptr;
+        if (!layerFbo_ || !layerTexture_) {
+            layersEnabled_ = false;
+            return false;
+        }
+        layerW_ = frameW_;
+        layerH_ = frameH_;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, layerFbo_);
+    glViewport(0, 0, frameW_, frameH_);
+    inLayer_ = true;
+    layerReady_ = false;
+    if (g_skipGlClear) {
+        fillRect(0, 0, frameW_ / frameScale_, frameH_ / frameScale_,
+                 (uint8_t)std::lround(clear_[0] * 255.0f),
+                 (uint8_t)std::lround(clear_[1] * 255.0f),
+                 (uint8_t)std::lround(clear_[2] * 255.0f), 255);
+    } else {
+        glClearColor(clear_[0], clear_[1], clear_[2], 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+    return true;
+}
+
+void GlRenderer::endLayer() {
+    if (!inLayer_) return;
+    flush();
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, frameW_, frameH_);
+    inLayer_ = false;
+    layerReady_ = true;
+    current_ = currentMask_ = nullptr;
+}
+
+void GlRenderer::drawLayer() {
+    if (!layerReady_ || inLayer_ || layerW_ != frameW_ || layerH_ != frameH_) return;
+    flush();
+    glDisable(GL_BLEND);
+    glActiveTexture(GL_TEXTURE1);
+    glDisable(GL_TEXTURE_2D);
+    glActiveTexture(GL_TEXTURE0);
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, layerTexture_);
+    const float w = frameW_ / frameScale_, h = frameH_ / frameScale_;
+    const float top = layerFlipped_ ? 1.0f : 0.0f, bottom = layerFlipped_ ? 0.0f : 1.0f;
+    const Vertex tl{0, 0, 0, top, 0, 0, 255, 255, 255, 255};
+    const Vertex tr{w, 0, 1, top, 0, 0, 255, 255, 255, 255};
+    const Vertex bl{0, h, 0, bottom, 0, 0, 255, 255, 255, 255};
+    const Vertex br{w, h, 1, bottom, 0, 0, 255, 255, 255, 255};
+    const Vertex quad[6] = {tl, tr, bl, tr, br, bl};
+    glClientActiveTexture(GL_TEXTURE1);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glClientActiveTexture(GL_TEXTURE0);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glTexCoordPointer(2, GL_FLOAT, sizeof(Vertex), &quad[0].u);
+    glVertexPointer(2, GL_FLOAT, sizeof(Vertex), &quad[0].x);
+    glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), &quad[0].r);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glEnable(GL_BLEND);
+    drawCalls_++;
+    quads_++;
+    current_ = currentMask_ = nullptr;
 }
 
 void GlRenderer::endFrame() {

@@ -26,6 +26,11 @@ public:
                   uint8_t r, uint8_t g, uint8_t b, uint8_t a) override;
     void fillRect(float x, float y, float w, float h, uint8_t r, uint8_t g, uint8_t b, uint8_t a) override;
     void endFrame() override {}
+    bool supportsLayer() const override { return layersEnabled_; }
+    bool beginLayer() override;
+    void endLayer() override;
+    void drawLayer() override;
+    void setLayersEnabled(bool enabled) { layersEnabled_ = enabled; }
 
     bool savePng(const std::string &path) const;
     const std::vector<uint8_t> &pixels() const { return fb_; }
@@ -35,6 +40,9 @@ private:
     int w_ = 0, h_ = 0;
     float scale_ = 1.0f;
     std::vector<uint8_t> fb_;
+    std::vector<uint8_t> mainFb_, layer_;
+    uint8_t clear_[3] = {0, 0, 0};
+    bool layersEnabled_ = false, inLayer_ = false;
     int drawCalls_ = 0;
 };
 

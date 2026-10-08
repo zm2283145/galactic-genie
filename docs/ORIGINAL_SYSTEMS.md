@@ -84,15 +84,26 @@ strings, and existing selection/command art remain runtime-loaded rather than
 copied into this repository.
 
 The installed `INTERFAC.DRS` also provides the original Clone Campaigns main
-screen as SLP 50189 and its dedicated JASC palette as resource 50589. Interface
+screen as SLP 50189 and its dedicated JASC palette as resource 50589. A
+recorded run of the installed executable confirms that this screen is a
+spatial hotspot interface rather than a vertical list: Basic Training,
+Community, DataBank, Single Player, Options, Multiplayer, Scenario Editor,
+and Exit remain positioned over the authored background, while activation
+opens the right-hand pane. The Single Player pane contains, in order,
+Original Campaigns, Expansion Campaigns, Standard Game, Custom Campaign, and
+Saved Game. Interface
 theme records are authoritative for palette selection: record 50089 maps
 `xmain` 50189 to `xmain` 50589. Rendering full-screen interface sheets with the
 global gameplay palette 50500 produces valid geometry with incorrect colors, so
-the asset path supports explicit per-screen palettes. The main frontend also
-uses frame 49 of SLP 50189 for the original logo and frames 4/6 of SLP 50688 for
-the normal/selected control state. Original 800x600 coordinates are scaled
+the asset path supports explicit per-screen palettes. SLP 50189 frame 49 is
+the logo; hotspot state groups begin at frames 10, 14, 18, 22, 26, 30, and
+34, with Exit at frame 46. Frames 4/6 of SLP 50688 provide normal/selected
+small control states. Original 800x600 coordinates are scaled
 independently on X and Y to fill all 960x544 Vita pixels rather than
-letterboxing the 4:3 art.
+letterboxing the 4:3 art. The recorded Single Player pane places its five
+322x38 entries at x=442 and y=93, 151.5, 210, 268.5, and 327. Activating the
+pane uses frame 33's red Single Player state rather than leaving the normal
+main-menu focus state visible.
 
 Campaign-root record 53015 maps background SLP 53014, palette 53016, and
 campaign selector states from the same SLP (base frames 1, 5, 9, 13, 17, and
@@ -101,9 +112,29 @@ and 53128 map backgrounds 53101-53105/53108 and palettes
 53111-53115/53118. Their briefing records 53141-53145 map dialog backgrounds
 53161-53165. Record 53128 explicitly sets `popup_dialog_sin` to record 53144,
 so XCAM8 reuses SLP 53164 and palette 53114 rather than referring to a
-nonexistent SLP 53168. The Vita frontend loads only the active full-screen
-frame and active briefing frame, releases them on screen changes, and keeps
-only the small shared logo/control/campaign selectors pinned.
+nonexistent SLP 53168. The Vita frontend loads only the active full-screen frame and active briefing
+frame, releases them on screen changes, and keeps only the small shared
+logo/control/campaign selectors pinned. A per-frame texture-build denial is
+not treated as a missing resource: the requested background/dialog is retried
+on the next frame before the previous resource is released. This prevents
+briefing narration from starting over a missing briefing page.
+
+The reference video fixes the campaign-selector positions in original
+800x600 coordinates. XCAM8/Training is at (130,297), XCAM1 at (138,184),
+XCAM2 at (240,95), XCAM3 at (481,95), XCAM4 at (565,184), and XCAM5 at
+(594,297). Placement and selector-frame lookup use each archive's original
+campaign number rather than discovery-vector order, preserving the authored
+Training, OOM-9, Boss Nass, Darth Vader, Princess Leia, and Chewbacca layout.
+
+The same recorded run establishes the campaign launch sequence. The selected
+campaign background and 499x404 briefing-dialog SLP present the authored
+mission text while the corresponding `Sound\Campaign` narration plays.
+After initialization, the live map is shown behind a modal, simulation-paused
+information pane with Objectives, Intelligence, Reconnaissance, and OK tabs.
+The native runtime maps generated trigger objectives to Objectives, SCX
+`hints` (falling back to `history`) to Intelligence, and SCX `scouts`
+(falling back to `history`) to Reconnaissance. World input and simulation
+remain blocked until OK/back dismisses the initial pane.
 
 Campaign scenario files preserve pregame/victory/loss cinematic string fields,
 but all 43 installed XCAM entries leave those fields empty. The available

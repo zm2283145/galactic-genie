@@ -4,6 +4,17 @@
 #include "../core/slp.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <set>
+#if defined(__vita__)
+#include <psp2/kernel/threadmgr.h>
+#else
+#include <thread>
+#endif
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -29,7 +40,134 @@ std::string findFileNoCase(const std::string &dir, const std::string &name) {
     return std::string();
 }
 
+struct Assets::SheetWorker {
+    struct Job {
+        uint64_t key;
+        int32_t slpId;
+        int playerColorBase;
+    };
+    struct Done {
+        uint64_t key;
+        PreparedSheet prepared;
+    };
+    const Assets *assets = nullptr;
+    ResourceSet graphics; // own file handles: the main thread keeps using graphics_
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::deque<Job> jobs;
+    std::deque<Done> done;
+    std::set<uint64_t> pending;
+    bool stop = false;
+#if defined(__vita__)
+    SceUID thread = -1;
+    static int entry(SceSize args, void *argp) {
+        if (args != sizeof(SheetWorker *) || !argp) return -1;
+        (*static_cast<SheetWorker **>(argp))->run();
+        return 0;
+    }
+#else
+    std::thread thread;
+#endif
+    void run() {
+        for (;;) {
+            Job job;
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                wake.wait(lock, [&] { return stop || !jobs.empty(); });
+                if (stop) return;
+                job = jobs.front();
+                jobs.pop_front();
+            }
+            Done result{job.key, {}};
+            assets->prepareSheet(graphics, job.slpId, job.playerColorBase, nullptr, result.prepared);
+            std::lock_guard<std::mutex> lock(mutex);
+            done.push_back(std::move(result));
+        }
+    }
+    bool start() {
+#if defined(__vita__)
+        thread = sceKernelCreateThread("swgb_sheets", entry, 0x10000100 + 10, 128 * 1024, 0,
+                                       SCE_KERNEL_CPU_MASK_USER_2, nullptr);
+        if (thread < 0) return false;
+        SheetWorker *self = this;
+        if (sceKernelStartThread(thread, sizeof(self), &self) < 0) {
+            sceKernelDeleteThread(thread);
+            thread = -1;
+            return false;
+        }
+        return true;
+#else
+        thread = std::thread([this] { run(); });
+        return true;
+#endif
+    }
+    ~SheetWorker() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            stop = true;
+        }
+        wake.notify_all();
+#if defined(__vita__)
+        if (thread >= 0) {
+            sceKernelWaitThreadEnd(thread, nullptr, nullptr);
+            sceKernelDeleteThread(thread);
+        }
+#else
+        if (thread.joinable()) thread.join();
+#endif
+    }
+};
+
+Assets::Assets(Renderer *r) : renderer_(r) {}
+
+void Assets::setAsyncSheetBuilds(bool enabled) {
+    if (!enabled) {
+        sheetWorker_.reset();
+        return;
+    }
+    if (sheetWorker_) return;
+    auto worker = std::make_unique<SheetWorker>();
+    worker->assets = this;
+    for (const auto &archive : graphics_.archives())
+        if (!worker->graphics.add(archive->path())) return;
+    if (!worker->start()) return;
+    sheetWorker_ = std::move(worker);
+}
+
+size_t Assets::pendingSheetBuilds() const {
+    if (!sheetWorker_) return 0;
+    std::lock_guard<std::mutex> lock(sheetWorker_->mutex);
+    return sheetWorker_->pending.size();
+}
+
+void Assets::pumpAsyncSheets() {
+    if (!sheetWorker_) return;
+    // Upload at most a couple of finished atlases per frame (texture creation
+    // stays on the render thread and before beginFrame).
+    for (int uploads = 0; uploads < 2; ++uploads) {
+        SheetWorker::Done result;
+        {
+            std::lock_guard<std::mutex> lock(sheetWorker_->mutex);
+            if (sheetWorker_->done.empty()) return;
+            result = std::move(sheetWorker_->done.front());
+            sheetWorker_->done.pop_front();
+            sheetWorker_->pending.erase(result.key);
+        }
+        auto existing = sheets_.find(result.key);
+        if (existing != sheets_.end() && existing->second) continue;
+        const auto start = std::chrono::steady_clock::now();
+        buildCount_++;
+        finishSheet(result.key, result.prepared);
+        const uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - start)
+                                .count();
+        buildUs_ += us;
+        buildMaxUs_ = std::max(buildMaxUs_, us);
+    }
+}
+
 Assets::~Assets() {
+    sheetWorker_.reset();
     for (auto &kv : sheets_)
         if (kv.second)
             for (Texture *t : kv.second->pages) renderer_->destroyTexture(t);
@@ -37,6 +175,9 @@ Assets::~Assets() {
         if (kv.second)
             for (Texture *t : kv.second->pages) renderer_->destroyTexture(t);
     for (auto &kv : slopeBlendMasks_)
+        if (kv.second)
+            for (Texture *t : kv.second->pages) renderer_->destroyTexture(t);
+    for (auto &kv : fileFrames_)
         if (kv.second)
             for (Texture *t : kv.second->pages) renderer_->destroyTexture(t);
     renderer_->destroyTexture(blendMaskTexture_);
@@ -76,7 +217,12 @@ void Assets::destroySheet(std::unique_ptr<SpriteSheet> &sheet) {
 
 void Assets::beginTerrainFrame(size_t textureBudget) {
     terrainTextureBudget_ = textureBudget;
+    pumpAsyncSheets();
     buildsThisFrame_ = 0;
+    slopeBuildsThisFrame_ = 0;
+    terrainFrameStartUs_ = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count();
     terrainGeneration_++;
     if (terrainGeneration_ == 0) {
         terrainGeneration_ = 1;
@@ -157,12 +303,27 @@ bool Assets::init(const std::string &dataDir, std::string *err) {
         const char *name;
         bool required;
     };
-    // Expansion archives first so Clone Campaigns overrides win.
+    // Later expansions and official patch archives must precede the base
+    // archives. Duplicate ids are common in interface resources.
     const Want wants[] = {
-        {&graphics_, "graphics_x1.drs", true}, {&graphics_, "graphics.drs", true},
-        {&terrain_, "terrain_x1.drs", false},  {&terrain_, "terrain.drs", true},
-        {&interfac_, "interfac_x1.drs", false}, {&interfac_, "interfac.drs", true},
-        {&sounds_, "sounds_x1.drs", false}, {&sounds_, "sounds.drs", false},
+        {&graphics_, "graphics_x1_p1.drs", false},
+        {&graphics_, "graphics_x1.drs", true},
+        {&graphics_, "graphics_p1.drs", false},
+        {&graphics_, "graphics.drs", true},
+        {&terrain_, "terrain_x1_p1.drs", false},
+        {&terrain_, "terrain_x1.drs", false},
+        {&terrain_, "terrain_p1.drs", false},
+        {&terrain_, "terrain.drs", true},
+        {&interfac_, "interfac_x1_p1.drs", false},
+        {&interfac_, "interfac_x1.drs", false},
+        {&interfac_, "interfac_p1.drs", false},
+        {&interfac_, "interfac.drs", true},
+        // Expanding Fronts uses unique frontend ids. Keep it after the
+        // original archives so its incompatible duplicate 50500 palette
+        // cannot replace the global gameplay palette.
+        {&interfac_, "interfac_x2.drs", false},
+        {&sounds_, "sounds_x1.drs", false},
+        {&sounds_, "sounds.drs", false},
     };
     for (const Want &w : wants) {
         std::string p = findFileNoCase(dataDir, w.name);
@@ -256,6 +417,70 @@ bool Assets::init(const std::string &dataDir, std::string *err) {
 bool Assets::readSound(int soundId, int civilization, uint32_t choice,
                        std::vector<uint8_t> &data, int *resourceId,
                        std::string *fileName) {
+    std::shared_ptr<const std::vector<uint8_t>> shared;
+    if (!readSoundShared(soundId, civilization, choice, shared, resourceId, fileName))
+        return false;
+    data = *shared;
+    return true;
+}
+
+std::vector<std::string> Assets::soundArchivePaths() const {
+    std::vector<std::string> paths;
+    for (const auto &archive : sounds_.archives()) paths.push_back(archive->path());
+    return paths;
+}
+
+std::vector<std::string> Assets::interfaceArchivePaths() const {
+    std::vector<std::string> paths;
+    for (const auto &archive : interfac_.archives()) paths.push_back(archive->path());
+    return paths;
+}
+
+bool Assets::selectSound(int soundId, int civilization, uint32_t choice,
+                         int *resourceId, std::string *fileName) {
+    const dat::Sound *sound = nullptr;
+    if (soundId >= 0 && (size_t)soundId < dat_.sounds.size() &&
+        dat_.sounds[(size_t)soundId].id == soundId)
+        sound = &dat_.sounds[(size_t)soundId];
+    if (!sound)
+        for (const dat::Sound &candidate : dat_.sounds)
+            if (candidate.id == soundId) {
+                sound = &candidate;
+                break;
+            }
+    if (!sound || sound->items.empty()) return false;
+
+    std::vector<const dat::SoundItem *> eligible;
+    int totalWeight = 0;
+    for (const dat::SoundItem &item : sound->items)
+        if (item.civilization < 0 || item.civilization == civilization) {
+            eligible.push_back(&item);
+            totalWeight += std::max<int>(1, item.probability);
+        }
+    if (totalWeight <= 0) return false;
+    int selectedWeight = (int)(choice % (uint32_t)totalWeight);
+    size_t selectedIndex = 0;
+    for (; selectedIndex < eligible.size(); selectedIndex++) {
+        selectedWeight -= std::max<int>(1, eligible[selectedIndex]->probability);
+        if (selectedWeight < 0) {
+            break;
+        }
+    }
+    for (size_t offset = 0; offset < eligible.size(); offset++) {
+        const dat::SoundItem &selected =
+            *eligible[(selectedIndex + offset) % eligible.size()];
+        if (!soundDataCache_.count(selected.resourceId) && !sounds_.has(selected.resourceId))
+            continue;
+        if (resourceId) *resourceId = selected.resourceId;
+        if (fileName) *fileName = selected.fileName;
+        return true;
+    }
+    return false;
+}
+
+bool Assets::readSoundShared(int soundId, int civilization, uint32_t choice,
+                             std::shared_ptr<const std::vector<uint8_t>> &data,
+                             int *resourceId, std::string *fileName) {
     const dat::Sound *sound = nullptr;
     if (soundId >= 0 && (size_t)soundId < dat_.sounds.size() &&
         dat_.sounds[(size_t)soundId].id == soundId)
@@ -291,8 +516,12 @@ bool Assets::readSound(int soundId, int civilization, uint32_t choice,
         if (cached != soundDataCache_.end()) {
             data = cached->second;
         } else {
-            if (!sounds_.read(selected.resourceId, data)) continue;
-            if (soundDataCache_.size() >= 32) soundDataCache_.clear();
+            auto bytes = std::make_shared<std::vector<uint8_t>>();
+            if (!sounds_.read(selected.resourceId, *bytes)) continue;
+            data = bytes;
+            // Evict one entry, not the whole cache: battles cycle through
+            // more than a few dozen sounds and each miss reads the DRS.
+            if (soundDataCache_.size() >= 96) soundDataCache_.erase(soundDataCache_.begin());
             soundDataCache_[selected.resourceId] = data;
         }
         if (resourceId) *resourceId = selected.resourceId;
@@ -384,10 +613,13 @@ const SpriteFrame *Assets::blendMask(int mode, int mask, int slope) {
 }
 
 const SpriteFrame *Assets::buildSlopeBlendMask(int mode, int mask, int slope, uint32_t key) {
-    if (buildsThisFrame_ >=
-        maximumBuildsPerFrame_)
+    // Single-frame slope tiles and masks are small: they get their own budget
+    // (twice the sheet budget) so scrolling fills in quickly.
+    if (maximumBuildsPerFrame_ != SIZE_MAX &&
+        slopeBuildsThisFrame_ >= maximumBuildsPerFrame_ * 2)
         return nullptr;
-    ++buildsThisFrame_;
+    ++slopeBuildsThisFrame_;
+    ++slopeBuildCount_;
     if (!blendomatic_ || (size_t)mode >= blendomatic_->modes().size() ||
         (size_t)mask >= blendomatic_->modes()[(size_t)mode].masks.size()) {
         slopeBlendMasks_[key] = nullptr;
@@ -488,6 +720,14 @@ const SpriteSheet *Assets::sheet(int32_t slpId, int playerColorBase) {
         rememberSheet(key, it->second.get());
         return it->second.get();
     }
+    if (sheetWorker_) {
+        std::lock_guard<std::mutex> lock(sheetWorker_->mutex);
+        if (sheetWorker_->pending.insert(key).second) {
+            sheetWorker_->jobs.push_back({key, slpId, playerColorBase});
+            sheetWorker_->wake.notify_one();
+        }
+        return nullptr;
+    }
     const SpriteSheet *built = build(graphics_, slpId, playerColorBase, key);
     rememberSheet(key, built);
     return built;
@@ -557,18 +797,37 @@ const SpriteFrame *Assets::interfaceFrame(
                        !cached->second->frames.empty()
                    ? &cached->second->frames[0]
                    : nullptr;
-    std::vector<uint8_t> slpData;
-    std::vector<uint8_t> paletteData;
-    Palette palette;
-    Slp slp;
-    SlpImage image;
+    // Screens take many frames from one large SLP (the main menu, the
+    // campaign maps); keep the last few parsed SLPs and palettes instead of
+    // reading and parsing the whole file again for every frame.
     std::string err;
-    if (!interfac_.read(slpId, slpData) ||
-        !slp.parse(std::move(slpData), &err) ||
-        frame >= slp.frameCount() ||
-        !slp.decode(frame, image, &err) ||
-        !interfac_.read(paletteId, paletteData) ||
-        !palette.parse(paletteData, &err)) {
+    const Slp *slp = nullptr;
+    for (auto &entry : interfaceSlpCache_)
+        if (entry.first == slpId) slp = entry.second.get();
+    if (!slp) {
+        std::vector<uint8_t> slpData;
+        auto parsed = std::make_unique<Slp>();
+        if (interfac_.read(slpId, slpData) && parsed->parse(std::move(slpData), &err)) {
+            if (interfaceSlpCache_.size() >= 3) interfaceSlpCache_.pop_front();
+            interfaceSlpCache_.emplace_back(slpId, std::move(parsed));
+            slp = interfaceSlpCache_.back().second.get();
+        }
+    }
+    const Palette *palettePointer = nullptr;
+    for (auto &entry : interfacePaletteCache_)
+        if (entry.first == paletteId) palettePointer = &entry.second;
+    if (!palettePointer) {
+        std::vector<uint8_t> paletteData;
+        Palette parsedPalette;
+        if (interfac_.read(paletteId, paletteData) && parsedPalette.parse(paletteData, &err)) {
+            if (interfacePaletteCache_.size() >= 8) interfacePaletteCache_.pop_front();
+            interfacePaletteCache_.emplace_back(paletteId, std::move(parsedPalette));
+            palettePointer = &interfacePaletteCache_.back().second;
+        }
+    }
+    SlpImage image;
+    if (!slp || frame >= slp->frameCount() || !slp->decode(frame, image, &err) ||
+        !palettePointer) {
         log(
             "interface frame " +
             std::to_string(slpId) + ":" +
@@ -578,6 +837,7 @@ const SpriteFrame *Assets::interfaceFrame(
         sheetUse_[key] = terrainGeneration_;
         return nullptr;
     }
+    const Palette palette = *palettePointer;
     std::vector<SlpImage> images;
     images.push_back(std::move(image));
     auto sheet = pack(images, 16, &palette);
@@ -594,6 +854,62 @@ const SpriteFrame *Assets::interfaceFrame(
     return result;
 }
 
+namespace {
+bool readWholeFile(const std::string &path, std::vector<uint8_t> &data) {
+    data.clear();
+    FILE *file = fopen(path.c_str(), "rb");
+    if (!file) return false;
+    bool ok = fseek(file, 0, SEEK_END) == 0;
+    const long length = ok ? ftell(file) : -1;
+    ok = ok && length > 0 && fseek(file, 0, SEEK_SET) == 0;
+    if (ok) {
+        data.resize((size_t)length);
+        ok = fread(data.data(), 1, data.size(), file) == data.size();
+    }
+    fclose(file);
+    if (!ok) data.clear();
+    return ok;
+}
+} // namespace
+
+const SpriteFrame *Assets::fileFrame(const std::string &slpPath, size_t frame,
+                                     const std::string &palettePath) {
+    const std::string key = slpPath + "|" + std::to_string(frame) + "|" + palettePath;
+    auto cached = fileFrames_.find(key);
+    if (cached != fileFrames_.end())
+        return cached->second && !cached->second->frames.empty() ? &cached->second->frames[0]
+                                                                 : nullptr;
+    std::vector<uint8_t> slpData, paletteData;
+    Palette palette;
+    Slp slp;
+    SlpImage image;
+    std::string err;
+    if (!readWholeFile(slpPath, slpData) || !slp.parse(std::move(slpData), &err) ||
+        frame >= slp.frameCount() || !slp.decode(frame, image, &err) ||
+        !readWholeFile(palettePath, paletteData) || !palette.parse(paletteData, &err)) {
+        log("media frame " + slpPath + ":" + std::to_string(frame) + ": " +
+            (err.empty() ? "file unavailable" : err));
+        fileFrames_[key] = nullptr;
+        return nullptr;
+    }
+    std::vector<SlpImage> images;
+    images.push_back(std::move(image));
+    auto sheet = pack(images, 16, &palette);
+    if (!sheet) {
+        fileFrames_[key] = nullptr;
+        return nullptr;
+    }
+    textureBytes_ += sheet->bytes;
+    const SpriteFrame *result = &sheet->frames[0];
+    fileFrames_[key] = std::move(sheet);
+    return result;
+}
+
+void Assets::releaseFileFrames() {
+    for (auto &entry : fileFrames_) destroySheet(entry.second);
+    fileFrames_.clear();
+}
+
 void Assets::releaseInterfaceFrame(
     int32_t slpId, size_t frame,
     int32_t paletteId) {
@@ -608,6 +924,16 @@ void Assets::releaseInterfaceFrame(
     destroySheet(sheet->second);
     sheets_.erase(sheet);
     sheetUse_.erase(key);
+}
+
+const SpriteSheet *Assets::preloadTerrainSheet(int32_t slpId) {
+    const size_t maximum = maximumBuildsPerFrame_;
+    const size_t used = buildsThisFrame_;
+    maximumBuildsPerFrame_ = SIZE_MAX;
+    const SpriteSheet *sheet = terrainSheet(slpId);
+    maximumBuildsPerFrame_ = maximum;
+    buildsThisFrame_ = used;
+    return sheet;
 }
 
 const SpriteSheet *Assets::terrainSheet(int32_t slpId) {
@@ -649,49 +975,32 @@ const SpriteFrame *Assets::terrainSlopeFrame(int32_t slpId, int slope, size_t fr
     return buildTerrainSlopeFrame(key);
 }
 
-const SpriteSheet *Assets::build(
-    ResourceSet &set, int32_t slpId,
-    int playerColorBase, uint64_t key,
-    const Palette *palette) {
-    if (buildsThisFrame_ >=
-        maximumBuildsPerFrame_)
-        return nullptr;
-    ++buildsThisFrame_;
-    buildCount_++;
+void Assets::prepareSheet(ResourceSet &set, int32_t slpId, int playerColorBase,
+                          const Palette *palette, PreparedSheet &out) const {
+    out = PreparedSheet{};
     std::vector<uint8_t> data;
-    if (slpId < 0 || !set.read(slpId, data)) {
-        sheets_[key] = nullptr;
-        sheetUse_[key] = terrainGeneration_;
-        return nullptr;
-    }
+    if (slpId < 0 || !set.read(slpId, data)) return;
     Slp slp;
     std::string err;
     if (!slp.parse(std::move(data), &err)) {
-        log("slp " + std::to_string(slpId) + ": " + err);
-        sheets_[key] = nullptr;
-        sheetUse_[key] = terrainGeneration_;
-        return nullptr;
+        out.logs.push_back("slp " + std::to_string(slpId) + ": " + err);
+        return;
     }
 
     const size_t n = slp.frameCount();
     std::vector<SlpImage> imgs(n);
     for (size_t i = 0; i < n; i++) {
         if (!slp.decode(i, imgs[i], &err)) {
-            log("slp " + std::to_string(slpId) + " frame " + std::to_string(i) + ": " + err);
+            out.logs.push_back("slp " + std::to_string(slpId) + " frame " + std::to_string(i) + ": " + err);
             imgs[i] = SlpImage{};
         }
     }
 
-    auto sheet = pack(
-        imgs, playerColorBase, palette);
-    if (!sheet) {
-        sheets_[key] = nullptr;
-        sheetUse_[key] = terrainGeneration_;
-        return nullptr;
-    }
+    out.packed = packPixels(imgs, playerColorBase, palette);
     // Laser bolt frames: a large frame with only a few coloured pixels, the
     // bolt's ends. Record the two farthest ones and their colour.
-    for (size_t i = 0; i < n && i < sheet->frames.size(); i++) {
+    out.lasers.assign(n, SpriteFrame{});
+    for (size_t i = 0; i < n; i++) {
         const SlpImage &image = imgs[i];
         if (image.width < 8 && image.height < 8) continue;
         std::vector<int> lit;
@@ -705,7 +1014,7 @@ const SpriteSheet *Assets::build(
                 if (dx * dx + dy * dy > bestD) { bestD = dx * dx + dy * dy; best0 = a; best1 = b; }
             }
         if (bestD < 16) continue;
-        SpriteFrame &frame = sheet->frames[i];
+        SpriteFrame &frame = out.lasers[i];
         frame.laser = true;
         frame.laserX0 = (float)(best0 % image.width - image.hotspotX);
         frame.laserY0 = (float)(best0 / image.width - image.hotspotY);
@@ -720,6 +1029,31 @@ const SpriteSheet *Assets::build(
         frame.laserG = colors.colors[index].g;
         frame.laserB = colors.colors[index].b;
     }
+    out.ok = true;
+}
+
+const SpriteSheet *Assets::finishSheet(uint64_t key, PreparedSheet &prepared) {
+    for (const std::string &message : prepared.logs) log(message);
+    std::unique_ptr<SpriteSheet> sheet;
+    if (prepared.ok) sheet = uploadPacked(prepared.packed);
+    if (!sheet) {
+        sheets_[key] = nullptr;
+        sheetUse_[key] = terrainGeneration_;
+        return nullptr;
+    }
+    for (size_t i = 0; i < prepared.lasers.size() && i < sheet->frames.size(); i++) {
+        const SpriteFrame &laser = prepared.lasers[i];
+        if (!laser.laser) continue;
+        SpriteFrame &frame = sheet->frames[i];
+        frame.laser = true;
+        frame.laserX0 = laser.laserX0;
+        frame.laserY0 = laser.laserY0;
+        frame.laserX1 = laser.laserX1;
+        frame.laserY1 = laser.laserY1;
+        frame.laserR = laser.laserR;
+        frame.laserG = laser.laserG;
+        frame.laserB = laser.laserB;
+    }
     textureBytes_ += sheet->bytes;
     const SpriteSheet *res = sheet.get();
     sheets_[key] = std::move(sheet);
@@ -727,11 +1061,48 @@ const SpriteSheet *Assets::build(
     return res;
 }
 
-const SpriteFrame *Assets::buildTerrainSlopeFrame(const SlopeFrameKey &key) {
+const SpriteSheet *Assets::build(
+    ResourceSet &set, int32_t slpId,
+    int playerColorBase, uint64_t key,
+    const Palette *palette) {
     if (buildsThisFrame_ >=
         maximumBuildsPerFrame_)
         return nullptr;
     ++buildsThisFrame_;
+    buildCount_++;
+    const auto buildStart = std::chrono::steady_clock::now();
+    struct BuildTimer {
+        std::chrono::steady_clock::time_point start;
+        uint64_t &total, &maximum;
+        ~BuildTimer() {
+            const uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now() - start)
+                                    .count();
+            total += us;
+            maximum = std::max(maximum, us);
+        }
+    } buildTimer{buildStart, buildUs_, buildMaxUs_};
+    PreparedSheet prepared;
+    prepareSheet(set, slpId, playerColorBase, palette, prepared);
+    return finishSheet(key, prepared);
+}
+
+const SpriteFrame *Assets::buildTerrainSlopeFrame(const SlopeFrameKey &key) {
+    // Single-frame slope tiles and masks are small: they get their own budget
+    // (twice the sheet budget) so scrolling fills in quickly.
+    // Visible slope tiles have no usable stand-in (a flat tile leaves a hole
+    // on a hill), so past the count budget keep building them until the
+    // frame has spent kSlopeBuildWindowUs on terrain.
+    if (maximumBuildsPerFrame_ != SIZE_MAX &&
+        slopeBuildsThisFrame_ >= maximumBuildsPerFrame_ * 2) {
+        constexpr uint64_t kSlopeBuildWindowUs = 12000;
+        const uint64_t now = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now().time_since_epoch())
+                                 .count();
+        if (now - terrainFrameStartUs_ > kSlopeBuildWindowUs) return nullptr;
+    }
+    ++slopeBuildsThisFrame_;
+    ++slopeBuildCount_;
     const int32_t slpId = key.slpId;
     const int slope = key.slope;
     const size_t frame = key.frame;
@@ -838,16 +1209,17 @@ const SpriteFrame *Assets::buildTerrainSlopeFrame(const SlopeFrameKey &key) {
     return result;
 }
 
-std::unique_ptr<SpriteSheet> Assets::pack(
+Assets::PackedSheet Assets::packPixels(
     const std::vector<SlpImage> &imgs,
     int playerColorBase,
-    const Palette *palette) {
+    const Palette *palette) const {
+    PackedSheet packed;
     const size_t n = imgs.size();
     // Shelf-pack frames into pages. Pages are 1024 wide (wider if a single
     // frame needs it) and at most 2048 tall. 1px padding avoids bleeding.
     struct Place { int page, x, y; };
     std::vector<Place> place(n);
-    std::vector<std::pair<int, int>> pageSize; // w, h
+    std::vector<std::pair<int, int>> &pageSize = packed.pageSize; // w, h
     int maxW = 1;
     size_t totalArea = 0;
     for (const auto &image : imgs) {
@@ -875,8 +1247,8 @@ std::unique_ptr<SpriteSheet> Assets::pack(
         pageSize[page].second = std::max(pageSize[page].second, cy + rowH);
     }
 
-    auto sheet = std::make_unique<SpriteSheet>();
-    std::vector<std::vector<uint8_t>> pixels(pageSize.size());
+    std::vector<std::vector<uint8_t>> &pixels = packed.pixels;
+    pixels.resize(pageSize.size());
     bool hasOutlines = false;
     for (const SlpImage &image : imgs)
         if (std::find(image.kind.begin(), image.kind.end(),
@@ -884,8 +1256,9 @@ std::unique_ptr<SpriteSheet> Assets::pack(
             hasOutlines = true;
             break;
         }
-    std::vector<std::vector<uint8_t>> outlines(
-        hasOutlines ? pageSize.size() : 0);
+    packed.hasOutlines = hasOutlines;
+    std::vector<std::vector<uint8_t>> &outlines = packed.outlines;
+    outlines.resize(hasOutlines ? pageSize.size() : 0);
     for (size_t p = 0; p < pageSize.size(); p++) {
         pageSize[p].second = std::max(1, pageSize[p].second);
         pixels[p].assign((size_t)pageSize[p].first * pageSize[p].second * 4, 0);
@@ -920,9 +1293,28 @@ std::unique_ptr<SpriteSheet> Assets::pack(
     for (const auto &pagePixels : pixels) packedBytes += pagePixels.size();
     for (const auto &pageOutlines : outlines)
         packedBytes += pageOutlines.size();
-    ensureTerrainCacheSpace(packedBytes);
+    packed.bytes = packedBytes;
+    packed.frames.resize(n);
+    for (size_t i = 0; i < n; i++) {
+        PackedSheet::Frame &f = packed.frames[i];
+        f.page = place[i].page;
+        f.x = place[i].x;
+        f.y = place[i].y;
+        f.w = imgs[i].width;
+        f.h = imgs[i].height;
+        f.hotX = imgs[i].hotspotX;
+        f.hotY = imgs[i].hotspotY;
+    }
+    return packed;
+}
+
+std::unique_ptr<SpriteSheet> Assets::uploadPacked(PackedSheet &packed) {
+    auto sheet = std::make_unique<SpriteSheet>();
+    const auto &pageSize = packed.pageSize;
+    const bool hasOutlines = packed.hasOutlines;
+    ensureTerrainCacheSpace(packed.bytes);
     for (size_t p = 0; p < pageSize.size(); p++) {
-        Texture *t = renderer_->createTexture(pageSize[p].first, pageSize[p].second, pixels[p].data());
+        Texture *t = renderer_->createTexture(pageSize[p].first, pageSize[p].second, packed.pixels[p].data());
         if (!t) {
             for (Texture *pageTexture : sheet->pages) renderer_->destroyTexture(pageTexture);
             log("sprite texture allocation failed");
@@ -932,7 +1324,7 @@ std::unique_ptr<SpriteSheet> Assets::pack(
         if (hasOutlines) {
             Texture *outline = renderer_->createMaskTexture(
                 pageSize[p].first, pageSize[p].second,
-                outlines[p].data());
+                packed.outlines[p].data());
             if (!outline) {
                 for (Texture *pageTexture : sheet->pages)
                     renderer_->destroyTexture(pageTexture);
@@ -945,22 +1337,31 @@ std::unique_ptr<SpriteSheet> Assets::pack(
             sheet->outlinePages.push_back(outline);
         }
     }
-    sheet->bytes = packedBytes;
+    sheet->bytes = packed.bytes;
+    const size_t n = packed.frames.size();
     sheet->frames.resize(n);
     for (size_t i = 0; i < n; i++) {
+        const PackedSheet::Frame &placed = packed.frames[i];
         SpriteFrame &f = sheet->frames[i];
-        f.tex = sheet->pages[place[i].page];
+        f.tex = sheet->pages[(size_t)placed.page];
         if (hasOutlines)
             f.outlineTex =
-                sheet->outlinePages[place[i].page];
-        f.u = (float)place[i].x;
-        f.v = (float)place[i].y;
-        f.w = imgs[i].width;
-        f.h = imgs[i].height;
-        f.hotX = imgs[i].hotspotX;
-        f.hotY = imgs[i].hotspotY;
+                sheet->outlinePages[(size_t)placed.page];
+        f.u = (float)placed.x;
+        f.v = (float)placed.y;
+        f.w = placed.w;
+        f.h = placed.h;
+        f.hotX = placed.hotX;
+        f.hotY = placed.hotY;
     }
     return sheet;
 }
 
+std::unique_ptr<SpriteSheet> Assets::pack(
+    const std::vector<SlpImage> &imgs,
+    int playerColorBase,
+    const Palette *palette) {
+    PackedSheet packed = packPixels(imgs, playerColorBase, palette);
+    return uploadPacked(packed);
+}
 } // namespace swgb

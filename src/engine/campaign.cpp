@@ -255,6 +255,14 @@ bool CampaignCatalog::discover(
             mission.description = scenario.instructions;
             mission.objectives =
                 missionObjectives(scenario);
+            mission.intelligence =
+                scenario.hints.empty()
+                    ? scenario.history
+                    : scenario.hints;
+            mission.reconnaissance =
+                scenario.scouts.empty()
+                    ? scenario.history
+                    : scenario.scouts;
             mission.mapSize = scenario.map.width;
             mission.unitCount =
                 (uint32_t)scenario.units.size();
