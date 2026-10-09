@@ -420,6 +420,8 @@ Game::~Game() {
 
 void Game::resetMatchState() {
     players_ = {};
+    resetCommodityPrices();
+    chatLines_.clear();
     resources_ = {};
     researchedTechs_ = {};
     techGeneration_++;
@@ -622,6 +624,8 @@ bool Game::initGenerated(
     rng_.seed(settings.seed);
     const int mapSize = settings.mapSize;
     players_ = {};
+    resetCommodityPrices();
+    chatLines_.clear();
     resources_ = {};
     researchedTechs_ = {};
     aiPlayers_ = {};
@@ -696,7 +700,13 @@ bool Game::initGenerated(
     gameSpeed_ = settings.gameSpeed;
     cheatsEnabled_ = settings.cheatsEnabled;
     teamsLocked_ = settings.teamsLocked;
-    standardVictoryCountdown_ = 600.0f;
+    // Monument / holocron countdown (exe 0x5747a0): 2000/3000/3500/4000
+    // half-seconds by map size (up to medium / normal / large / giant).
+    standardVictoryCountdown_ =
+        settings.mapSize <= 168 ? 1000.0f
+        : settings.mapSize <= 200 ? 1500.0f
+        : settings.mapSize <= 220 ? 1750.0f
+                                  : 2000.0f;
     timeLimitSeconds_ =
         settings.timeLimitMinutes * 60.0f;
     scoreLimit_ = settings.scoreLimit;
@@ -3602,8 +3612,556 @@ bool Game::objectActive(uint32_t spawnId) const {
 
 float Game::resource(int player, int resourceId) const {
     if (player < 0 || (size_t)player >= resources_.size()) return 0;
+    bool derived = false;
+    const float value = derivedAttribute(player, resourceId, derived);
+    if (derived) return value;
     const auto found = resources_[(size_t)player].find(resourceId);
     return found == resources_[(size_t)player].end() ? 0 : found->second;
+}
+
+namespace {
+// Player attribute ids the original keeps as statistics (AoK numbering, the
+// same in SWGB: exe kill credit 0x55b4e3 / 0x5569b5, building completion
+// 0x554a99, tribute 0x5bb8e0, research 0x5bffa8, conversion 0x568b66).
+enum StatAttribute {
+    kStatHolocrons = 7,
+    kStatPopulation = 11,
+    kStatUnitsOwned = 19,
+    kStatKills = 20,
+    kStatResearchCount = 21,
+    kStatExplored = 22,
+    kStatCivilianPopulation = 37,
+    kStatMilitaryPopulation = 40,
+    kStatConversions = 41,
+    kStatStandingMonuments = 42,
+    kStatRazings = 43,
+    kStatTemples = 52,
+    kStatTributeSent = 53,
+    kStatKilledPlayer = 69,      // + victim - 1
+    kStatBuildingCostSum = 98,
+    kStatTechCostSum = 99,
+    kStatTributeToPlayer = 102,  // + receiver - 1
+    kStatKillValuePlayer = 110,  // + victim - 1
+    kStatRazingsPlayer = 118,    // + victim - 1
+    kStatRazingValuePlayer = 126,
+    kStatStandingFortresses = 134,
+    kStatKillsByPlayer = 136,    // + attacker - 1
+    kStatRazingsByPlayer = 144,
+    kStatValueLost = 152,
+    kStatUnitsLost = 154,
+    kStatBuildingsLost = 155,
+    kStatTributeFromPlayer = 156, // + sender - 1
+    kStatBuildingValue = 165,
+    kStatGathered = 166,          // + resource type (0..3)
+    kStatValueKilled = 170,
+    kStatTributeReceived = 171,
+    kStatFortressesBuilt = 173,
+    kStatMonumentsBuilt = 174,
+    kStatTributePaid = 175,
+    kStatMonumentValue = 184,
+};
+// Peaks of an attribute are kept beside it, past the DAT's attribute range.
+constexpr int kPeakAttributeBase = 100000;
+// Game time each tech level was reached, and the per-minute score samples.
+constexpr int kTechLevelTimeBase = 200000;
+constexpr int kTimelineBase = 300000;
+constexpr int kUnitFortress = 82, kUnitMonument = 276, kUnitTemple = 104;
+
+float costValue(const dat::Unit &unit) {
+    float value = 0.0f;
+    for (const dat::ResourceCost &cost : unit.costs)
+        if (cost.type >= 0 && cost.flag == 1) value += cost.amount;
+    return value;
+}
+} // namespace
+
+float Game::derivedAttribute(int player, int attribute, bool &derived) const {
+    derived = false;
+    if (player <= 0 || (size_t)player >= resources_.size()) return 0.0f;
+    switch (attribute) {
+    case kStatHolocrons:
+        derived = true;
+        return (float)storedHolocronCount(player);
+    case kStatPopulation:
+        derived = true;
+        return populationUsed(player);
+    case kStatCivilianPopulation:
+        derived = true;
+        return aiPopulationStats().civilian[(size_t)player];
+    case kStatMilitaryPopulation:
+        derived = true;
+        return aiPopulationStats().military[(size_t)player];
+    case kStatUnitsOwned: {
+        derived = true;
+        int count = 0;
+        for (const Object &object : prefetched(objects_))
+            if (object.active && object.player == player && object.unit &&
+                object.unit->type != dat::UT_Building && object.unit->speed > 0)
+                count++;
+        return (float)count;
+    }
+    case kStatExplored: {
+        derived = true;
+        if ((size_t)player >= exploredTiles_.size() || exploredTiles_[(size_t)player].empty())
+            return 0.0f;
+        const auto &tiles = exploredTiles_[(size_t)player];
+        const size_t seen = (size_t)std::count(tiles.begin(), tiles.end(), (uint8_t)1);
+        return (float)(int)(seen * 100 / tiles.size());
+    }
+    default:
+        return 0.0f;
+    }
+}
+
+void Game::addAttribute(int player, int attribute, float amount) {
+    if (player < 0 || (size_t)player >= resources_.size() || attribute < 0) return;
+    resources_[(size_t)player][attribute] += amount;
+}
+
+// The victim's owner must be a player (gaia losses are not credited); walls,
+// gates and annex parts are not counted. Buildings count as razings except
+// the cannons, which the DAT makes buildings (classes 34 and 36).
+void Game::creditDestruction(const Object &victim, int attacker) {
+    if (!victim.unit || victim.player <= 0 || victim.player > 8 || attacker < 0 ||
+        attacker > 8 || victim.annexParentId)
+        return;
+    const dat::Unit &unit = *victim.unit;
+    const float value = costValue(unit);
+    bool kill = true;
+    if (unit.type == dat::UT_Building) {
+        if (unit.cls == 6) return; // fences and barriers
+        kill = unit.cls == 34 || unit.cls == 36;
+    }
+    const int victimPlayer = victim.player;
+    if (kill) {
+        addAttribute(attacker, kStatKills, 1.0f);
+        addAttribute(victimPlayer, kStatUnitsLost, 1.0f);
+        addAttribute(attacker, kStatKilledPlayer + victimPlayer - 1, 1.0f);
+        if (attacker > 0) addAttribute(victimPlayer, kStatKillsByPlayer + attacker - 1, 1.0f);
+        addAttribute(attacker, kStatKillValuePlayer + victimPlayer - 1, value);
+    } else {
+        addAttribute(attacker, kStatRazings, 1.0f);
+        addAttribute(victimPlayer, kStatBuildingsLost, 1.0f);
+        addAttribute(attacker, kStatRazingsPlayer + victimPlayer - 1, 1.0f);
+        if (attacker > 0) addAttribute(victimPlayer, kStatRazingsByPlayer + attacker - 1, 1.0f);
+        addAttribute(attacker, kStatRazingValuePlayer + victimPlayer - 1, value);
+        if (!victim.underConstruction) {
+            if (unit.id == kUnitFortress) addAttribute(victimPlayer, kStatStandingFortresses, -1.0f);
+            if (unit.id == kUnitMonument) addAttribute(victimPlayer, kStatStandingMonuments, -1.0f);
+        }
+    }
+    addAttribute(attacker, kStatValueKilled, value);
+    addAttribute(victimPlayer, kStatValueLost, value);
+}
+
+void Game::creditBuildingCompleted(const Object &building) {
+    if (!building.unit || building.player <= 0 || building.annexParentId) return;
+    const dat::Unit &unit = *building.unit;
+    const float value = costValue(unit);
+    if (unit.id == kUnitTemple) addAttribute(building.player, kStatTemples, 1.0f);
+    if (unit.id == kUnitMonument) {
+        addAttribute(building.player, kStatStandingMonuments, 1.0f);
+        addAttribute(building.player, kStatMonumentsBuilt, 1.0f);
+    }
+    if (unit.id == kUnitFortress) {
+        addAttribute(building.player, kStatStandingFortresses, 1.0f);
+        addAttribute(building.player, kStatFortressesBuilt, 1.0f);
+    }
+    if (unit.id == kUnitMonument || unit.id == kUnitFortress) {
+        addAttribute(building.player, kStatMonumentValue, value);
+    } else if (unit.stackUnitId < 0) {
+        addAttribute(building.player, kStatBuildingCostSum, value);
+        addAttribute(building.player, kStatBuildingValue, value);
+    }
+}
+
+void Game::creditTribute(int sender, int receiver, int resourceType, float received, float fee) {
+    (void)resourceType;
+    if (sender < 0 || receiver < 0 || sender > 16 || receiver > 16) return;
+    addAttribute(sender, kStatTributeSent, received);
+    addAttribute(sender, kStatTributePaid, fee); // attribute 175: the fees (0x5bb9a7)
+    if (receiver >= 1 && receiver <= 8)
+        addAttribute(sender, kStatTributeToPlayer + receiver - 1, received);
+    addAttribute(receiver, kStatTributeReceived, received);
+    if (sender >= 1 && sender <= 8)
+        addAttribute(receiver, kStatTributeFromPlayer + sender - 1, received);
+}
+
+// Spaceport trading (exe 0x5d6260 sell / 0x5d6370 buy): 100 units a lot
+// at the global price; the fee is player attribute 78 (0.3). Each lot moves
+// the price 0.02 (0x605020/0x605120 under the sim's FPU precision), clamped
+// 0.2..99.99; when the buy/sell balance returns to zero it snaps back to
+// the base price (food/carbon 1.0, ore 1.3).
+namespace {
+constexpr std::array<float, 3> kCommodityBasePrice{{1.0f, 1.0f, 1.3f}};
+constexpr float kCommodityLot = 100.0f;
+}
+
+bool Game::ownsMarket(int player) const {
+    for (const Object &object : prefetched(objects_))
+        if (object.active && object.player == player && object.unit &&
+            !object.underConstruction && (object.unit->id == 84 || object.unit->id == 530))
+            return true;
+    return false;
+}
+
+void Game::resetCommodityPrices() {
+    for (size_t i = 0; i < 3; ++i) {
+        commodityPrice_[i] = kCommodityBasePrice[i];
+        commodityCounter_[i] = 0;
+        commodityAccumulator_[i] = 0.0f;
+    }
+}
+
+void Game::moveCommodityPrice(int resourceType, bool up) {
+    const size_t i = (size_t)resourceType;
+    commodityCounter_[i] += up ? 1 : -1;
+    if (commodityCounter_[i] == 0) {
+        commodityAccumulator_[i] = 0.0f;
+        commodityPrice_[i] = kCommodityBasePrice[i];
+        return;
+    }
+    commodityAccumulator_[i] += 3.0f;
+    const float step = 0.02f;
+    commodityPrice_[i] = up ? std::min(99.99f, commodityPrice_[i] + step)
+                            : std::max(0.2f, commodityPrice_[i] - step);
+}
+
+int Game::commodityBuyPrice(int player, int resourceType) const {
+    if (resourceType < 0 || resourceType > 2) return 0;
+    const float x = kCommodityLot * commodityPrice_[(size_t)resourceType];
+    return (int)std::max(25.0f, x + x * playerAttribute(player, 78) + 0.5f);
+}
+
+int Game::commoditySellPrice(int player, int resourceType) const {
+    if (resourceType < 0 || resourceType > 2) return 0;
+    const float x = kCommodityLot * commodityPrice_[(size_t)resourceType];
+    return (int)(x - x * playerAttribute(player, 78) + 0.5f);
+}
+
+bool Game::sellCommodity(int player, int resourceType, int lots) {
+    if (player <= 0 || (size_t)player >= resources_.size() || resourceType < 0 ||
+        resourceType > 2)
+        return false;
+    bool sold = false;
+    for (int lot = 0; lot < lots; ++lot) {
+        if (resource(player, resourceType) < kCommodityLot) break;
+        const int gain = commoditySellPrice(player, resourceType);
+        moveCommodityPrice(resourceType, false);
+        resources_[(size_t)player][3] += (float)gain;
+        resources_[(size_t)player][resourceType] -= kCommodityLot;
+        sold = true;
+    }
+    return sold;
+}
+
+bool Game::buyCommodity(int player, int resourceType, int lots) {
+    if (player <= 0 || (size_t)player >= resources_.size() || resourceType < 0 ||
+        resourceType > 2)
+        return false;
+    bool bought = false;
+    for (int lot = 0; lot < lots; ++lot) {
+        const int cost = commodityBuyPrice(player, resourceType);
+        if ((float)cost > resource(player, 3)) break;
+        resources_[(size_t)player][3] -= (float)cost;
+        moveCommodityPrice(resourceType, true);
+        resources_[(size_t)player][resourceType] += kCommodityLot;
+        bought = true;
+    }
+    return bought;
+}
+
+// Tribute (exe 0x5bb890): the fee (attribute 46, 0.3) is paid on top; if
+// the stock is short, the fee comes out of what is there.
+float Game::payTribute(int from, int to, int resourceType, float amount, float feeFactor) {
+    if (from <= 0 || to <= 0 || from == to || (size_t)from >= resources_.size() ||
+        (size_t)to >= resources_.size() || resourceType < 0 || resourceType > 3)
+        return 0.0f;
+    float sent = std::max(0.0f, amount);
+    float fee = sent > 0.0f ? feeFactor * sent : 0.0f;
+    const float have = std::max(0.0f, resource(from, resourceType));
+    if (sent + fee > have) {
+        fee = have * feeFactor;
+        sent = have - fee;
+    }
+    if (sent <= 0.0f) return 0.0f;
+    resources_[(size_t)to][resourceType] += sent;
+    resources_[(size_t)from][resourceType] -= sent + fee;
+    creditTribute(from, to, resourceType, sent, fee);
+    if (to == localPlayer_ || from == localPlayer_) {
+        static constexpr const char *names[4] = {"FOOD", "CARBON", "ORE", "NOVA"};
+        statusMessage_ = playerDisplayName(from) + " PAID " + std::to_string((int)sent) + " " +
+                         names[resourceType] + " IN TRIBUTE TO " + playerDisplayName(to);
+        statusTime_ = 4.0f;
+    }
+    return sent;
+}
+
+// Stance change (game command 0x67 sub 0, exe 0x5bb30e): one-sided; 0 ally,
+// 1 neutral, 3 enemy. The other player is told.
+void Game::setStance(int from, int to, int stance) {
+    if (from <= 0 || (size_t)from > players_.size() || to <= 0 || to >= 17 ||
+        from == to || (stance != 0 && stance != 1 && stance != 3))
+        return;
+    uint32_t &current = players_[(size_t)from - 1].diplomacy[(size_t)to];
+    if (current == (uint32_t)stance) return;
+    current = (uint32_t)stance;
+    static constexpr int toYou[4] = {3026, 3025, 0, 3027};
+    static constexpr int byYou[4] = {3111, 3110, 0, 3112};
+    static constexpr const char *fallbackTo[4] = {"%s switched to be your Ally.",
+                                                   "%s switched to be Neutral with you.", "",
+                                                   "%s switched to be your Enemy."};
+    static constexpr const char *fallbackBy[4] = {
+        "You changed diplomatic stance with %s to Ally.",
+        "You changed diplomatic stance with %s to Neutral.", "",
+        "You changed diplomatic stance with %s to Enemy."};
+    const auto format = [&](int id, const char *fallback, int named) {
+        std::string text = assets_.localizedString(id);
+        if (text.empty()) text = fallback;
+        const size_t at = text.find("%s");
+        if (at != std::string::npos) text.replace(at, 2, playerDisplayName(named));
+        return text;
+    };
+    if (to == localPlayer_) {
+        statusMessage_ = format(toYou[stance], fallbackTo[stance], from);
+        statusTime_ = 5.0f;
+    } else if (from == localPlayer_) {
+        statusMessage_ = format(byYou[stance], fallbackBy[stance], to);
+        statusTime_ = 5.0f;
+    }
+}
+
+void Game::setAlliedVictory(int player, bool enabled) {
+    if (player <= 0 || (size_t)player > players_.size()) return;
+    players_[(size_t)player - 1].alliedVictory = enabled;
+}
+
+void Game::updatePeakAttributes() {
+    // Once a game second is plenty for peaks, tech level times and the
+    // per-minute timeline.
+    const int second = (int)simulationTime_;
+    if (second == lastPeakSecond_) return;
+    lastPeakSecond_ = second;
+    const int minute = second / 60;
+    for (int player = 1; player <= (int)players_.size() && (size_t)player < resources_.size();
+         ++player) {
+        for (int attribute : {kStatCivilianPopulation, kStatMilitaryPopulation}) {
+            const float value = resource(player, attribute);
+            float &peak = resources_[(size_t)player][kPeakAttributeBase + attribute];
+            peak = std::max(peak, value);
+        }
+        // Tech levels 2-4 are technologies 1-3.
+        for (int level = 2; level <= 4; ++level)
+            if ((size_t)player < researchedTechs_.size() &&
+                researchedTechs_[(size_t)player].count(level - 1) &&
+                !resources_[(size_t)player].count(kTechLevelTimeBase + level))
+                resources_[(size_t)player][kTechLevelTimeBase + level] = simulationTime_;
+        if (minute > 0 && minute < 100000 &&
+            !resources_[(size_t)player].count(kTimelineBase + minute - 1))
+            resources_[(size_t)player][kTimelineBase + minute - 1] =
+                (float)playerScoreBreakdown(player).total;
+    }
+}
+
+float Game::techLevelTime(int player, int level) const {
+    if (player <= 0 || (size_t)player >= resources_.size() || level < 2 || level > 4)
+        return -1.0f;
+    const auto found = resources_[(size_t)player].find(kTechLevelTimeBase + level);
+    return found == resources_[(size_t)player].end() ? -1.0f : found->second;
+}
+
+int Game::researchPercent(int player) const {
+    if (player <= 0 || (size_t)player >= researchedTechs_.size()) return 0;
+    const int civilization = civilizationForPlayer(player);
+    int available = 0, researched = 0;
+    const auto &techs = assets_.dat().techs;
+    for (size_t id = 0; id < techs.size(); ++id) {
+        const dat::Tech &tech = techs[id];
+        if (tech.buttonId == 0 || tech.locationId < 0 ||
+            (tech.civ >= 0 && tech.civ != civilization) ||
+            ((size_t)player < disabledTechs_.size() &&
+             disabledTechs_[(size_t)player].count((int)id)))
+            continue;
+        available++;
+        if (researchedTechs_[(size_t)player].count((int)id)) researched++;
+    }
+    return available ? researched * 100 / available : 0;
+}
+
+std::vector<int> Game::scoreTimeline(int player) const {
+    std::vector<int> samples;
+    if (player <= 0 || (size_t)player >= resources_.size()) return samples;
+    const auto &bank = resources_[(size_t)player];
+    for (auto it = bank.lower_bound(kTimelineBase);
+         it != bank.end() && it->first < kTimelineBase + 100000; ++it) {
+        const size_t minute = (size_t)(it->first - kTimelineBase);
+        if (samples.size() <= minute) samples.resize(minute + 1, 0);
+        samples[minute] = (int)it->second;
+    }
+    samples.push_back(playerScoreBreakdown(player).total);
+    return samples;
+}
+
+// Chat (the original's chat lines, top left in the sender's colour). A
+// leading number is a taunt: recipients hear it (local) or can detect it
+// (computer players, taunt-detected).
+void Game::sendChat(int from, const std::vector<int> &recipients, const std::string &text) {
+    size_t digits = 0;
+    while (digits < text.size() && std::isdigit((unsigned char)text[digits])) digits++;
+    int taunt = 0;
+    std::string message = text;
+    if (digits > 0 && digits <= 3 && (digits == text.size() || text[digits] == ' ')) {
+        taunt = std::atoi(text.substr(0, digits).c_str());
+        message = digits < text.size() ? text.substr(digits + 1) : std::string();
+    }
+    bool localHears = from == localPlayer_;
+    for (int recipient : recipients) {
+        if (recipient == localPlayer_) localHears = true;
+        if (taunt > 0 && recipient > 0 && (size_t)recipient < aiPlayers_.size() &&
+            aiPlayers_[(size_t)recipient].loaded)
+            aiPlayers_[(size_t)recipient].taunts.insert({from, taunt});
+    }
+    if (!localHears) return;
+    if (taunt > 0 && playTaunt_) playTaunt_(taunt);
+    ChatLine line;
+    line.player = from;
+    line.text = playerDisplayName(from) + ": " + (message.empty() ? std::to_string(taunt) : message);
+    chatLines_.push_back(std::move(line));
+    while (chatLines_.size() > 6) chatLines_.pop_front();
+    log("chat: " + chatLines_.back().text);
+}
+
+DiplomacyData Game::diplomacyData() const {
+    DiplomacyData data;
+    if (localPlayer_ <= 0 || (size_t)localPlayer_ > players_.size()) return data;
+    const auto &colours = assets_.dat().playerColours;
+    for (int player = 1; player <= (int)players_.size() && player <= 8; ++player) {
+        const ScenarioPlayer &slot = players_[(size_t)player - 1];
+        const bool tookPart = slot.active || player == localPlayer_ ||
+                              peakAttribute(player, kStatCivilianPopulation) > 0.0f ||
+                              peakAttribute(player, kStatMilitaryPopulation) > 0.0f ||
+                              resource(player, kStatUnitsLost) > 0.0f ||
+                              resource(player, kStatBuildingsLost) > 0.0f;
+        if (!tookPart) continue;
+        DiplomacyRow row;
+        row.player = player;
+        row.name = playerDisplayName(player);
+        // Civilization names are strings 10230 + civilization.
+        const int civilization = civilizationForPlayer(player);
+        row.civilization = assets_.localizedString(10230 + civilization);
+        row.techLevel = aiTechLevel(player);
+        row.local = player == localPlayer_;
+        row.defeated = !slot.active;
+        row.theirStance = (int)slot.diplomacy[(size_t)localPlayer_];
+        row.ourStance = (int)players_[(size_t)localPlayer_ - 1].diplomacy[(size_t)player];
+        const size_t colour = std::min<size_t>(slot.color, 7);
+        if (colour < colours.size()) {
+            const Rgba &rgb =
+                assets_.palette()[(uint8_t)std::clamp(colours[colour].minimapColor, 0, 255)];
+            row.red = rgb.r;
+            row.green = rgb.g;
+            row.blue = rgb.b;
+        }
+        data.rows.push_back(std::move(row));
+    }
+    for (int type = 0; type < 4; ++type) data.stock[(size_t)type] = (int)resource(localPlayer_, type);
+    data.fee = std::max(0.0f, playerAttribute(localPlayer_, 46));
+    data.hasMarket = ownsMarket(localPlayer_);
+    data.lockTeams = teamsLocked_;
+    data.alliedVictory = players_[(size_t)localPlayer_ - 1].alliedVictory;
+    return data;
+}
+
+std::vector<AchievementsPlayer> Game::achievementsPlayers() const {
+    std::vector<AchievementsPlayer> rows;
+    const auto &colours = assets_.dat().playerColours;
+    const auto number = [](float value) { return std::to_string((int)std::floor(value)); };
+    const auto clock = [](float seconds) {
+        if (seconds < 0.0f) return std::string("-");
+        const int total = (int)seconds;
+        char text[16];
+        snprintf(text, sizeof text, "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60);
+        return std::string(text);
+    };
+    for (int player = 1; player <= (int)players_.size() && player <= 8; ++player) {
+        const ScenarioPlayer &slot = players_[(size_t)player - 1];
+        // Players eliminated during the game stay listed: they had units or
+        // lost some.
+        const bool tookPart = slot.active ||
+                              peakAttribute(player, kStatCivilianPopulation) > 0.0f ||
+                              peakAttribute(player, kStatMilitaryPopulation) > 0.0f ||
+                              resource(player, kStatUnitsLost) > 0.0f ||
+                              resource(player, kStatBuildingsLost) > 0.0f;
+        if (!tookPart) continue;
+        AchievementsPlayer row;
+        row.player = player;
+        row.name = playerDisplayName(player);
+        row.color = (int)std::min<uint32_t>(slot.color, 7);
+        if ((size_t)row.color < colours.size()) {
+            const int index = colours[(size_t)row.color].minimapColor;
+            const Rgba &rgb = assets_.palette()[(uint8_t)std::clamp(index, 0, 255)];
+            row.red = rgb.r;
+            row.green = rgb.g;
+            row.blue = rgb.b;
+        }
+        row.active = slot.active;
+        const ScoreBreakdown score = playerScoreBreakdown(player);
+        row.total = score.total;
+        row.cells[0] = {std::to_string(score.military), std::to_string(score.economy),
+                        std::to_string(score.technology), std::to_string(score.society), "", ""};
+        row.cells[1] = {number(resource(player, kStatKills)),
+                        number(resource(player, kStatUnitsLost)),
+                        number(resource(player, kStatRazings)),
+                        number(resource(player, kStatBuildingsLost)),
+                        number(resource(player, kStatConversions)),
+                        number(peakAttribute(player, kStatMilitaryPopulation))};
+        row.cells[2] = {number(resource(player, kStatGathered + 0)),
+                        number(resource(player, kStatGathered + 1)),
+                        number(resource(player, kStatGathered + 2)),
+                        number(resource(player, kStatGathered + 3)),
+                        number(resource(player, 101)),
+                        number(resource(player, kStatTributeSent)) + " / " +
+                            number(resource(player, kStatTributeReceived))};
+        row.cells[3] = {clock(techLevelTime(player, 2)), clock(techLevelTime(player, 3)),
+                        clock(techLevelTime(player, 4)),
+                        number(resource(player, kStatExplored)) + "%",
+                        number(resource(player, kStatResearchCount)),
+                        std::to_string(researchPercent(player)) + "%"};
+        row.cells[4] = {number(resource(player, kStatMonumentsBuilt)),
+                        number(resource(player, kStatFortressesBuilt)),
+                        number(resource(player, kStatHolocrons)),
+                        number(resource(player, 100)),
+                        number(peakAttribute(player, kStatCivilianPopulation)),
+                        slot.active ? "Yes" : "No"};
+        row.timeline = scoreTimeline(player);
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+float Game::peakAttribute(int player, int attribute) const {
+    return std::max(resource(player, attribute), resource(player, kPeakAttributeBase + attribute));
+}
+
+// Score elements with points (the rest only feed the achievements screen):
+// type 0 adds max(0, int(value) / step) * points, type 7 does the same with
+// the difference of two attributes (FUN_00608b70).
+Game::ScoreBreakdown Game::playerScoreBreakdown(int player) const {
+    ScoreBreakdown score;
+    if (player <= 0 || (size_t)player > players_.size()) return score;
+    const auto steps = [&](int attribute, int step) {
+        const int value = (int)resource(player, attribute) / step;
+        return std::max(0, value);
+    };
+    score.military = steps(kStatValueKilled, 5);
+    score.economy = steps(0, 10) + steps(1, 10) + steps(2, 10) + steps(3, 10) +
+                    steps(kStatBuildingCostSum, 5) +
+                    std::max(0, ((int)resource(player, kStatTributePaid) -
+                                 (int)resource(player, kStatTributeReceived)) / 10);
+    score.technology = steps(kStatTechCostSum, 5) + (int)resource(player, kStatExplored) * 10;
+    score.society = steps(kStatMonumentValue, 5);
+    score.total = score.military + score.economy + score.technology + score.society;
+    return score;
 }
 
 bool Game::researchTechnology(int player, int technologyId) {
@@ -4661,93 +5219,107 @@ const dat::Task *Game::conversionTask(
     return firstUnitTask(converter.unit->id, 104);
 }
 
+// Faith (obj+0x54 in the exe) is stored as its deficit in
+// conversionRecharge: 0 = full (100). A conversion needs full faith to start
+// and empties it; class 50 Jedi regain player attribute 35 per second.
 float Game::conversionChargeFraction(
     const Object &converter) const {
-    const dat::Task *task =
-        conversionTask(converter);
-    if (!task)
+    if (!conversionTask(converter))
         return 0.0f;
-    const float duration =
-        std::max(
-            0.1f, task->workValue2);
-    return std::max(
-        0.0f,
-        std::min(
-            1.0f,
-            1.0f -
-                converter
-                        .conversionRecharge /
-                    duration));
+    return std::clamp(1.0f - converter.conversionRecharge / 100.0f, 0.0f, 1.0f);
 }
 
+namespace {
+// Padawans never convert (exe vfunc 0x30 list); Masters (vfunc 0x34) alone
+// convert Jedi, buildings, mechs and ships.
+bool isPadawanUnit(const dat::Unit &unit) {
+    static constexpr int ids[] = {180, 183, 232, 204, 52, 239, 647, 652, 1075, 1076, 800, 814, 824};
+    for (int id : ids)
+        if (unit.id == id || unit.baseId == id) return true;
+    return false;
+}
+bool isJediMasterUnit(const dat::Unit &unit) {
+    static constexpr int ids[] = {115, 125, 136, 134, 89,  140, 643, 645, 1077, 1085, 1082,
+                                  1084, 1080, 725, 728, 731, 747, 753, 761, 770, 778, 784,
+                                  806, 792};
+    for (int id : ids)
+        if (unit.id == id || unit.baseId == id) return true;
+    return false;
+}
+bool conversionBuildingClass(int cls) { return cls == 18 || cls == 9 || cls == 10; }
+} // namespace
+
+// Conversion range: player attribute 5; buildings need adjacency (0.5) unless
+// attribute 28 is set (exe 0x567dc0).
+float Game::conversionRange(const Object &converter, const Object &target) const {
+    float range = playerAttribute(converter.player, 5);
+    if (target.unit && conversionBuildingClass(target.unit->cls) &&
+        playerAttribute(converter.player, 28) <= 0.0f)
+        range = 0.5f;
+    return std::max(0.5f, range);
+}
+
+// Start checks of the convert action (exe 0x567dc0). requireFaith: a new
+// conversion needs full faith; one in progress does not re-check it.
 bool Game::canConvert(
     const Object &converter,
-    const Object &target) const {
+    const Object &target, bool requireFaith) const {
     const dat::Task *task =
         conversionTask(converter);
     if (!task || !converter.active ||
         converter.hidden ||
         converter.garrisonedInId >= 0 ||
         converter.underConstruction ||
-        converter.player <= 0 ||
-        converter.conversionRecharge > 0.0f ||
+        converter.player <= 0 || !converter.unit ||
+        isPadawanUnit(*converter.unit) || converter.unit->cls == 51 ||
+        (requireFaith && converter.conversionRecharge > 0.0f) ||
+        playerAttribute(converter.player, 67) <= 0.0f ||
         !target.active || target.hidden ||
         target.garrisonedInId >= 0 ||
         target.underConstruction ||
         target.player <= 0 ||
         !target.unit ||
-        target.unit->type <
-            dat::UT_Combatant ||
         target.unit->heroMode != 0 ||
         !isEnemy(converter, target) ||
         !objectCurrentlyVisibleToPlayer(
-            target, converter.player) ||
-        isTemple(target) ||
-        isHolocron(target))
+            target, converter.player))
         return false;
-
-    const bool targetForceUser =
-        conversionTask(target) != nullptr ||
-        target.unit->cls == 50 ||
-        target.unit->cls == 51;
-    if (targetForceUser &&
-        playerAttribute(
-            converter.player, 27) <= 0.0f)
-        return false;
-
     const int cls = target.unit->cls;
-    const bool heavy =
-        target.unit->type ==
-            dat::UT_Building ||
-        (cls >= 11 && cls <= 17) ||
-        cls == 43 || cls == 48 ||
-        cls == 53 || cls == 59 ||
-        cls == 62 || cls == 63 ||
-        cls == 64;
-    return !heavy ||
-           playerAttribute(
-               converter.player, 87) > 0.0f;
+    const int id = target.unit->id;
+    static constexpr int immuneClasses[] = {1, 2, 3, 4, 5, 44, 46, 51, 60, 62, 6, 8, 26};
+    for (int immune : immuneClasses)
+        if (cls == immune) return false;
+    static constexpr int immuneIds[] = {4, 977, 109, 276, 82, 104, 24, 199, 50};
+    for (int immune : immuneIds)
+        if (id == immune) return false;
+    if (cls == 50 || cls == 64) {
+        if (!isJediMasterUnit(*converter.unit) || playerAttribute(converter.player, 27) <= 0.0f)
+            return false;
+    }
+    const bool heavy = (cls >= 9 && cls <= 18) || (cls >= 32 && cls <= 40) || cls == 43 ||
+                       cls == 45 || cls == 48 || cls == 53 || cls == 57 || cls == 59 || cls == 63;
+    if (heavy && (!isJediMasterUnit(*converter.unit) ||
+                  playerAttribute(converter.player, 87) <= 0.0f))
+        return false;
+    return true;
 }
 
 bool Game::issueConversion(
     Object &converter, Object &target) {
-    const dat::Task *task =
-        conversionTask(converter);
-    if (!task ||
-        !canConvert(converter, target))
+    if (!canConvert(converter, target, true))
         return false;
     stopUnit(converter);
     converter.conversionTargetId =
         target.spawnId;
-    converter.conversionProgress = 0.0f;
+    converter.conversionProgress = -1.0f; // channelling not started
+    converter.conversionCountdown = -1.0f;
     converter.homeX = converter.x;
     converter.homeY = converter.y;
     converter.facing =
         std::atan2(
             target.y - converter.y,
             target.x - converter.x);
-    const float range =
-        std::max(0.5f, task->workRange);
+    const float range = conversionRange(converter, target);
     const float dx = target.x - converter.x;
     const float dy = target.y - converter.y;
     if (dx * dx + dy * dy >
@@ -4758,6 +5330,12 @@ bool Game::issueConversion(
     return true;
 }
 
+// Channelling (exe 0x5688df): every reload time the Jedi rolls
+// rand()*100/32767, scaled by the target's resistance (x3 mech/ship or
+// building kinds, +8 for class 47, + attribute 77), against its accuracy
+// (buildings: attribute 182). Before work value 1 (buildings: attribute 180)
+// it cannot succeed; from work value 2 (attribute 181) it always does. A
+// failed roll waits another reload time; the elapsed time carries on.
 void Game::updateConversion(float dt) {
     for (uint32_t converterIndex :
          converterObjectIndices_) {
@@ -4765,25 +5343,11 @@ void Game::updateConversion(float dt) {
             objects_[(size_t)converterIndex];
         const dat::Task *task =
             conversionTask(converter);
-        if (task &&
-            converter.conversionRecharge >
-                0.0f) {
-            const float rechargeMultiplier =
-                1.0f +
-                std::max(
-                    0.0f,
-                    playerAttribute(
-                        converter.player,
-                        35)) /
-                    6.0f;
-            converter.conversionRecharge =
-                std::max(
-                    0.0f,
-                    converter
-                            .conversionRecharge -
-                        dt *
-                            rechargeMultiplier);
-        }
+        if (task && converter.conversionRecharge > 0.0f && converter.unit &&
+            converter.unit->cls == 50)
+            converter.conversionRecharge = std::max(
+                0.0f, converter.conversionRecharge -
+                          dt * std::max(0.0f, playerAttribute(converter.player, 35)));
         if (!converter.active ||
             !converter.conversionTargetId)
             continue;
@@ -4791,7 +5355,7 @@ void Game::updateConversion(float dt) {
             findObject(
                 converter.conversionTargetId);
         if (!target ||
-            !canConvert(converter, *target)) {
+            !canConvert(converter, *target, false)) {
             converter.conversionTargetId = 0;
             converter.conversionProgress = 0.0f;
             if (converter.state ==
@@ -4800,8 +5364,7 @@ void Game::updateConversion(float dt) {
                     State::Idle;
             continue;
         }
-        const float range =
-            std::max(0.5f, task->workRange);
+        const float range = conversionRange(converter, *target);
         const float dx =
             target->x - converter.x;
         const float dy =
@@ -4816,7 +5379,16 @@ void Game::updateConversion(float dt) {
                     converter,
                     target->x, target->y,
                     target, range);
+            converter.conversionCountdown = -1.0f; // re-enters the channel
             continue;
+        }
+        const float reload = std::max(
+            0.1f, modifiedUnitAttribute(converter, 10, converter.unit->reloadTime));
+        if (converter.conversionCountdown < 0.0f || converter.conversionProgress < 0.0f) {
+            // Entering the channel (set_state 7): a reload time to the first
+            // roll; elapsed starts at 0 the first time.
+            converter.conversionCountdown = reload;
+            converter.conversionProgress = std::max(0.0f, converter.conversionProgress);
         }
         converter.path.clear();
         converter.pathIndex = 0;
@@ -4827,35 +5399,66 @@ void Game::updateConversion(float dt) {
                 target->y - converter.y,
                 target->x - converter.x);
         converter.animTime += dt;
-        const bool resistant =
-            playerAttribute(
-                target->player, 77) > 0.0f ||
-            playerAttribute(
-                target->player, 178) > 0.0f ||
-            playerAttribute(
-                target->player, 179) > 0.0f;
-        converter.conversionProgress +=
-            dt / (resistant ? 1.5f : 1.0f);
-        const float workTime =
-            std::max(
-                0.1f, task->workValue1);
-        if (converter.conversionProgress +
-                0.0001f <
-            workTime)
+        converter.conversionProgress += dt;
+        converter.conversionCountdown -= dt;
+        if (converter.conversionCountdown > 0.0f)
+            continue;
+        converter.conversionCountdown = reload;
+        int roll = (int)(rng_() & 0x7fffu) * 100 / 32767;
+        float multiplier = 0.0f;
+        const dat::Unit &victim = *target->unit;
+        if ((victim.trait & 2) || victim.interfaceKind == 2 || victim.interfaceKind == 10 ||
+            victim.interfaceKind == 11)
+            multiplier = 3.0f;
+        if (victim.cls == 47) multiplier += 8.0f;
+        multiplier += playerAttribute(target->player, 77);
+        if (multiplier > 0.0f) roll = (int)(roll * multiplier);
+        float minimum, maximum;
+        int chance;
+        if (conversionBuildingClass(victim.cls)) {
+            minimum = playerAttribute(converter.player, 180);
+            maximum = playerAttribute(converter.player, 181);
+            chance = (int)playerAttribute(converter.player, 182);
+        } else {
+            minimum = task->workValue1;
+            maximum = task->workValue2;
+            chance = (int)modifiedUnitAttribute(converter, 11,
+                                                (float)converter.unit->accuracyPercent);
+        }
+        minimum += playerAttribute(converter.player, 176) + playerAttribute(target->player, 178);
+        maximum += playerAttribute(converter.player, 177) + playerAttribute(target->player, 179);
+        if (converter.conversionProgress < minimum)
+            chance = -1000;
+        else if (converter.conversionProgress >= maximum)
+            chance = 1000;
+        if (roll > chance)
             continue;
 
+        // Success (0x568adb): the loser counts a unit lost and its building
+        // value drops; attribute 192 destroys the unit instead; the converter
+        // counts a conversion and the unit's value, and its faith empties.
         const uint32_t convertedId =
             target->spawnId;
         const int newPlayer =
             converter.player;
-        if (!transferOwnership(
-                *target, newPlayer))
+        const int previousOwner = target->player;
+        const float value = costValue(victim);
+        if (previousOwner > 0) {
+            addAttribute(previousOwner, 154, 1.0f);
+            float &buildingValue = resources_[(size_t)previousOwner][98];
+            buildingValue = std::max(0.0f, buildingValue - value);
+        }
+        if (playerAttribute(previousOwner, 192) != 0.0f) {
+            killObject(*target, false);
+        } else if (!transferOwnership(
+                       *target, newPlayer)) {
             continue;
+        }
+        addAttribute(newPlayer, 41, 1.0f);
+        addAttribute(newPlayer, 170, value);
         converter.conversionTargetId = 0;
         converter.conversionProgress = 0.0f;
-        converter.conversionRecharge =
-            std::max(
-                0.1f, task->workValue2);
+        converter.conversionRecharge = 100.0f;
         converter.state = State::Idle;
         for (Object &other : prefetched(objects_))
             if (other.conversionTargetId ==
@@ -4875,7 +5478,7 @@ void Game::updateConversion(float dt) {
         if (newPlayer == localPlayer_) {
             statusMessage_ =
                 unitDisplayName(
-                    *target->unit) +
+                    victim) +
                 " CONVERTED";
             statusTime_ = 3.0f;
         }
@@ -4951,6 +5554,131 @@ bool Game::issueHolocronOrder(
         carrier, target.x, target.y,
         &target, clearance);
     return true;
+}
+
+// Trade: a unit with a Trade task (action 111) for the market's unit trades
+// between its own nearest market and another player's (exe 0x5732db: the
+// income is added on arrival with goods).
+const dat::Task *Game::tradeTask(const Object &trader, const Object &market) const {
+    if (!trader.active || !market.active || !trader.unit || !market.unit ||
+        market.underConstruction || trader.player <= 0)
+        return nullptr;
+    const auto &headers = assets_.dat().unitHeaders;
+    if (trader.unit->id < 0 || (size_t)trader.unit->id >= headers.size()) return nullptr;
+    for (const dat::Task &task : headers[(size_t)trader.unit->id].tasks)
+        if (task.actionType == 111 &&
+            (task.unitId == market.unit->id || task.unitId == market.unit->baseId))
+            return &task;
+    return nullptr;
+}
+
+bool Game::issueTradeOrder(Object &trader, Object &market) {
+    if (!tradeTask(trader, market) || market.player == trader.player || market.player <= 0 ||
+        isEnemy(trader, market))
+        return false;
+    // Home: the trader's nearest own market of a type it trades with.
+    const Object *home = nullptr;
+    float best = std::numeric_limits<float>::max();
+    for (const Object &candidate : prefetched(objects_)) {
+        if (candidate.player != trader.player || !tradeTask(trader, candidate)) continue;
+        const float dx = candidate.x - trader.x, dy = candidate.y - trader.y;
+        if (dx * dx + dy * dy < best) {
+            best = dx * dx + dy * dy;
+            home = &candidate;
+        }
+    }
+    if (!home) return false;
+    const uint32_t homeId = home->spawnId;
+    stopUnit(trader);
+    trader.tradeMarketId = market.spawnId;
+    trader.tradeHomeId = homeId;
+    trader.tradeCarrying = false;
+    approach(trader, market, 0.5f);
+    return true;
+}
+
+bool Game::issueTradeOrderForTesting(uint32_t traderId, uint32_t marketId) {
+    Object *trader = findObject(traderId);
+    Object *market = findObject(marketId);
+    return trader && market && issueTradeOrder(*trader, *market);
+}
+
+// The original's trade profit (0x57334d): the markets' distance less both
+// footprints on each axis, at least 0.1, times (distance / map width + 0.3),
+// times twice the trader's work rate.
+float Game::tradeIncome(const Object &trader, const Object &home, const Object &market) const {
+    const float sizeX = 2.0f * home.unit->collisionSize[0] + 2.0f * market.unit->collisionSize[0];
+    const float sizeY = 2.0f * home.unit->collisionSize[1] + 2.0f * market.unit->collisionSize[1];
+    const float dx = std::max(0.0f, std::abs(home.x - market.x) - sizeX);
+    const float dy = std::max(0.0f, std::abs(home.y - market.y) - sizeY);
+    const float distance = std::max(0.1f, std::sqrt(dx * dx + dy * dy));
+    const float width = (float)std::max(1, mapSize_);
+    return distance * (distance / width + 0.3f) * trader.unit->workRate * 2.0f;
+}
+
+void Game::updateTrade() {
+    // Computer players running a script send idle traders to the nearest
+    // market of a player they are not at war with (checked once a second).
+    const int second = (int)simulationTime_;
+    if (second != lastTradeSecond_) {
+        lastTradeSecond_ = second;
+        for (Object &trader : prefetched(objects_)) {
+            if (!trader.active || trader.tradeMarketId || trader.state != State::Idle ||
+                trader.player <= 0 || (size_t)trader.player >= aiPlayers_.size() ||
+                !aiPlayers_[(size_t)trader.player].loaded ||
+                // A computer player without a script (one placeholder rule)
+                // leaves its traders where the scenario put them.
+                aiPlayers_[(size_t)trader.player].program.rules.size() <= 1 ||
+                trader.garrisonedInId >= 0 ||
+                !trader.unit || trader.unit->id < 0 ||
+                !firstUnitTask(trader.unit->id, 111))
+                continue;
+            Object *bestMarket = nullptr;
+            float best = std::numeric_limits<float>::max();
+            for (Object &market : prefetched(objects_)) {
+                if (market.player == trader.player || market.player <= 0 ||
+                    !tradeTask(trader, market) || isEnemy(trader, market))
+                    continue;
+                const float dx = market.x - trader.x, dy = market.y - trader.y;
+                if (dx * dx + dy * dy < best) {
+                    best = dx * dx + dy * dy;
+                    bestMarket = &market;
+                }
+            }
+            if (bestMarket) issueTradeOrder(trader, *bestMarket);
+        }
+    }
+    for (Object &trader : prefetched(objects_)) {
+        if (!trader.active || !trader.tradeMarketId) continue;
+        Object *market = findObject(trader.tradeMarketId);
+        Object *home = findObject(trader.tradeHomeId);
+        if (!market || !home || !tradeTask(trader, *market) || !tradeTask(trader, *home) ||
+            home->player != trader.player || market->player == trader.player ||
+            isEnemy(trader, *market)) {
+            trader.tradeMarketId = trader.tradeHomeId = 0;
+            trader.tradeCarrying = false;
+            continue;
+        }
+        Object &target = trader.tradeCarrying ? *home : *market;
+        if (!withinInteractionRange(trader, target, 0.5f)) {
+            approach(trader, target, 0.5f);
+            continue;
+        }
+        if (trader.tradeCarrying) {
+            // Profit in nova (resource 3), counted as gathered and as trade
+            // income (attribute 101).
+            const float income = tradeIncome(trader, *home, *market);
+            auto &bank = resources_[(size_t)trader.player];
+            bank[3] += income;
+            bank[kStatGathered + 3] += income;
+            bank[101] += income;
+            trader.tradeCarrying = false;
+            approach(trader, *market, 0.5f);
+        } else {
+            trader.tradeCarrying = true;
+            approach(trader, *home, 0.5f);
+        }
+    }
 }
 
 void Game::dropHolocron(Object &carrier) {
@@ -5185,14 +5913,19 @@ void Game::updateHolocrons(float dt) {
             temple->player !=
                 holocron.player)
             continue;
-        resources_[
-            (size_t)holocron.player][3] +=
+        const float income =
             std::max(
                 0.0f,
                 playerAttribute(
                     holocron.player,
                     191)) *
             dt / 60.0f;
+        // Holocron income counts as gathered nova and as holocron income
+        // (attribute 100, exe 0x555411).
+        auto &bank = resources_[(size_t)holocron.player];
+        bank[3] += income;
+        bank[kStatGathered + 3] += income;
+        bank[100] += income;
     }
 
     for (size_t player = 1;
@@ -6932,6 +7665,13 @@ std::vector<Game::BuildingCommand> Game::buildingCommands(const Object &building
         commands.push_back(BuildingCommand::SetGatherPoint);
         if (building.rallyActive) commands.push_back(BuildingCommand::RemoveGatherPoint);
     }
+    // A finished own Spaceport (84, or the Tatooine one 530) trades.
+    if (building.player == localPlayer_ && !building.underConstruction &&
+        (building.unit->id == 84 || building.unit->id == 530))
+        for (BuildingCommand trade :
+             {BuildingCommand::SellCarbon, BuildingCommand::SellFood, BuildingCommand::SellOre,
+              BuildingCommand::BuyCarbon, BuildingCommand::BuyFood, BuildingCommand::BuyOre})
+            commands.push_back(trade);
     return commands;
 }
 
@@ -7057,6 +7797,9 @@ void Game::clearUnitCommandOrder(
     unit.conversionTargetId = 0;
     unit.conversionProgress = 0.0f;
     unit.holocronTargetId = 0;
+    unit.tradeMarketId = 0;
+    unit.tradeHomeId = 0;
+    unit.tradeCarrying = false;
 }
 
 void Game::stopUnit(Object &unit) {
@@ -7295,13 +8038,35 @@ void Game::updateUnitCommandOrder(
     }
 }
 
+namespace {
+// Trade commands: resource type (0 food, 1 carbon, 2 ore), buy, string id.
+struct TradeCommandInfo {
+    int resource;
+    bool buy;
+    int stringId;
+    int icon;
+};
+bool tradeCommandInfo(int command, TradeCommandInfo &info) {
+    // Order of BuildingCommand after RemoveGatherPoint.
+    static constexpr TradeCommandInfo table[6] = {
+        {1, false, 41072, 18}, {0, false, 41073, 19}, {2, false, 41074, 21},
+        {1, true, 41076, 18},  {0, true, 41077, 19},  {2, true, 41078, 21}};
+    const int index = command - 4;
+    if (index < 0 || index >= 6) return false;
+    info = table[index];
+    return true;
+}
+} // namespace
+
 int Game::buildingCommandIcon(const Object &building, BuildingCommand command) const {
+    if (TradeCommandInfo trade; tradeCommandInfo((int)command, trade)) return trade.icon;
     switch (command) {
     case BuildingCommand::ToggleGate:
         return building.locked ? (int)kCommandUnlockGateIcon : (int)kCommandLockGateIcon;
     case BuildingCommand::SetGatherPoint: return 45;
     case BuildingCommand::RemoveGatherPoint: return 46;
     case BuildingCommand::Eject: break;
+    default: break;
     }
     return (int)kCommandEjectIcon;
 }
@@ -7311,12 +8076,25 @@ std::string Game::buildingCommandTitle(const Object &building, BuildingCommand c
         const std::string &value = assets_.localizedString(id);
         return value.empty() ? std::string(fallback) : value;
     };
+    if (TradeCommandInfo trade; tradeCommandInfo((int)command, trade)) {
+        std::string title = assets_.localizedString(trade.stringId);
+        if (title.empty()) title = trade.buy ? "Buy 100 for %d nova" : "Sell 100 for %d nova";
+        title = title.substr(0, title.find('\n'));
+        for (size_t at; (at = title.find("<b>")) != std::string::npos;) title.erase(at, 3);
+        while (!title.empty() && title.back() == ' ') title.pop_back();
+        const int price = trade.buy ? commodityBuyPrice(localPlayer_, trade.resource)
+                                    : commoditySellPrice(localPlayer_, trade.resource);
+        if (const size_t at = title.find("%d"); at != std::string::npos)
+            title.replace(at, 2, std::to_string(price));
+        return title;
+    }
     switch (command) {
     case BuildingCommand::ToggleGate:
         return building.locked ? "Unlock Gate" : "Lock Gate";
     case BuildingCommand::SetGatherPoint: return text(4144, "Set Gather Point");
     case BuildingCommand::RemoveGatherPoint: return text(4149, "Remove Gather Point");
     case BuildingCommand::Eject: break;
+    default: break;
     }
     return "Eject All";
 }
@@ -7328,6 +8106,8 @@ std::string Game::buildingCommandHelp(const Object &building, BuildingCommand co
         const size_t split = value.find('\n');
         return split == std::string::npos ? value : value.substr(split + 1);
     };
+    if (TradeCommandInfo trade; tradeCommandInfo((int)command, trade))
+        return help(trade.stringId, "The price may change with each click.");
     switch (command) {
     case BuildingCommand::ToggleGate:
         return help(building.locked ? 41105 : 41104,
@@ -7337,11 +8117,22 @@ std::string Game::buildingCommandHelp(const Object &building, BuildingCommand co
     case BuildingCommand::RemoveGatherPoint:
         return help(4949, "Removes the gather point.");
     case BuildingCommand::Eject: break;
+    default: break;
     }
     return "Ejects every garrisoned unit from this building.";
 }
 
 void Game::executeBuildingCommand(Object &building, BuildingCommand command) {
+    if (TradeCommandInfo trade; tradeCommandInfo((int)command, trade)) {
+        const bool done = trade.buy ? buyCommodity(building.player, trade.resource, 1)
+                                    : sellCommodity(building.player, trade.resource, 1);
+        if (!done) {
+            statusMessage_ = trade.buy ? "NOT ENOUGH NOVA" : "NOT ENOUGH TO SELL";
+            statusTime_ = 2.0f;
+            playInterfaceFeedback(kInterfaceCannotDoSound);
+        }
+        return;
+    }
     switch (command) {
     case BuildingCommand::ToggleGate:
         setGateLocked(building, !building.locked);
@@ -7369,6 +8160,7 @@ void Game::executeBuildingCommand(Object &building, BuildingCommand command) {
         statusTime_ = 3.0f;
         break;
     }
+    default: break;
     }
 }
 
@@ -8682,6 +9474,7 @@ bool Game::depositAt(Object &worker, const Object &building) {
                 }
             }
             bank[type] += amount - escrow;
+            bank[kStatGathered + type] += amount;
         };
     if (worker.carriedAmount > 0.001f &&
         siteAcceptsType(worker, building, worker.carriedResourceType)) {
@@ -10912,6 +11705,7 @@ void Game::updateConstruction(float dt) {
                 configureGate(building);
             }
         building.hitPoints = building.maxHitPoints;
+        creditBuildingCompleted(building);
         if (isFarmUnit(*building.unit))
             syncFarmTerrain(building);
         // Building set_state 0 -> 2 (0x554710) plays master+0x1c8, the
@@ -11006,6 +11800,21 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
                 *acknowledgement, false);
             flashCommandTarget(
                 *specialTarget);
+            return;
+        }
+    }
+
+    // Right-click on another player's market sends traders to trade there.
+    if (specialTarget && specialTarget->player != localPlayer_) {
+        Object *acknowledgement = nullptr;
+        for (Object *object : selected)
+            if (issueTradeOrder(*object, *specialTarget) && !acknowledgement)
+                acknowledgement = object;
+        if (acknowledgement) {
+            playUnitAcknowledgement(*acknowledgement, false);
+            flashCommandTarget(*specialTarget);
+            statusMessage_ = "TRADING WITH " + playerDisplayName(specialTarget->player);
+            statusTime_ = 2.0f;
             return;
         }
     }
@@ -11484,6 +12293,23 @@ void Game::eliminatePlayer(
     }
 }
 
+// What keeps a player alive (exe 0x5cea70): completed objects that are not
+// walls, farms, gates, turrets, trawlers, transports, flags, cargo traders,
+// shelters, research/war centres, shield generators, sentry posts or
+// processing centres; cannons count even packed.
+bool Game::conquestCounts(const Object &object) const {
+    const int cls = object.unit->cls;
+    if (cls == 34 || cls == 36) return true;
+    static constexpr int exemptClasses[] = {1,  6,  7,  8,  9,  10, 12, 14, 17,
+                                            19, 20, 21, 26, 28, 42, 45, 59};
+    for (int exempt : exemptClasses)
+        if (cls == exempt) return false;
+    static constexpr int exemptIds[] = {70, 1001, 103, 209, 335, 12, 931, 598, 584, 323, 68, 562};
+    for (int exempt : exemptIds)
+        if (object.unit->id == exempt) return false;
+    return !object.underConstruction;
+}
+
 void Game::updateConquest(float dt) {
     if (!conquestEnabled_ ||
         localPlayer_ <= 0 ||
@@ -11494,7 +12320,7 @@ void Game::updateConquest(float dt) {
     conquestCheckTime_ -= dt;
     if (conquestCheckTime_ > 0.0f)
         return;
-    conquestCheckTime_ = 0.5f;
+    conquestCheckTime_ = 1.0f; // once a game second (0x5cea70)
 
     std::array<bool, 17> hasAssets{};
     std::array<int, 17> commandCenters{};
@@ -11526,7 +12352,8 @@ void Game::updateConquest(float dt) {
                         "BLDG-MAIN", 0) == 0)
                     hasAssets[playerIndex] = true;
             } else if (object.unit->type >=
-                       dat::UT_Combatant) {
+                           dat::UT_Combatant &&
+                       conquestCounts(object)) {
                 hasAssets[playerIndex] = true;
             }
         }
@@ -11663,45 +12490,7 @@ bool Game::playersShareVictory(
 }
 
 int Game::playerScore(int player) const {
-    if (player <= 0 ||
-        (size_t)player > players_.size())
-        return 0;
-    float score = 0.0f;
-    for (const auto &resource :
-         resources_[(size_t)player])
-        if (resource.first >= 0 &&
-            resource.first <= 3)
-            score +=
-                std::max(0.0f, resource.second);
-    score +=
-        researchedTechs_[(size_t)player]
-            .size() *
-        25.0f;
-    for (const Object &object : prefetched(objects_)) {
-        if (!object.active ||
-            object.player != player ||
-            !object.unit ||
-            object.annexParentId ||
-            isHolocron(object))
-            continue;
-        float value = 0.0f;
-        for (const dat::ResourceCost &cost :
-             object.unit->costs)
-            if (cost.flag && cost.type >= 0 &&
-                cost.type <= 3)
-                value +=
-                    std::max(
-                        0, (int)cost.amount);
-        const float health =
-            object.maxHitPoints > 0.0f
-                ? std::clamp(
-                      object.hitPoints /
-                          object.maxHitPoints,
-                      0.0f, 1.0f)
-                : 0.0f;
-        score += value * health;
-    }
-    return (int)std::lround(score);
+    return playerScoreBreakdown(player).total;
 }
 
 void Game::updateVictoryConditions(float dt) {
@@ -11710,6 +12499,19 @@ void Game::updateVictoryConditions(float dt) {
         victoryState_ >= 0)
         return;
 
+    // Time limit and score (exe 0x6032a7 / 0x6080a0): a player's score is
+    // the average over it and its mutual allies with Allied Victory (integer
+    // division); time limit: the highest average wins, ties to the lowest
+    // player number; score: the first average reaching the target.
+    const auto averageScore = [&](int player) {
+        int sum = 0, count = 0;
+        for (int member = 1; member <= (int)players_.size(); ++member)
+            if (playersShareVictory(player, member)) {
+                sum += playerScore(member);
+                count++;
+            }
+        return count ? sum / count : playerScore(player);
+    };
     if (victoryCondition_ ==
         SkirmishVictory::TimeLimit) {
         if (simulationTime_ <
@@ -11721,25 +12523,10 @@ void Game::updateVictoryConditions(float dt) {
              player <=
                  (int)players_.size();
              ++player) {
-            if (!players_[
-                     (size_t)player - 1]
-                     .active)
-                continue;
-            int teamScore = 0;
-            for (int member = 1;
-                 member <=
-                     (int)players_.size();
-                 ++member)
-                if (playersShareVictory(
-                        player, member))
-                    teamScore +=
-                        playerScore(member);
-            if (teamScore > winnerScore ||
-                (teamScore == winnerScore &&
-                 (winner < 0 ||
-                  player < winner))) {
+            const int average = averageScore(player);
+            if (average > winnerScore) {
                 winner = player;
-                winnerScore = teamScore;
+                winnerScore = average;
             }
         }
         setMatchOutcome(
@@ -11751,33 +12538,16 @@ void Game::updateVictoryConditions(float dt) {
     if (victoryCondition_ ==
         SkirmishVictory::Score) {
         int winner = -1;
-        int winnerScore = -1;
         for (int player = 1;
              player <=
-                 (int)players_.size();
+                 (int)players_.size() && winner < 0;
              ++player) {
             if (!players_[
                      (size_t)player - 1]
                      .active)
                 continue;
-            int teamScore = 0;
-            for (int member = 1;
-                 member <=
-                     (int)players_.size();
-                 ++member)
-                if (playersShareVictory(
-                        player, member))
-                    teamScore +=
-                        playerScore(member);
-            if (teamScore >= scoreLimit_ &&
-                (teamScore > winnerScore ||
-                 (teamScore ==
-                      winnerScore &&
-                  (winner < 0 ||
-                   player < winner)))) {
+            if (averageScore(player) >= scoreLimit_)
                 winner = player;
-                winnerScore = teamScore;
-            }
         }
         if (winner > 0)
             setMatchOutcome(
@@ -11882,10 +12652,20 @@ void Game::updateVictoryConditions(float dt) {
                              : " COMPLETED A MONUMENT");
                     statusTime_ = 5.0f;
                 }
+                const float previous = remaining;
                 remaining =
                     std::max(
                         0.0f,
                         remaining - dt);
+                // Warnings at 100 and 50 days left (a day is 5 game
+                // seconds; exe notifications 0x82/0x83, 0x8d/0x8e).
+                for (const float mark : {500.0f, 250.0f})
+                    if (previous >= mark && remaining < mark) {
+                        statusMessage_ =
+                            playerDisplayName(player) + (kind == 2 ? " (HOLOCRONS)" : " (MONUMENT)") +
+                            " WINS IN " + std::to_string((int)(mark / 5.0f)) + " DAYS";
+                        statusTime_ = 6.0f;
+                    }
                 if (remaining <= 0.0f) {
                     if (winner < 0 ||
                         player < winner)
@@ -12880,6 +13660,7 @@ void Game::damageObject(Object &object, int damage, uint32_t attackerId) {
     object.flashTime = std::max(object.flashTime, 0.15f);
     attacksLanded_++;
     if (object.hitPoints <= 0) {
+        if (attacker) creditDestruction(object, attacker->player);
         killObject(object);
         return;
     }
@@ -12944,6 +13725,26 @@ const dat::Unit *Game::projectileUnitForTarget(
         projectileId);
 }
 
+// Arc (exe 0x407729): half the flight time hT = distance / speed / 2; peak
+// H = arc * distance (arc > 0) or |arc| * distance^2 (arc < 0) above the line;
+// gravity g = 2H / hT^2 pulls it back by the landing.
+void Game::initProjectileArc(Projectile &projectile, float destX, float destY) const {
+    const float arc = projectile.unit ? projectile.unit->projectileArc : 0.0f;
+    projectile.arcHeight = projectile.arcVelocity = projectile.arcGravity = 0.0f;
+    if (arc == 0.0f) return;
+    const float dx = destX - projectile.x, dy = destY - projectile.y;
+    const float dz = projectile.targetZ - projectile.z;
+    const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+    const float speed = std::max(0.1f, projectile.unit->speed);
+    const float halfTime = distance / speed * 0.5f;
+    if (halfTime <= 0.0001f) return;
+    const float peak = arc > 0.0f ? -(distance * arc) : distance * distance * arc;
+    // (peak is negative for an upward arc; arcHeight rises to -peak.)
+    const float gravity = 2.0f * peak / (halfTime * halfTime);
+    projectile.arcGravity = gravity;
+    projectile.arcVelocity = -gravity * halfTime;
+}
+
 void Game::launchProjectile(const Object &source, const Object &target, int damage) {
     const bool oiiaSound =
         source.customKind ==
@@ -12978,17 +13779,23 @@ void Game::launchProjectile(const Object &source, const Object &target, int dama
     projectile.targetId = target.spawnId;
     projectile.sourceId = source.spawnId;
     projectile.damage = damage;
-    const float accuracy =
-        std::clamp(
-            modifiedUnitAttribute(
-                source, 11,
-                (float)source.unit
-                    ->accuracyPercent),
-            0.0f, 100.0f);
-    std::uniform_real_distribution<float>
-        percent(0.0f, 100.0f);
-    const bool missed =
-        percent(rng_) >= accuracy;
+    // Hit or miss (exe 0x4073a0, when the missile takes aim): a percent roll
+    // rand()*100/32767 against the launcher's accuracy; unpacked cannons
+    // (class 36) are 80% accurate against small walls and buildings. A miss
+    // moves the aim point by up to half of distance x dispersion on each
+    // axis (a square), and the missile then hits whatever is there.
+    float accuracy =
+        modifiedUnitAttribute(
+            source, 11,
+            (float)source.unit
+                ->accuracyPercent);
+    if (source.unit->cls == 36 && target.unit->collisionSize[0] < 1.0f &&
+        (target.unit->cls == 6 || target.unit->cls == 9 || target.unit->cls == 10 ||
+         target.unit->cls == 18))
+        accuracy = 80.0f;
+    const auto rand15 = [&]() { return (int)(rng_() & 0x7fffu); };
+    const int roll = rand15() * 100 / 32767;
+    const bool missed = (float)roll > accuracy;
     if (missed ||
         projectileUnit->smartMode == 0) {
         projectile.groundAimed = true;
@@ -12996,35 +13803,17 @@ void Game::launchProjectile(const Object &source, const Object &target, int dama
         projectile.aimY = target.y;
     }
     if (missed) {
-        const float dx =
-            target.x - source.x;
-        const float dy =
-            target.y - source.y;
-        const float distance =
-            std::sqrt(dx * dx + dy * dy);
-        const float targetReach =
-            collisionRadius(target) + 0.15f;
-        const float dispersion =
-            std::max(
-                targetReach + 0.25f,
-                source.unit
-                        ->accuracyDispersion *
-                    std::max(1.0f, distance));
-        std::uniform_real_distribution<float>
-            angle(0.0f, 2.0f * kPi);
-        std::uniform_real_distribution<float>
-            radius(targetReach + 0.15f,
-                   targetReach + dispersion);
-        const float missAngle =
-            angle(rng_);
-        const float missRadius =
-            radius(rng_);
-        projectile.aimX +=
-            std::cos(missAngle) * missRadius;
-        projectile.aimY +=
-            std::sin(missAngle) * missRadius;
+        const float dx = target.x - projectile.x;
+        const float dy = target.y - projectile.y;
+        const float spread =
+            std::sqrt(dx * dx + dy * dy) * source.unit->accuracyDispersion;
+        const float half = spread * 0.5f;
+        projectile.aimX += rand15() * spread * (1.0f / 32767.0f) - half;
+        projectile.aimY += rand15() * spread * (1.0f / 32767.0f) - half;
     }
     projectile.blastWidth = std::max(source.unit->blastWidth, projectileUnit->blastWidth);
+    initProjectileArc(projectile, projectile.groundAimed ? projectile.aimX : target.x,
+                      projectile.groundAimed ? projectile.aimY : target.y);
     projectile.blastLevel = projectile.blastWidth > 0
                                 ? (source.unit->blastWidth > 0 ? source.unit->blastAttackLevel
                                                                : projectileUnit->blastAttackLevel)
@@ -13124,6 +13913,7 @@ void Game::launchGroundProjectile(
         projectile.groundAimed = true;
         projectile.aimX = targetX;
         projectile.aimY = targetY;
+        initProjectileArc(projectile, targetX, targetY);
         projectile.blastWidth =
             std::max(
                 source.unit->blastWidth,
@@ -13237,6 +14027,8 @@ void Game::launchVolleyBolt(Object &source, const Object &target) {
     projectile.groundAimed = true;
     projectile.aimX = target.x + aimX;
     projectile.aimY = target.y + aimY;
+    initProjectileArc(projectile, projectile.groundAimed ? projectile.aimX : target.x,
+                      projectile.groundAimed ? projectile.aimY : target.y);
     projectile.blastWidth =
         std::max(
             source.unit->blastWidth,
@@ -13328,6 +14120,8 @@ void Game::updateProjectiles(float dt) {
         projectile.x += dx * step / distance;
         projectile.y += dy * step / distance;
         projectile.z += dz * step / distance;
+        projectile.arcHeight += (projectile.arcVelocity + 0.5f * projectile.arcGravity * dt) * dt;
+        projectile.arcVelocity += projectile.arcGravity * dt;
         projectile.facing = std::atan2(dy, dx);
         index++;
     }
@@ -13355,8 +14149,6 @@ void Game::applyBlast(uint32_t sourceId, int sourcePlayer, float x, float y, uin
                           ->accuracyPercent),
                   0.0f, 100.0f)
             : 100.0f;
-    std::uniform_real_distribution<float>
-        percent(0.0f, 100.0f);
     std::vector<uint32_t> victims;
     for (const Object &other : prefetched(objects_)) {
         if (!other.active || other.hidden || !other.unit || other.spawnId == primaryId ||
@@ -13394,7 +14186,8 @@ void Game::applyBlast(uint32_t sourceId, int sourcePlayer, float x, float y, uin
         if (dx * dx + dy * dy >
             width * width)
             continue;
-        if (percent(rng_) > accuracy)
+        // Each candidate's own roll (0x55df1b): rand()*100/32767 <= accuracy.
+        if ((float)((int)(rng_() & 0x7fffu) * 100 / 32767) > accuracy)
             continue;
         victims.push_back(other.spawnId);
     }
@@ -16087,6 +16880,7 @@ void Game::executeEffect(const ScenarioEffect &effect) {
             targetPlayer >= 0 && (size_t)targetPlayer < resources_.size() && resourceId >= 0) {
             resources_[(size_t)sourcePlayer][resourceId] -= amount;
             resources_[(size_t)targetPlayer][resourceId] += amount;
+            creditTribute(sourcePlayer, targetPlayer, resourceId, (float)amount, 0.0f);
         }
         break;
     case 6:
@@ -16178,6 +16972,27 @@ void Game::executeEffect(const ScenarioEffect &effect) {
                 effectTargets(effect);
             for (Object *object : targets)
                 object->frozen = false;
+            // Tasked onto an object, units do their action on it: trade with
+            // a market, attack an enemy; the rest move there.
+            if (locationObject >= 0) {
+                Object *target = findObject((uint32_t)locationObject);
+                if (target && target->active) {
+                    std::vector<Object *> movers;
+                    for (Object *object : targets) {
+                        if (object == target) continue;
+                        if (issueTradeOrder(*object, *target)) continue;
+                        if (isEnemy(*object, *target) && canAttackTarget(*object, *target)) {
+                            stopUnit(*object);
+                            issueAttack(*object, *target,
+                                        std::atan2(object->y - target->y,
+                                                   object->x - target->x));
+                            continue;
+                        }
+                        movers.push_back(object);
+                    }
+                    targets = std::move(movers);
+                }
+            }
             issueGroupMove(
                 std::move(targets),
                 targetX, targetY);
@@ -16744,9 +17559,9 @@ std::string Game::describeObjectForTesting(uint32_t spawnId) const {
     if (!o) return "missing";
     char buffer[256];
     snprintf(buffer, sizeof buffer,
-             "state=%d goal=%d target=%.2f,%.2f path=%zu/%zu blocked=%.2f "
+             "unit=%d hidden=%d pos=%.2f,%.2f state=%d goal=%d target=%.2f,%.2f path=%zu/%zu blocked=%.2f "
              "stall=%.2f repath=%d group=%u",
-             (int)o->state, (int)o->moveGoalActive, o->targetX, o->targetY,
+             o->unit ? o->unit->id : -1, (int)o->hidden, o->x, o->y, (int)o->state, (int)o->moveGoalActive, o->targetX, o->targetY,
              o->pathIndex, o->path.size(), o->blockedTime, o->moveStallTime,
              (int)o->repathCount, o->moveGroupId);
     std::string text = buffer;
@@ -17838,6 +18653,14 @@ int Game::resolveAiValue(
         known = true;
         return state.program.constant(value);
     }
+    {
+        const std::string symbol = normalizeAiSymbol(value);
+        if (symbol.rfind("this-any-", 0) == 0) {
+            const auto bound = state.thisAny.find(symbol.substr(9));
+            known = bound != state.thisAny.end();
+            return known ? bound->second : 0;
+        }
+    }
     static const std::map<std::string, int>
         percentages = {
             {"one-percent", 1},
@@ -17893,22 +18716,33 @@ std::vector<int> Game::aiSelectedPlayers(int player, const AiPlayerState &state,
                                          const std::string &selectorText) const {
     std::vector<int> result;
     const std::string selector = normalizeAiSymbol(selectorText);
+    if (selector.rfind("this-any-", 0) == 0) {
+        const auto bound = state.thisAny.find(selector.substr(9));
+        if (bound != state.thisAny.end()) result.push_back(bound->second);
+        return result;
+    }
     if (selector.rfind("any-", 0) != 0 && selector.rfind("every-", 0) != 0) {
         bool known = false;
         const int number = resolveAiValue(player, state, selectorText, known);
         if (known && number >= 1 && (size_t)number <= players_.size()) result.push_back(number);
         return result;
     }
+    // Stance is this player's toward the candidate: ally 0, neutral 1,
+    // enemy 3 (any-ally, any-neutral, any-human-neutral...).
     const bool wantEnemy = selector.find("enemy") != std::string::npos;
     const bool wantAlly = selector.find("ally") != std::string::npos;
+    const bool wantNeutral = selector.find("neutral") != std::string::npos;
     const bool wantComputer = selector.find("computer") != std::string::npos;
     const bool wantHuman = selector.find("human") != std::string::npos;
-    if (!wantEnemy && !wantAlly && !wantComputer && !wantHuman) return result;
+    const bool wantPlayer = selector == "any-player" || selector == "every-player";
+    if (!wantEnemy && !wantAlly && !wantNeutral && !wantComputer && !wantHuman && !wantPlayer)
+        return result;
     for (size_t candidate = 1; candidate <= players_.size(); ++candidate) {
         if ((int)candidate == player || !players_[candidate - 1].active) continue;
-        const bool enemy = !isFriendlyPlayer(player, (int)candidate);
+        const uint32_t stance = players_[(size_t)player - 1].diplomacy[candidate];
         const bool computer = candidate < aiPlayers_.size() && aiPlayers_[candidate].loaded;
-        if ((wantEnemy && !enemy) || (wantAlly && enemy) || (wantComputer && !computer) ||
+        if ((wantEnemy && stance != 3) || (wantAlly && stance != 0) ||
+            (wantNeutral && stance != 1) || (wantComputer && !computer) ||
             (wantHuman && computer))
             continue;
         result.push_back((int)candidate);
@@ -17946,13 +18780,16 @@ bool Game::evaluateAiFactValue(
             populationUsed(player));
         return true;
     }
-    // The market here trades 100 for 70 at a fixed rate (buy-/sell-commodity).
-    if (fact == "commodity-buying-price") {
-        value = 100;
-        return true;
-    }
-    if (fact == "commodity-selling-price") {
-        value = 70;
+    // Spaceport prices for 100 units (exe 0x5d65a0): buy and sell.
+    if (fact == "commodity-buying-price" || fact == "commodity-selling-price") {
+        bool known = false;
+        const int resourceType =
+            condition.children.size() > 1
+                ? aiResourceIndex(resolveAiValue(player, state, condition.children[1].value, known))
+                : -1;
+        if (!known || resourceType < 0 || resourceType > 2) return false;
+        value = fact == "commodity-buying-price" ? commodityBuyPrice(player, resourceType)
+                                                 : commoditySellPrice(player, resourceType);
         return true;
     }
     // No AI walls are built, so wall plans read as complete.
@@ -18512,11 +19349,16 @@ Game::AiTruth Game::evaluateAiCondition(
         if (!known) return AiTruth::Unknown;
         bool any = false;
         const bool every = normalizeAiSymbol(condition.children[1].value).rfind("every-", 0) == 0;
+        const std::string selector = normalizeAiSymbol(condition.children[1].value);
         for (int candidate : aiSelectedPlayers(player, state, condition.children[1].value)) {
             any = true;
-            const uint32_t actual = players_[(size_t)player - 1].diplomacy[(size_t)candidate];
+            // Their stance toward this player (exe 0x57d580).
+            const uint32_t actual = players_[(size_t)candidate - 1].diplomacy[(size_t)player];
             const bool match = (int)actual == stance;
-            if (!every && match) return AiTruth::True;
+            if (!every && match) {
+                if (selector.rfind("any-", 0) == 0) state.thisAny[selector.substr(4)] = candidate;
+                return AiTruth::True;
+            }
             if (every && !match) return AiTruth::False;
         }
         return any && every ? AiTruth::True : AiTruth::False;
@@ -18567,8 +19409,19 @@ Game::AiTruth Game::evaluateAiCondition(
                    ? AiTruth::True
                    : AiTruth::False;
     }
-    if (fact == "taunt-detected")
+    if (fact == "taunt-detected" && condition.children.size() == 3) {
+        // (taunt-detected <player-selector> <taunt>)
+        bool known = false;
+        const int taunt = resolveAiValue(player, state, condition.children[2].value, known);
+        if (!known) return AiTruth::Unknown;
+        const std::string selector = normalizeAiSymbol(condition.children[1].value);
+        for (int candidate : aiSelectedPlayers(player, state, condition.children[1].value))
+            if (state.taunts.count({candidate, taunt})) {
+                if (selector.rfind("any-", 0) == 0) state.thisAny[selector.substr(4)] = candidate;
+                return AiTruth::True;
+            }
         return AiTruth::False;
+    }
     if ((fact == "can-buy-commodity" ||
          fact == "can-sell-commodity") &&
         condition.children.size() == 2) {
@@ -18919,7 +19772,11 @@ Game::AiTruth Game::evaluateAiCondition(
                                  ? (int)std::floor(aiPopulationStats().civilian[candidate])
                                  : 0;
                 } else if (fact == "players-tribute" || fact == "players-tribute-memory") {
-                    actual = 0; // no tribute is ever sent between players here
+                    // Tribute the selected player has paid this one
+                    // (attribute 156 + sender - 1).
+                    actual = candidate >= 1 && candidate <= 8
+                                 ? (int)resource(player, 156 + (int)candidate - 1)
+                                 : 0;
                 } else if (typed) {
                     // (players-building-type-count <selector> <type> op value)
                     const dat::Unit *unit =
@@ -18950,8 +19807,11 @@ Game::AiTruth Game::evaluateAiCondition(
                                         *object.unit));
                 const bool result =
                     compare(actual);
-                if (!every && result)
+                if (!every && result) {
+                    if (selector.rfind("any-", 0) == 0)
+                        state.thisAny[selector.substr(4)] = (int)candidate;
                     return AiTruth::True;
+                }
                 if (every && !result)
                     return AiTruth::False;
             }
@@ -19218,27 +20078,11 @@ bool Game::executeAiAction(
                 known);
         const int resourceType =
             aiResourceIndex(aiResource);
-        if (!known || resourceType < 0)
+        // The script actions need a Spaceport (exe count of units 84/530).
+        if (!known || resourceType < 0 || resourceType > 2 || !ownsMarket(player))
             return false;
-        const int source =
-            name == "buy-commodity"
-                ? 3
-                : resourceType;
-        const int target =
-            name == "buy-commodity"
-                ? resourceType
-                : 3;
-        if (resources_[(size_t)player]
-                      [(size_t)source] <
-            100.0f)
-            return false;
-        resources_[(size_t)player]
-                  [(size_t)source] -=
-            100.0f;
-        resources_[(size_t)player]
-                  [(size_t)target] +=
-            70.0f;
-        return true;
+        return name == "buy-commodity" ? buyCommodity(player, resourceType, 1)
+                                       : sellCommodity(player, resourceType, 1);
     }
     if (name == "acknowledge-event" &&
         action.children.size() == 2) {
@@ -19251,40 +20095,42 @@ bool Game::executeAiAction(
         state.events.erase(event);
         return true;
     }
-    if (name == "acknowledge-taunt")
+    if (name == "acknowledge-taunt") {
+        if (action.children.size() == 3) {
+            bool known = false;
+            const int taunt = resolveAiValue(player, state, action.children[2].value, known);
+            if (known)
+                for (int sender : aiSelectedPlayers(player, state, action.children[1].value))
+                    state.taunts.erase({sender, taunt});
+        }
         return true;
+    }
     if (name == "set-stance" &&
         action.children.size() == 3) {
-        bool targetKnown = false;
         bool stanceKnown = false;
-        const int target = resolveAiValue(
-            player, state,
-            action.children[1].value,
-            targetKnown);
         const int stance = resolveAiValue(
             player, state,
             action.children[2].value,
             stanceKnown);
-        if (!targetKnown || !stanceKnown ||
-            target < 1 || target > 16 ||
-            stance < 0 || stance > 3)
+        if (!stanceKnown || stance < 0 || stance > 3)
             return false;
         if (generatedMatch_ && teamsLocked_)
             return true;
-        players_[(size_t)player - 1]
-            .diplomacy[(size_t)target] =
-            (uint32_t)stance;
-        return true;
+        if (stance == 2) return false; // not a stance (exe 0x5bb30e)
+        const std::vector<int> targets =
+            aiSelectedPlayers(player, state, action.children[1].value);
+        for (int target : targets) setStance(player, target, stance);
+        return !targets.empty();
     }
     if (name == "tribute-to-player" &&
         action.children.size() == 4) {
         bool targetKnown = false;
         bool resourceKnown = false;
         bool amountKnown = false;
-        const int target = resolveAiValue(
-            player, state,
-            action.children[1].value,
-            targetKnown);
+        const std::vector<int> targets =
+            aiSelectedPlayers(player, state, action.children[1].value);
+        targetKnown = targets.size() == 1;
+        const int target = targetKnown ? targets.front() : 0;
         const int aiResource =
             resolveAiValue(
                 player, state,
@@ -19303,17 +20149,12 @@ bool Game::executeAiAction(
             resourceType < 0 ||
             amount < 0)
             return false;
-        const float transferred =
-            std::min(
-                (float)amount,
-                resources_[(size_t)player]
-                          [(size_t)resourceType]);
-        resources_[(size_t)player]
-                  [(size_t)resourceType] -=
-            transferred;
-        resources_[(size_t)target]
-                  [(size_t)resourceType] +=
-            transferred;
+        // exe 0x577420: needs a Spaceport, another player and some stock.
+        if (target == player || !ownsMarket(player) ||
+            resources_[(size_t)player][(size_t)resourceType] <= 0.0f)
+            return false;
+        payTribute(player, target, resourceType, (float)amount,
+                   playerAttribute(player, 46));
         return true;
     }
     if ((name == "delete-building" ||
@@ -19337,12 +20178,55 @@ bool Game::executeAiAction(
             }
         return false;
     }
-    if (name.rfind("chat-", 0) == 0) {
-        if (action.children.size() >= 2)
-            queueInstruction(
-                action.children.back().value,
-                4.0f, std::string(),
-                player);
+    if (name.rfind("chat-", 0) == 0 || name == "taunt" || name == "taunt-using-range") {
+        // chat-local-to-self is the script's own debug text.
+        if (name.rfind("chat-local", 0) == 0) return true;
+        const bool usingId = name.find("using-id") != std::string::npos ||
+                             name.find("using-range") != std::string::npos;
+        const bool toPlayer = name.rfind("chat-to-player", 0) == 0;
+        const size_t textIndex = toPlayer ? 2 : 1;
+        if (action.children.size() <= textIndex) return false;
+        std::vector<int> recipients;
+        if (toPlayer) {
+            recipients = aiSelectedPlayers(player, state, action.children[1].value);
+        } else {
+            const bool allies = name.find("allies") != std::string::npos;
+            const bool enemies = name.find("enemies") != std::string::npos;
+            for (int other = 1; other <= (int)players_.size(); ++other) {
+                if (other == player || !players_[(size_t)other - 1].active) continue;
+                const uint32_t stance = players_[(size_t)player - 1].diplomacy[(size_t)other];
+                if ((allies && stance != 0) || (enemies && stance != 3)) continue;
+                recipients.push_back(other);
+            }
+        }
+        std::string text;
+        if (name == "taunt" || name == "taunt-using-range") {
+            bool known = false;
+            int taunt = resolveAiValue(player, state, action.children[1].value, known);
+            if (!known) return false;
+            if (name == "taunt-using-range" && action.children.size() > 2) {
+                bool rangeKnown = false;
+                const int range = resolveAiValue(player, state, action.children[2].value, rangeKnown);
+                if (rangeKnown && range > 1) taunt += (int)(rng_() % (uint32_t)range);
+            }
+            text = std::to_string(taunt);
+        } else if (usingId) {
+            bool known = false;
+            int id = resolveAiValue(player, state, action.children[textIndex].value, known);
+            if (!known) return false;
+            if (name.find("using-range") != std::string::npos && action.children.size() > textIndex + 1) {
+                bool rangeKnown = false;
+                const int range =
+                    resolveAiValue(player, state, action.children[textIndex + 1].value, rangeKnown);
+                if (rangeKnown && range > 1) id += (int)(rng_() % (uint32_t)range);
+            }
+            text = assets_.localizedString(id);
+        } else {
+            text = action.children[textIndex].value;
+            if (text.size() >= 2 && text.front() == '"' && text.back() == '"')
+                text = text.substr(1, text.size() - 2);
+        }
+        if (!text.empty()) sendChat(player, recipients, text);
         return true;
     }
     // Micro-management tuning (ability-to-maintain-distance,
@@ -21705,10 +22589,18 @@ void Game::updateAiGatherers(
                     resourceTarget = &resource;
                     nearestDistance = distance;
                 }
-                if (!resourceTarget ||
-                    !issueGatherCommand(
-                        *worker,
-                        *resourceTarget))
+                const bool gatherIssued =
+                    resourceTarget && issueGatherCommand(*worker, *resourceTarget);
+                if (const char *trace = getenv("SWGB_TRACE_GATHER");
+                    trace && atoi(trace) == player)
+                    log("ai gather p" + std::to_string(player) + " worker " +
+                        std::to_string(worker->spawnId) + " type " + std::to_string(type) +
+                        (resourceTarget ? " target " + std::to_string(resourceTarget->spawnId) +
+                                              " at " + std::to_string(resourceTarget->x) + "," +
+                                              std::to_string(resourceTarget->y)
+                                        : std::string(" no target")) +
+                        (gatherIssued ? " ok" : " FAILED"));
+                if (!gatherIssued)
                     break;
                 if (resourceTarget->unit &&
                     resourceTarget->unit->cls ==
@@ -22001,6 +22893,9 @@ bool Game::updateInputPhase(float dt, const InputState &in, WorldInput &worldInp
     attackGroundJustBegun_ = false;
     unitCommandJustBegun_ = false;
     statusTime_ = std::max(0.0f, statusTime_ - dt);
+    // Chat lines fade after 10 s.
+    for (ChatLine &line : chatLines_) line.age += dt;
+    while (!chatLines_.empty() && chatLines_.front().age > 10.0f) chatLines_.pop_front();
     attackAlertCooldown_ =
         std::max(
             0.0f,
@@ -22981,10 +23876,23 @@ void Game::simulateChunk(float dt, const WorldInput *worldInput, int chunk) {
         const ProductionItem item =
             building.productionQueue.front();
         if (item.technologyId >= 0) {
+            const bool alreadyKnown =
+                (size_t)building.player < researchedTechs_.size() &&
+                researchedTechs_[(size_t)building.player].count(item.technologyId);
             const bool researched =
                 researchTechnology(
                     building.player,
                     item.technologyId);
+            if (researched && !alreadyKnown &&
+                (size_t)item.technologyId < assets_.dat().techs.size()) {
+                // Research credit (exe 0x5bffa8): count and cost sum.
+                float cost = 0.0f;
+                for (const dat::Tech::Cost &entry :
+                     assets_.dat().techs[(size_t)item.technologyId].costs)
+                    if (entry.flag && entry.type >= 0) cost += entry.amount;
+                addAttribute(building.player, kStatResearchCount, 1.0f);
+                addAttribute(building.player, kStatTechCostSum, cost);
+            }
             const bool techLevel =
                 item.technologyId >= 1 &&
                 item.technologyId <= 3;
@@ -23162,6 +24070,7 @@ void Game::simulateChunk(float dt, const WorldInput *worldInput, int chunk) {
             conversionStart,
             holocronsStart);
     updateHolocrons(dt);
+    updateTrade();
     const auto maintenanceStart =
         UpdateClock::now();
     simulationMaintenanceStart_ = maintenanceStart;
@@ -23975,6 +24884,7 @@ void Game::simulateChunk(float dt, const WorldInput *worldInput, int chunk) {
         elapsedUs(
             visibilityStart,
             victoryStart);
+    updatePeakAttributes();
     updateConquest(dt);
     updateVictoryConditions(dt);
     updateStats_.finalVictoryUs =
@@ -25331,7 +26241,7 @@ void Game::renderFrame(Renderer &r, int screenW, int screenH) {
             float sx, sy;
             toScreen(x, y, sx, sy);
             sy -= elevationAt(x, y) * assets_.dat().terrainBlock.elevHeight +
-                  projectile.z * kTileHalfH;
+                  (projectile.z + std::max(0.0f, projectile.arcHeight)) * kTileHalfH;
             sx -= ox;
             sy -= oy;
             if (sx < -100 || sx > viewW + 100 || sy < -100 || sy > viewH + 100)
@@ -28783,6 +29693,31 @@ void Game::renderFrame(Renderer &r, int screenW, int screenH) {
             y + 6.0f * invZoom,
             0.9f * invZoom,
             246, 220, 116);
+    }
+
+    if (!chatLines_.empty()) {
+        // Chat, top left under the resource bar, in each sender's colour.
+        const float invZoom = 1.0f / zoom_;
+        const auto &colours = assets_.dat().playerColours;
+        float y = 44.0f;
+        for (const ChatLine &line : chatLines_) {
+            uint8_t red = 255, green = 255, blue = 255;
+            if (line.player > 0 && (size_t)line.player <= players_.size()) {
+                const size_t colour = std::min<size_t>(players_[(size_t)line.player - 1].color, 7);
+                if (colour < colours.size()) {
+                    const Rgba &rgb = assets_.palette()[(uint8_t)std::clamp(
+                        colours[colour].minimapColor, 0, 255)];
+                    red = rgb.r;
+                    green = rgb.g;
+                    blue = rgb.b;
+                }
+            }
+            r.fillRect(6.0f * invZoom, y * invZoom, (line.text.size() * 9.0f + 16.0f) * invZoom,
+                       22.0f * invZoom, 0, 0, 0, 150);
+            drawBitmapText(r, {line.text}, 14.0f * invZoom, (y + 5.0f) * invZoom,
+                           0.95f * invZoom, red, green, blue);
+            y += 24.0f;
+        }
     }
 
     if (!statusMessage_.empty()) {

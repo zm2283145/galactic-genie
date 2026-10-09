@@ -1135,8 +1135,8 @@ FrontendAction Frontend::update(
             }
             return FrontendAction::None;
         }
-        const size_t count = campaignMatch_ ? 9 : 8;
-        const float top = campaignMatch_ ? 101.0f : 120.0f;
+        const size_t count = campaignMatch_ ? 11 : 10;
+        const float top = campaignMatch_ ? 80.0f : 100.0f;
         const float row = 39.0f;
         const size_t touched =
             rowFromPointer(input, top, row, count);
@@ -1145,19 +1145,30 @@ FrontendAction Frontend::update(
         if (input.menuDown) moveSelection(1, count);
         if (input.menuBack || input.pausePressed) {
             screen_ = FrontendScreen::Gameplay;
+        } else if ((input.menuActivate || touched < count) && selection_ == 2) {
+            // Diplomacy (the original's menu-bar button, action 14).
+            screen_ = FrontendScreen::Diplomacy;
+            return FrontendAction::OpenDiplomacy;
+        } else if ((input.menuActivate || touched < count) && selection_ == 3) {
+            // Chat (menu-bar button, action 13).
+            screen_ = FrontendScreen::Chat;
+            chatSelection_ = 0;
+            return FrontendAction::OpenChat;
         } else if (input.menuActivate || touched < count) {
-            if (selection_ == 0) {
+            // Entries after Diplomacy and Chat keep their old numbering.
+            const size_t pick = selection_ > 3 ? selection_ - 2 : selection_;
+            if (pick == 0) {
                 screen_ = FrontendScreen::Gameplay;
-            } else if (selection_ == 1) {
+            } else if (pick == 1) {
                 screen_ = FrontendScreen::Objectives;
                 objectivesReturnScreen_ =
                     FrontendScreen::Pause;
                 objectivesPage_ = 0;
                 selection_ = 0;
-            } else if (selection_ == 2) {
+            } else if (pick == 2) {
                 message_ = "SAVING MATCH...";
                 return FrontendAction::SaveMatch;
-            } else if (selection_ == 3) {
+            } else if (pick == 3) {
                 if (!continueAvailable_) {
                     message_ = "NO VALID SAVE IS AVAILABLE";
                 } else {
@@ -1165,19 +1176,19 @@ FrontendAction Frontend::update(
                         FrontendAction::LoadMatch,
                         "LOAD SAVE AND REPLACE THIS MATCH?");
                 }
-            } else if (selection_ == 4) {
+            } else if (pick == 4) {
                 beginConfirmation(
                     FrontendAction::RestartMatch,
                     "RESTART THIS MATCH FROM THE BEGINNING?");
-            } else if (selection_ == 5) {
+            } else if (pick == 5) {
                 optionsReturnScreen_ = FrontendScreen::Pause;
                 screen_ = FrontendScreen::Options;
                 selection_ = 0;
-            } else if (selection_ == 6) {
+            } else if (pick == 6) {
                 beginConfirmation(
                     FrontendAction::CompleteCampaignMission,
                     "SURRENDER THIS MATCH?");
-            } else if (campaignMatch_ && selection_ == 7) {
+            } else if (campaignMatch_ && pick == 7) {
                 beginConfirmation(
                     FrontendAction::ReturnToCampaignBrowser,
                     "ABANDON THIS MISSION?");
@@ -1322,6 +1333,37 @@ FrontendAction Frontend::update(
         return FrontendAction::None;
     }
 
+    if (screen_ == FrontendScreen::Diplomacy)
+        return updateDiplomacy(input);
+    if (screen_ == FrontendScreen::Chat)
+        return updateChat(input);
+
+    if (screen_ == FrontendScreen::Achievements) {
+        // Six tabs along the bottom (Score .. Timeline) and the Back button.
+        constexpr size_t tabs = 6;
+        if (input.menuLeft || input.actionTabLeft)
+            achievementsTab_ = (achievementsTab_ + tabs - 1) % tabs;
+        if (input.menuRight || input.actionTabRight)
+            achievementsTab_ = (achievementsTab_ + 1) % tabs;
+        if (input.pointerTap) {
+            const float x = input.pointerX * 800.0f / 960.0f;
+            const float y = input.pointerY * 600.0f / 544.0f;
+            for (size_t tab = 0; tab < tabs; ++tab)
+                if (x >= 82.0f + 108.0f * tab && x < 182.0f + 108.0f * tab && y >= 541.0f &&
+                    y < 589.0f)
+                    achievementsTab_ = tab;
+            if (x >= 645.0f && x < 775.0f && y >= 495.0f && y < 533.0f) {
+                screen_ = achievementsReturn_;
+                selection_ = 0;
+            }
+        }
+        if (input.menuBack || input.menuActivate || input.pausePressed) {
+            screen_ = achievementsReturn_;
+            selection_ = 0;
+        }
+        return FrontendAction::None;
+    }
+
     if (screen_ == FrontendScreen::Outcome) {
         if (playtestMatch_) {
             constexpr size_t count = 3;
@@ -1348,12 +1390,19 @@ FrontendAction Frontend::update(
             }
             return FrontendAction::None;
         }
-        const size_t count = campaignMatch_ ? 4 : 2;
+        // The last entry opens the Achievements screen.
+        const size_t count = campaignMatch_ ? 5 : 3;
         const size_t touched =
             rowFromPointer(input, 286, 45, count);
         if (touched < count) selection_ = touched;
         if (input.menuUp) moveSelection(-1, count);
         if (input.menuDown) moveSelection(1, count);
+        if ((input.menuActivate || touched < count) && selection_ == count - 1) {
+            achievementsReturn_ = FrontendScreen::Outcome;
+            achievementsTab_ = 0;
+            screen_ = FrontendScreen::Achievements;
+            return FrontendAction::None;
+        }
         if (input.menuActivate || touched < count) {
             if (campaignMatch_) {
                 if (selection_ == 0 && outcome_ == 1 &&
@@ -1487,6 +1536,11 @@ void Frontend::render(
                     originalMenuBackground_->w,
                 originalMenuBackground_->v +
                     originalMenuBackground_->h});
+    }
+    if (screen_ == FrontendScreen::Achievements) {
+        renderAchievements(renderer, screenW, screenH);
+        renderer.endFrame();
+        return;
     }
     const bool originalLayout =
         originalMenuBackground_ &&
@@ -2241,7 +2295,7 @@ void Frontend::render(
                       "OPTIONS", "END TEST",
                       "RETURN TO EDITOR"}
                 : std::vector<std::string>{
-            "RESUME", "OBJECTIVES / STATUS", "SAVE MATCH",
+            "RESUME", "OBJECTIVES / STATUS", "DIPLOMACY", "CHAT", "SAVE MATCH",
             "LOAD MATCH", "RESTART MATCH", "OPTIONS",
             "SURRENDER"};
         if (!playtestMatch_ && campaignMatch_)
@@ -2255,8 +2309,8 @@ void Frontend::render(
                                  : "MATCH PAUSED",
             entries,
             playtestMatch_ ? 132.0f
-                           : campaignMatch_ ? 101.0f
-                                            : 120.0f,
+                           : campaignMatch_ ? 80.0f
+                                            : 100.0f,
             playtestMatch_ ? 42.0f : 39.0f);
     } else if (screen_ == FrontendScreen::Objectives) {
         renderObjectivesOverlay(
@@ -2341,10 +2395,10 @@ void Frontend::render(
                 outcome_ == 1 ? "CONTINUE TO NEXT MISSION"
                               : "RETRY MISSION",
                 "REPLAY MISSION", "RETURN TO CAMPAIGN",
-                "RETURN TO MAIN MENU"};
+                "RETURN TO MAIN MENU", "ACHIEVEMENTS"};
         } else {
             entries = {
-                "RESTART MATCH", "RETURN TO MAIN MENU"};
+                "RESTART MATCH", "RETURN TO MAIN MENU", "ACHIEVEMENTS"};
         }
         drawMenu(
             playtestMatch_
@@ -2361,6 +2415,475 @@ void Frontend::render(
             renderer, message_, 516, 0.85f,
             screenW, 255, 130, 91);
     renderer.endFrame();
+}
+
+namespace {
+// Diplomacy dialog geometry (exe 0x45b080, dialog coordinates on the 796x533
+// dlg_dip art, centred on the 800x600 screen).
+constexpr float kDipX = 2.0f, kDipY = 33.0f;
+constexpr std::array<float, 3> kDipStanceX{{352.0f, 422.0f, 492.0f}};
+constexpr std::array<int, 3> kDipStances{{0, 1, 3}};
+// Tribute columns: carbon, food, nova, ore (resource types 1, 0, 3, 2).
+constexpr std::array<float, 4> kDipTributeX{{540.0f, 589.0f, 636.0f, 687.0f}};
+constexpr std::array<int, 4> kDipTributeResource{{1, 0, 3, 2}};
+constexpr std::array<int, 4> kDipTributeIcon{{0, 2, 3, 1}};
+// Bottom controls: Allied Victory box, OK, Clear Tributes, Cancel.
+constexpr std::array<float, 4> kDipBottomX{{352.0f, 42.0f, 274.0f, 506.0f}};
+constexpr std::array<float, 4> kDipBottomW{{30.0f, 217.0f, 217.0f, 217.0f}};
+constexpr std::array<float, 4> kDipBottomY{{383.0f, 423.0f, 423.0f, 423.0f}};
+} // namespace
+
+FrontendAction Frontend::updateChat(const InputState &input) {
+    const size_t recipients = 2 + chatPlayers_.size();
+    if (input.menuBack || input.pausePressed) {
+        screen_ = FrontendScreen::Gameplay;
+        selection_ = 0;
+        return FrontendAction::None;
+    }
+    if (input.menuLeft || input.actionTabLeft)
+        chatRecipient_ = (chatRecipient_ + recipients - 1) % recipients;
+    if (input.menuRight || input.actionTabRight)
+        chatRecipient_ = (chatRecipient_ + 1) % recipients;
+    if (!taunts_.empty()) {
+        if (input.menuUp) chatSelection_ = (chatSelection_ + taunts_.size() - 1) % taunts_.size();
+        if (input.menuDown) chatSelection_ = (chatSelection_ + 1) % taunts_.size();
+    }
+    if (input.pointerTap && input.screenW > 0 && input.screenH > 0 && !taunts_.empty()) {
+        const float y = input.pointerY * 544.0f / input.screenH;
+        const size_t first = chatSelection_ >= 6 ? chatSelection_ - 6 : 0;
+        if (y >= 150.0f && y < 150.0f + 13 * 24.0f) {
+            chatSelection_ = std::min(taunts_.size() - 1, first + (size_t)((y - 150.0f) / 24.0f));
+            screen_ = FrontendScreen::Gameplay;
+            return FrontendAction::SendChat;
+        }
+    }
+    if (input.menuActivate && !taunts_.empty()) {
+        screen_ = FrontendScreen::Gameplay;
+        return FrontendAction::SendChat;
+    }
+    return FrontendAction::None;
+}
+
+void Frontend::renderChatOverlay(Renderer &renderer, int screenW, int screenH) const {
+    const float sx = screenW / 960.0f, sy = screenH / 544.0f;
+    renderer.fillRect(0, 0, (float)screenW, (float)screenH, 0, 0, 0, 92);
+    drawModernPanel(renderer, 250 * sx, 60 * sy, 460 * sx, 440 * sy);
+    centeredText(renderer, text(4113, "Chat"), 76, 1.6f, screenW, 235, 213, 145);
+    std::string to = chatRecipient_ == 0   ? std::string("ALL")
+                     : chatRecipient_ == 1 ? std::string("ALLIES")
+                                           : chatPlayers_[chatRecipient_ - 2].second;
+    centeredText(renderer, "< TO: " + to + " >", 116, 1.1f, screenW, 205, 228, 255);
+    const size_t first = chatSelection_ >= 6 ? chatSelection_ - 6 : 0;
+    for (size_t row = 0; row < 13 && first + row < taunts_.size(); ++row) {
+        const size_t index = first + row;
+        const float y = 150.0f + row * 24.0f;
+        if (index == chatSelection_)
+            renderer.fillRect(268 * sx, (y - 3) * sy, 424 * sx, 22 * sy, 30, 72, 102, 255);
+        drawUiText(renderer,
+                   {std::to_string(taunts_[index].first) + "  " + taunts_[index].second},
+                   280 * sx, y * sy, 1.05f * sy, index == chatSelection_ ? 255 : 205,
+                   index == chatSelection_ ? 228 : 213, index == chatSelection_ ? 153 : 222);
+    }
+    centeredText(renderer, "X: SEND TAUNT   L/R: RECIPIENT   O: BACK", 474, 0.9f, screenW, 205,
+                 213, 222);
+}
+
+int Frontend::diplomacyRemaining(size_t column) const {
+    const int resource = kDipTributeResource[column];
+    float pending = 0.0f;
+    for (const auto &row : diplomacyPending_) pending += row[column];
+    return (int)(diplomacy_.stock[(size_t)resource] - pending * (1.0f + diplomacy_.fee));
+}
+
+FrontendAction Frontend::updateDiplomacy(const InputState &input) {
+    const size_t rows = diplomacy_.rows.size();
+    const size_t bottom = rows; // the row of bottom controls
+    const auto tributeAllowed = [&](size_t row) {
+        const DiplomacyRow &entry = diplomacy_.rows[row];
+        return diplomacy_.hasMarket && !entry.local && !entry.defeated &&
+               (!diplomacy_.lockTeams || entry.ourStance == 0);
+    };
+    const auto selectable = [&](size_t row) {
+        return row == bottom || (row < rows && !diplomacy_.rows[row].local);
+    };
+    const auto close = [&]() {
+        screen_ = FrontendScreen::Gameplay;
+        selection_ = 0;
+    };
+    const auto apply = [&]() {
+        diplomacyResult_ = {};
+        for (size_t row = 0; row < rows && row < diplomacyStances_.size(); ++row) {
+            const DiplomacyRow &entry = diplomacy_.rows[row];
+            if (!entry.local && diplomacyStances_[row] != entry.ourStance)
+                diplomacyResult_.stances.push_back({entry.player, diplomacyStances_[row]});
+            std::array<int, 4> amounts{};
+            bool any = false;
+            for (size_t column = 0; column < 4; ++column) {
+                amounts[(size_t)kDipTributeResource[column]] = diplomacyPending_[row][column];
+                any = any || diplomacyPending_[row][column] > 0;
+            }
+            if (any) diplomacyResult_.tributes.push_back({entry.player, amounts});
+        }
+        diplomacyResult_.alliedVictory = diplomacyAlliedVictory_;
+        close();
+        return FrontendAction::ApplyDiplomacy;
+    };
+    const auto activate = [&](size_t row, size_t column) -> FrontendAction {
+        if (row == bottom) {
+            if (column == 0) diplomacyAlliedVictory_ = !diplomacyAlliedVictory_;
+            else if (column == 1) return apply();
+            else if (column == 2) diplomacyPending_ = {};
+            else close();
+            return FrontendAction::None;
+        }
+        if (row >= rows || diplomacy_.rows[row].local) return FrontendAction::None;
+        if (column < 3) {
+            if (!diplomacy_.lockTeams) diplomacyStances_[row] = kDipStances[column];
+        } else if (tributeAllowed(row) && row < diplomacyPending_.size()) {
+            // 100 a click; less when the stock (after the fee) is short.
+            const size_t slot = column - 3;
+            int amount = 100;
+            const int remaining = diplomacyRemaining(slot);
+            if ((float)remaining < amount * (1.0f + diplomacy_.fee))
+                amount = (int)(remaining / (1.0f + diplomacy_.fee));
+            if (amount > 0) diplomacyPending_[row][slot] += amount;
+        }
+        return FrontendAction::None;
+    };
+    if (input.menuBack) {
+        close();
+        return FrontendAction::None;
+    }
+    if (input.pausePressed) return apply();
+    // Touch: map the point to a cell.
+    if (input.pointerTap && input.screenW > 0 && input.screenH > 0) {
+        const float x = input.pointerX * 800.0f / input.screenW - kDipX;
+        const float y = input.pointerY * 600.0f / input.screenH - kDipY;
+        for (size_t column = 0; column < 4; ++column)
+            if (x >= kDipBottomX[column] && x < kDipBottomX[column] + kDipBottomW[column] &&
+                y >= kDipBottomY[column] && y < kDipBottomY[column] + 30.0f) {
+                diplomacyRow_ = bottom;
+                diplomacyColumn_ = column;
+                return activate(bottom, column);
+            }
+        if (y >= 136.0f) {
+            const size_t row = (size_t)((y - 136.0f) / 30.0f);
+            if (row < rows && selectable(row)) {
+                size_t column = SIZE_MAX;
+                for (size_t c = 0; c < 3; ++c)
+                    if (x >= kDipStanceX[c] && x < kDipStanceX[c] + 30.0f) column = c;
+                for (size_t c = 0; c < 4; ++c)
+                    if (x >= kDipTributeX[c] && x < kDipTributeX[c] + 40.0f) column = 3 + c;
+                if (column != SIZE_MAX) {
+                    diplomacyRow_ = row;
+                    diplomacyColumn_ = column;
+                    return activate(row, column);
+                }
+            }
+        }
+    }
+    // D-pad: rows of players, then the bottom controls.
+    if (input.menuUp || input.menuDown) {
+        const int direction = input.menuDown ? 1 : -1;
+        size_t row = diplomacyRow_;
+        for (size_t tries = 0; tries <= rows; ++tries) {
+            row = (size_t)(((int)row + direction + (int)rows + 1) % ((int)rows + 1));
+            if (selectable(row)) break;
+        }
+        diplomacyRow_ = row;
+        const size_t columns = row == bottom ? 4 : 7;
+        diplomacyColumn_ = std::min(diplomacyColumn_, columns - 1);
+    }
+    if (input.menuLeft || input.menuRight) {
+        const size_t columns = diplomacyRow_ == bottom ? 4 : 7;
+        diplomacyColumn_ = (diplomacyColumn_ + columns + (input.menuRight ? 1 : columns - 1)) % columns;
+    }
+    if (input.menuActivate) return activate(diplomacyRow_, diplomacyColumn_);
+    return FrontendAction::None;
+}
+
+void Frontend::renderDiplomacyOverlay(Renderer &renderer, int screenW, int screenH) const {
+    const float sx = screenW / 800.0f, sy = screenH / 600.0f;
+    const auto box = [&](float x, float y, float w, float h, uint8_t r, uint8_t g, uint8_t b,
+                         uint8_t a) {
+        renderer.fillRect((kDipX + x) * sx, (kDipY + y) * sy, w * sx, h * sy, r, g, b, a);
+    };
+    const auto outline = [&](float x, float y, float w, float h, uint8_t r, uint8_t g,
+                             uint8_t b) {
+        box(x, y, w, 2, r, g, b, 255);
+        box(x, y + h - 2, w, 2, r, g, b, 255);
+        box(x, y, 2, h, r, g, b, 255);
+        box(x + w - 2, y, 2, h, r, g, b, 255);
+    };
+    const auto label = [&](const std::string &value, float x, float y, float w, float h,
+                           float scale, bool centre, uint8_t r = 255, uint8_t g = 255,
+                           uint8_t b = 255) {
+        std::vector<std::string> lines;
+        for (size_t start = 0;;) {
+            const size_t end = value.find('\n', start);
+            lines.push_back(value.substr(start, end == std::string::npos ? end : end - start));
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+        const float actual = scale * sy;
+        const float lineHeight = 9.0f * actual * 1.15f;
+        float ty = (kDipY + y) * sy + (h * sy - lineHeight * lines.size()) * 0.5f;
+        for (const std::string &line : lines) {
+            const float width = uiTextWidth(line, actual);
+            const float tx = centre ? (kDipX + x + w * 0.5f) * sx - width * 0.5f
+                                    : (kDipX + x) * sx;
+            drawUiText(renderer, {line}, tx + 1.0f, ty + 1.0f, actual, 0, 0, 0);
+            drawUiText(renderer, {line}, tx, ty, actual, r, g, b);
+            ty += lineHeight;
+        }
+    };
+    renderer.fillRect(0, 0, (float)screenW, (float)screenH, 0, 0, 0, 92); // shade 36%
+    if (diplomacyBackground_ && diplomacyBackground_->tex)
+        renderer.draw(diplomacyBackground_->tex,
+                      Quad{kDipX * sx, kDipY * sy, diplomacyBackground_->w * sx,
+                           diplomacyBackground_->h * sy, diplomacyBackground_->u,
+                           diplomacyBackground_->v,
+                           diplomacyBackground_->u + diplomacyBackground_->w,
+                           diplomacyBackground_->v + diplomacyBackground_->h});
+    else
+        box(0, 0, 796, 470, 6, 20, 40, 235);
+    label(text(9851, "Diplomacy"), 110, 31, 560, 30, 2.0f, true);
+    label(text(9862, "Name"), 37, 115, 108, 20, 1.1f, false);
+    label(text(509, "Tech\nLevel"), 145, 96, 40, 40, 1.0f, true);
+    label(text(9852, "Civilization"), 185, 115, 102, 20, 1.1f, false);
+    label(text(9865, "Their"), 285, 96, 80, 20, 1.1f, true);
+    label(text(9866, "Stance"), 287, 115, 80, 20, 1.1f, true);
+    label(text(9864, "Our Stance"), 332, 96, 210, 20, 1.1f, true);
+    label(text(9853, "Ally"), 332, 115, 70, 20, 1.1f, true);
+    label(text(9854, "Neutral"), 402, 115, 70, 20, 1.1f, true);
+    label(text(9855, "Enemy"), 472, 115, 70, 20, 1.1f, true);
+    {
+        std::string tribute = text(9856, "Pay Tribute (cost %d%%)");
+        if (const size_t at = tribute.find("%d"); at != std::string::npos)
+            tribute.replace(at, 2, std::to_string((int)std::lround(diplomacy_.fee * 100.0f)));
+        if (const size_t at = tribute.find("%%"); at != std::string::npos) tribute.replace(at, 2, "%");
+        label(tribute, 532, 106, 190, 30, 1.1f, true);
+    }
+    const auto stanceName = [&](int stance) {
+        return stance == 0 ? text(9853, "Ally") : stance == 3 ? text(9855, "Enemy")
+                                                               : text(9854, "Neutral");
+    };
+    const size_t rows = diplomacy_.rows.size();
+    for (size_t row = 0; row < rows; ++row) {
+        const DiplomacyRow &entry = diplomacy_.rows[row];
+        const float y = 136.0f + 30.0f * row;
+        box(31, y + 4, 4, 22, entry.red, entry.green, entry.blue, 255);
+        label(entry.name, 37, y, 108, 30, 1.15f, false, entry.defeated ? 150 : 255,
+              entry.defeated ? 150 : 255, entry.defeated ? 150 : 255);
+        label("TL-" + std::to_string(entry.techLevel), 145, y, 40, 30, 1.1f, true);
+        label(entry.civilization, 185, y, 102, 30, 1.1f, false);
+        if (!entry.local) label(stanceName(entry.theirStance), 287, y, 80, 30, 1.1f, true);
+        if (entry.local) {
+            // Own row: the stock left after pending tribute.
+            for (size_t column = 0; column < 4; ++column)
+                label(std::to_string(std::max(0, diplomacyRemaining(column))),
+                      kDipTributeX[column] - 4.0f, y, 49, 30, 1.1f, true);
+            continue;
+        }
+        for (size_t column = 0; column < 3; ++column) {
+            const bool chosen = row < diplomacyStances_.size() &&
+                                diplomacyStances_[row] == kDipStances[column];
+            box(kDipStanceX[column] + 8, y + 8, 14, 14, 20, 30, 45, 255);
+            outline(kDipStanceX[column] + 7, y + 7, 16, 16, 120, 170, 220);
+            if (chosen) box(kDipStanceX[column] + 11, y + 11, 8, 8, 255, 230, 120, 255);
+        }
+        const bool tributeOk = diplomacy_.hasMarket && !entry.defeated &&
+                               (!diplomacy_.lockTeams || entry.ourStance == 0);
+        for (size_t column = 0; column < 4 && tributeOk; ++column) {
+            const SpriteFrame *icon = diplomacyTributeIcons_[(size_t)kDipTributeIcon[column]];
+            if (icon && icon->tex)
+                renderer.draw(icon->tex, Quad{(kDipX + kDipTributeX[column] + 3) * sx,
+                                              (kDipY + y) * sy, icon->w * sx, icon->h * sy,
+                                              icon->u, icon->v, icon->u + icon->w,
+                                              icon->v + icon->h});
+            const int pending = row < diplomacyPending_.size() ? diplomacyPending_[row][column] : 0;
+            if (pending > 0)
+                label(std::to_string(pending), kDipTributeX[column], y + 14, 40, 16, 0.9f, true,
+                      255, 230, 120);
+        }
+    }
+    if (!diplomacy_.hasMarket)
+        label(text(9863, "You need a Spaceport to pay tribute."), 552, 136, 175, 60, 1.0f, true);
+    // Allied Victory, OK, Clear Tributes, Cancel.
+    box(kDipBottomX[0], kDipBottomY[0], 30, 30, 20, 30, 45, 255);
+    outline(kDipBottomX[0], kDipBottomY[0], 30, 30, 120, 170, 220);
+    if (diplomacyAlliedVictory_) box(kDipBottomX[0] + 8, kDipBottomY[0] + 8, 14, 14, 255, 230, 120, 255);
+    label(text(9857, "Allied Victory"), 388, 386, 300, 30, 1.2f, false);
+    const std::array<std::string, 3> buttons{
+        {text(4001, "OK"), text(9859, "Clear Tributes"), text(4002, "Cancel")}};
+    for (size_t index = 1; index < 4; ++index) {
+        box(kDipBottomX[index], kDipBottomY[index], kDipBottomW[index], 30, 14, 40, 70, 235);
+        outline(kDipBottomX[index], kDipBottomY[index], kDipBottomW[index], 30, 90, 140, 200);
+        label(buttons[index - 1], kDipBottomX[index], kDipBottomY[index], kDipBottomW[index], 30,
+              1.3f, true);
+    }
+    // Cursor.
+    if (diplomacyRow_ >= rows) {
+        const size_t c = std::min<size_t>(diplomacyColumn_, 3);
+        outline(kDipBottomX[c] - 3, kDipBottomY[c] - 3, kDipBottomW[c] + 6, 36, 255, 228, 153);
+    } else {
+        const float y = 136.0f + 30.0f * diplomacyRow_;
+        const float x = diplomacyColumn_ < 3 ? kDipStanceX[diplomacyColumn_]
+                                             : kDipTributeX[std::min<size_t>(diplomacyColumn_ - 3, 3)];
+        const float w = diplomacyColumn_ < 3 ? 30.0f : 40.0f;
+        outline(x - 2, y, w + 4, 30, 255, 228, 153);
+    }
+    label("X: SELECT   O: CANCEL   START: OK", 0, 470, 796, 24, 1.1f, true, 205, 213, 222);
+}
+
+// The Achievements screen on its original art (scr10B 50149, 800x600):
+// player rows at y 82 + 52 * row, six stat columns between x 146 and 705, the
+// total at 711-780, and the six tabs along the bottom.
+void Frontend::renderAchievements(Renderer &renderer, int screenW, int screenH) const {
+    const float sx = screenW / 800.0f;
+    const float sy = screenH / 600.0f;
+    const auto drawFrame = [&](const SpriteFrame *frame, float x, float y) {
+        if (!frame || !frame->tex) return;
+        renderer.draw(frame->tex, Quad{x * sx, y * sy, frame->w * sx, frame->h * sy, frame->u,
+                                       frame->v, frame->u + frame->w, frame->v + frame->h});
+    };
+    const auto splitLines = [](const std::string &value) {
+        std::vector<std::string> lines;
+        size_t start = 0;
+        while (true) {
+            const size_t end = value.find('\n', start);
+            lines.push_back(value.substr(start, end == std::string::npos ? end : end - start));
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+        return lines;
+    };
+    // Centred (possibly two-line) text in an 800x600 box.
+    const auto centred = [&](const std::string &value, float left, float top, float width,
+                             float height, float scale, uint8_t red, uint8_t green,
+                             uint8_t blue) {
+        const std::vector<std::string> lines = splitLines(value);
+        const float actual = scale * sy;
+        const float lineHeight = 9.0f * actual * 1.15f;
+        float y = top * sy + (height * sy - lineHeight * lines.size()) * 0.5f;
+        for (const std::string &line : lines) {
+            const float w = uiTextWidth(line, actual);
+            // White text with a black shadow (text_color1/2 of screen 50061).
+            drawUiText(renderer, {line}, (left + width * 0.5f) * sx - w * 0.5f + 1.0f, y + 1.0f,
+                       actual, 0, 0, 0);
+            drawUiText(renderer, {line}, (left + width * 0.5f) * sx - w * 0.5f, y, actual, red,
+                       green, blue);
+            y += lineHeight;
+        }
+    };
+    if (originalMenuBackground_ && originalMenuBackground_->tex)
+        renderer.draw(originalMenuBackground_->tex,
+                      Quad{0, 0, (float)screenW, (float)screenH, originalMenuBackground_->u,
+                           originalMenuBackground_->v,
+                           originalMenuBackground_->u + originalMenuBackground_->w,
+                           originalMenuBackground_->v + originalMenuBackground_->h});
+
+    static constexpr std::array<float, 7> columnEdges{{146, 235, 330, 425, 520, 615, 705}};
+    static constexpr std::array<std::array<int, 6>, 5> headerIds{{
+        {{9886, 9887, 9888, 9889, -1, -1}},
+        {{9896, 9897, 9898, 9899, 9900, 9901}},
+        {{9906, 9907, 9908, 9909, 9910, 9911}},
+        {{9916, 9917, 9918, 9919, 9920, 9921}},
+        {{9926, 9927, 9928, 9929, 9930, 9931}},
+    }};
+    static constexpr std::array<const char *, 30> headerFallbacks{{
+        "Military", "Economy", "Technology", "Society", "", "",
+        "Units\nKilled", "Units\nLost", "Buildings\nRazed", "Buildings\nLost", "Units\nTurned", "Largest\nArmy",
+        "Food\nCollected", "Carbon\nCollected", "Ore\nCollected", "Nova\nCollected", "Trade\nProfit", "Tribute\nSent / Rcvd",
+        "Tech\nLevel 2", "Tech\nLevel 3", "Tech\nLevel 4", "% Map\nExplored", "Research\nCount", "Research\nPercent",
+        "Total\nMonuments", "Total\nFortresses", "Holocrons\nCaptured", "Holocron\nNova", "Worker\nHigh", "Survival\nto Finish",
+    }};
+    static constexpr std::array<int, 6> tabIds{{9938, 9939, 9940, 9941, 9942, 9943}};
+    static constexpr std::array<const char *, 6> tabFallbacks{{
+        "Score", "Military", "Economy", "Technology", "Society", "Timeline"}};
+
+    centred(text(9936, "Achievements"), 107, 10, 176, 23, 1.45f, 255, 255, 255);
+    {
+        const int seconds = (int)achievements_.elapsedSeconds;
+        char clock[16];
+        snprintf(clock, sizeof clock, "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60,
+                 seconds % 60);
+        centred(clock, 665, 14, 90, 18, 1.2f, 255, 255, 255);
+    }
+    const size_t tab = std::min<size_t>(achievementsTab_, 5);
+    // Player names on their colour banners.
+    for (size_t row = 0; row < achievements_.players.size() && row < 8; ++row) {
+        const AchievementsPlayer &player = achievements_.players[row];
+        const float top = 82.0f + 52.0f * row;
+        const SpriteFrame *banner =
+            achievementBannerFrames_[(size_t)std::clamp(player.color, 0, 7)];
+        if (banner)
+            drawFrame(banner, 4, top);
+        else
+            renderer.fillRect(4 * sx, top * sy, 138 * sx, 33 * sy, player.red, player.green,
+                              player.blue, 255);
+        centred(player.name, 14, top, 128, 33, 1.3f, 255, 255, 255);
+    }
+    if (tab < 5) {
+        for (size_t column = 0; column < 6; ++column) {
+            const int id = headerIds[tab][column];
+            if (id < 0) continue;
+            centred(text(id, headerFallbacks[tab * 6 + column]), columnEdges[column], 45,
+                    columnEdges[column + 1] - columnEdges[column], 27, 1.05f, 255, 255, 255);
+        }
+        centred(tab == 0 ? text(9890, "Total Score") : text(9938, "Score"), 711, 45, 69, 27,
+                1.05f, 255, 255, 255);
+        for (size_t row = 0; row < achievements_.players.size() && row < 8; ++row) {
+            const AchievementsPlayer &player = achievements_.players[row];
+            const float top = 82.0f + 52.0f * row;
+            for (size_t column = 0; column < 6; ++column)
+                centred(player.cells[tab][column], columnEdges[column], top,
+                        columnEdges[column + 1] - columnEdges[column], 33, 1.35f, 255, 255,
+                        255);
+            centred(std::to_string(player.total), 711, top, 69, 33, 1.35f, 255, 255, 255);
+        }
+    } else {
+        // Timeline: each minute's share of the total score, stacked by player.
+        const float left = 146.0f, right = 780.0f, top = 82.0f, bottom = 479.0f;
+        renderer.fillRect(left * sx, top * sy, (right - left) * sx, (bottom - top) * sy, 8, 10,
+                          8, 255);
+        size_t samples = 0;
+        for (const AchievementsPlayer &player : achievements_.players)
+            samples = std::max(samples, player.timeline.size());
+        if (samples) {
+            const float width = (right - left) / samples;
+            for (size_t sample = 0; sample < samples; ++sample) {
+                int sum = 0;
+                for (const AchievementsPlayer &player : achievements_.players)
+                    if (sample < player.timeline.size())
+                        sum += std::max(0, player.timeline[sample]);
+                if (sum <= 0) continue;
+                float y = top;
+                for (const AchievementsPlayer &player : achievements_.players) {
+                    if (sample >= player.timeline.size()) continue;
+                    const float h =
+                        (bottom - top) * std::max(0, player.timeline[sample]) / (float)sum;
+                    renderer.fillRect((left + width * sample) * sx, y * sy,
+                                      std::max(1.0f, width * sx), h * sy, player.red,
+                                      player.green, player.blue, 255);
+                    y += h;
+                }
+            }
+        }
+        centred(text(9943, "Timeline"), 146, 45, 634, 27, 1.2f, 255, 255, 255);
+    }
+    // Tabs and the Back button.
+    for (size_t index = 0; index < 6; ++index) {
+        const float x = 82.0f + 108.0f * index;
+        const SpriteFrame *frame = achievementTabFrames_[index * 2 + (index == tab ? 0 : 1)];
+        drawFrame(frame, x, 541);
+        const bool selected = index == tab;
+        centred(text(tabIds[index], tabFallbacks[index]), x, 541, 99, 48, 1.2f, 255,
+                selected ? 228 : 255, selected ? 153 : 255);
+    }
+    centred(achievementsReturn_ == FrontendScreen::Outcome ? std::string("Back")
+                                                         : text(9881, "Return to Game"),
+            645, 495, 130, 38, 1.3f, 255, 255, 255);
 }
 
 void Frontend::renderObjectivesOverlay(

@@ -36,6 +36,27 @@ enum class FrontendScreen : uint8_t {
     // A won campaign mission's closing scene (Campaign/Media/*_end.mm),
     // shown before the outcome menu.
     CampaignEpilogue,
+    // The original's Achievements screen (screen info 50061): score and the
+    // military, economy, technology and society statistics per player, and
+    // the score timeline.
+    Achievements,
+    // The in-game Diplomacy dialog (exe 0x45b080, "dlg_dip" 50014): stances
+    // and tribute, drawn over the paused game.
+    Diplomacy,
+    // Chat: send a numbered taunt to all, allies or one player (the
+    // original's Chat dialog; computer players react to some taunts).
+    Chat,
+};
+
+struct DiplomacyResult {
+    std::vector<std::pair<int, int>> stances;                // player, stance
+    std::vector<std::pair<int, std::array<int, 4>>> tributes; // player, amounts by resource
+    bool alliedVictory = false;
+};
+
+struct AchievementsData {
+    std::vector<AchievementsPlayer> players;
+    float elapsedSeconds = 0.0f;
 };
 
 enum class FrontendAction : uint8_t {
@@ -51,6 +72,10 @@ enum class FrontendAction : uint8_t {
     ReturnToMainMenu,
     CompleteCampaignMission,
     Quit,
+    OpenDiplomacy,   // fill the dialog (setDiplomacy) before it is drawn
+    ApplyDiplomacy,  // OK: apply diplomacyResult()
+    OpenChat,        // fill setChatPlayers / setTaunts first
+    SendChat,        // chatRecipient() / chatTaunt()
 };
 
 using FrontendStringLookup =
@@ -103,6 +128,60 @@ public:
     // loaded: the briefing dialog). Owned by the caller.
     void setCampaignScene(const CampaignScene *scene) {
         campaignScene_ = scene;
+    }
+    void setAchievements(AchievementsData data) {
+        achievements_ = std::move(data);
+    }
+    // sat_tabs.slp (50765): frame 2*tab is the selected tab, 2*tab+1 the
+    // normal one; PNBnr1.slp (50762): the player-coloured name banners.
+    void setAchievementsArt(
+        const std::array<const SpriteFrame *, 12> &tabs,
+        const std::array<const SpriteFrame *, 8> &banners) {
+        achievementTabFrames_ = tabs;
+        achievementBannerFrames_ = banners;
+    }
+    size_t achievementsTab() const { return achievementsTab_; }
+    void setDiplomacy(DiplomacyData data) {
+        diplomacy_ = std::move(data);
+        diplomacyPending_ = {};
+        diplomacyStances_.clear();
+        for (const DiplomacyRow &row : diplomacy_.rows)
+            diplomacyStances_.push_back(row.ourStance);
+        diplomacyAlliedVictory_ = diplomacy_.alliedVictory;
+        diplomacyRow_ = 0;
+        diplomacyColumn_ = 0;
+        for (size_t i = 0; i < diplomacy_.rows.size(); ++i)
+            if (!diplomacy_.rows[i].local) { diplomacyRow_ = i; break; }
+    }
+    // sat as for Achievements: tradicon.shp 50732 frames 0 carbon, 1 ore,
+    // 2 food, 3 nova; the dialog background dlg_dip 50221.
+    void setDiplomacyArt(const SpriteFrame *background,
+                         const std::array<const SpriteFrame *, 4> &tributeIcons) {
+        diplomacyBackground_ = background;
+        diplomacyTributeIcons_ = tributeIcons;
+    }
+    const DiplomacyResult &diplomacyResult() const { return diplomacyResult_; }
+    // Chat: recipients are "All", "Allies", then each other player.
+    void setChatPlayers(std::vector<std::pair<int, std::string>> players) {
+        chatPlayers_ = std::move(players);
+        chatRecipient_ = 0;
+    }
+    void setTaunts(std::vector<std::pair<int, std::string>> taunts) { taunts_ = std::move(taunts); }
+    // 0 all, 1 allies, else the player number.
+    int chatRecipient() const {
+        return chatRecipient_ < 2 ? (int)chatRecipient_
+                                  : chatPlayers_[chatRecipient_ - 2].first;
+    }
+    int chatTaunt() const {
+        return chatSelection_ < taunts_.size() ? taunts_[chatSelection_].first : 0;
+    }
+    void renderChatOverlay(Renderer &renderer, int screenW, int screenH) const;
+    void renderDiplomacyOverlay(Renderer &renderer, int screenW, int screenH) const;
+    void showDiplomacyForTesting() { screen_ = FrontendScreen::Diplomacy; }
+    void showAchievementsForTesting(size_t tab) {
+        if (screen_ != FrontendScreen::Achievements) achievementsReturn_ = screen_;
+        screen_ = FrontendScreen::Achievements;
+        achievementsTab_ = tab;
     }
     void setOriginalBriefingDialog(
         const SpriteFrame *frame) {
@@ -352,6 +431,26 @@ private:
     FrontendScreen objectivesReturnScreen_ =
         FrontendScreen::Gameplay;
     size_t objectivesPage_ = 0;
+    AchievementsData achievements_;
+    size_t achievementsTab_ = 0;
+    FrontendScreen achievementsReturn_ = FrontendScreen::Outcome;
+    std::array<const SpriteFrame *, 12> achievementTabFrames_{};
+    std::array<const SpriteFrame *, 8> achievementBannerFrames_{};
+    void renderAchievements(Renderer &renderer, int screenW, int screenH) const;
+    DiplomacyData diplomacy_;
+    std::vector<int> diplomacyStances_;
+    // Pending tribute by row and dialog column (carbon, food, nova, ore).
+    std::array<std::array<int, 4>, 16> diplomacyPending_{};
+    bool diplomacyAlliedVictory_ = false;
+    size_t diplomacyRow_ = 0, diplomacyColumn_ = 0;
+    DiplomacyResult diplomacyResult_;
+    const SpriteFrame *diplomacyBackground_ = nullptr;
+    std::array<const SpriteFrame *, 4> diplomacyTributeIcons_{};
+    FrontendAction updateDiplomacy(const InputState &input);
+    FrontendAction updateChat(const InputState &input);
+    std::vector<std::pair<int, std::string>> chatPlayers_, taunts_;
+    size_t chatRecipient_ = 0, chatSelection_ = 0;
+    int diplomacyRemaining(size_t column) const;
 };
 
 } // namespace swgb

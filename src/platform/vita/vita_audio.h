@@ -24,6 +24,8 @@ public:
 
     bool start(std::string *err = nullptr);
     float play(const std::string &name);
+    void playTaunt(int number);
+    void setTauntDir(std::string dir) { tauntDir_ = std::move(dir); }
     std::vector<std::string> campaignBriefing(
         const std::string &prefix) const;
     float playAmbient(const std::string &name);
@@ -65,6 +67,7 @@ private:
     };
 
     std::string scenarioSoundDir_;
+    std::string tauntDir_;
     std::string campaignSoundDir_;
     std::string musicDir_;
     std::string terrainSoundDir_;

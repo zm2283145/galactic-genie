@@ -33,6 +33,7 @@
 #include <cctype>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <cstdlib>
 #include <string>
@@ -604,6 +605,11 @@ int main() {
                 backgroundPalette =
                     mainMenuPalette;
                 break;
+            case swgb::FrontendScreen::Achievements:
+                // Screen info 50061: scr10B with the scr_ach palette.
+                backgroundSlp = 50149;
+                backgroundPalette = 50531;
+                break;
             case swgb::FrontendScreen::CampaignBrowser:
                 // Original campaigns 53014, Clone Campaigns 53222; the Custom
                 // Campaigns list sits on the main menu art.
@@ -741,6 +747,7 @@ int main() {
             kScenarioSoundDir, kCampaignSoundDir,
             kMusicDir, kTerrainSoundDir);
         audio.setLogger([](const std::string &s) { logf("audio: %s", s.c_str()); });
+        audio.setTauntDir(std::string(kRoot) + "/Taunt");
         std::string audioError;
         if (!audio.start(&audioError)) logf("audio disabled: %s", audioError.c_str());
         audio.setVolumes(
@@ -764,6 +771,7 @@ int main() {
                     logf("slow sound %s %s: %llu us", kind, name.c_str(), (unsigned long long)us);
             }
         };
+        game.setTauntPlayer([&](int number) { audio.playTaunt(number); });
         game.setSoundPlayer([&](const std::string &name) {
             SoundTimer timer{sceKernelGetProcessTimeWide(), soundUs, soundMaxUs, "voice", name};
             return audio.play(name);
@@ -1034,6 +1042,11 @@ int main() {
         bool autostartScene = false;
         float autostartQuitAfter = 0.0f; // wall seconds after start-up (menu tests)
         float autostartExitAfter = 0.0f;
+        // achievements 1: at exit_after, show each Achievements tab for 1.5 s
+        // first.
+        bool autostartAchievements = false;
+        uint64_t autostartAchievementsStart = 0;
+        size_t autostartAchievementsTab = SIZE_MAX;
         int autostartBattle = 0, autostartBattleEnemy = 5;
         bool autostartPending = false;
         uint64_t autostartGameplayStart = 0;
@@ -1059,6 +1072,8 @@ int main() {
                         autostartScene = atoi(value) != 0;
                     else if (std::string(key) == "quit_after")
                         autostartQuitAfter = (float)atof(value);
+                    else if (std::string(key) == "achievements")
+                        autostartAchievements = atoi(value) != 0;
                 }
             }
             fclose(autostart);
@@ -1346,9 +1361,45 @@ int main() {
                 }
                 if (!autostartGameplayStart) autostartGameplayStart = now;
                 if ((now - autostartGameplayStart) / 1e6f >= autostartExitAfter) {
-                    logf("autostart: exiting after %.0f s of gameplay", autostartExitAfter);
+                    if (autostartAchievements && !autostartAchievementsStart) {
+                        autostartAchievementsStart = now;
+                    } else {
+                        logf("autostart: exiting after %.0f s of gameplay", autostartExitAfter);
+                        if (g_log) fflush(g_log);
+                        sceKernelExitProcess(0);
+                    }
+                }
+            }
+            if (autostartAchievementsStart) {
+                // Six Achievements tabs, then the Diplomacy dialog and a taunt
+                // (taunt 39) sent to everyone.
+                const size_t tab = (size_t)((now - autostartAchievementsStart) / 1500000ull);
+                if (tab >= 9) {
+                    logf("autostart: achievements shown, exiting");
                     if (g_log) fflush(g_log);
                     sceKernelExitProcess(0);
+                }
+                if (tab != autostartAchievementsTab) {
+                    autostartAchievementsTab = tab;
+                    if (tab < 6) {
+                        frontend.showAchievementsForTesting(tab);
+                        logf("autostart: achievements tab %u", (unsigned)tab);
+                    } else if (tab == 6) {
+                        std::array<const swgb::SpriteFrame *, 4> icons{};
+                        for (size_t i = 0; i < icons.size(); ++i)
+                            icons[i] = assets.interfaceFrame(50732, i, 50500);
+                        frontend.setDiplomacyArt(assets.interfaceFrame(50221, 0, 50500), icons);
+                        frontend.setDiplomacy(game.diplomacyData());
+                        frontend.showDiplomacyForTesting();
+                        logf("autostart: diplomacy dialog, %u rows",
+                             (unsigned)game.diplomacyData().rows.size());
+                    } else if (tab == 7) {
+                        std::vector<int> everyone;
+                        for (const swgb::DiplomacyRow &row : game.diplomacyData().rows)
+                            if (!row.local) everyone.push_back(row.player);
+                        game.sendChat(game.localPlayerForTesting(), everyone, "39");
+                        logf("autostart: sent taunt 39");
+                    }
                 }
             }
             const swgb::FrontendScreen currentFrontendScreen =
@@ -1365,6 +1416,8 @@ int main() {
                     matchMusic = true;
                 else if (currentFrontendScreen != Screen::Pause &&
                          currentFrontendScreen != Screen::Options &&
+                         currentFrontendScreen != Screen::Diplomacy &&
+                         currentFrontendScreen != Screen::Chat &&
                          currentFrontendScreen != Screen::Confirm)
                     matchMusic = false; // the in-game menus keep the game's music
                 if (matchMusic)
@@ -1372,13 +1425,36 @@ int main() {
                 else if (currentFrontendScreen == Screen::CampaignBriefing ||
                          currentFrontendScreen == Screen::CampaignEpilogue)
                     music = swgb::VitaAudio::Music::None; // the scene's narration
-                else if (currentFrontendScreen == Screen::Outcome)
+                else if (currentFrontendScreen == Screen::Outcome ||
+                         currentFrontendScreen == Screen::Achievements)
                     music = game.victoryStateForTesting() == 1 ? swgb::VitaAudio::Music::Victory
                                                                : swgb::VitaAudio::Music::Defeat;
                 audio.setMusic(music);
             }
             if (currentFrontendScreen !=
                 previousFrontendScreen) {
+                if (currentFrontendScreen == swgb::FrontendScreen::Achievements) {
+                    // Tabs (sat_tabs 50765) and name banners (PNBnr1 50762),
+                    // and this game's statistics.
+                    std::array<const swgb::SpriteFrame *, 12> tabs{};
+                    std::array<const swgb::SpriteFrame *, 8> banners{};
+                    for (size_t i = 0; i < tabs.size(); ++i)
+                        tabs[i] = assets.interfaceFrame(50765, i, 50531);
+                    for (size_t i = 0; i < banners.size(); ++i)
+                        banners[i] = assets.interfaceFrame(50762, i, 50531);
+                    frontend.setAchievementsArt(tabs, banners);
+                    swgb::AchievementsData data;
+                    data.players = game.achievementsPlayers();
+                    data.elapsedSeconds = game.elapsedGameTime();
+                    for (const swgb::AchievementsPlayer &row : data.players)
+                        logf("achievements: player %d '%s' score %d", row.player,
+                             row.name.c_str(), row.total);
+                    frontend.setAchievements(std::move(data));
+                } else if (previousFrontendScreen == swgb::FrontendScreen::Achievements) {
+                    frontend.setAchievementsArt({}, {});
+                    for (size_t i = 0; i < 12; ++i) assets.releaseInterfaceFrame(50765, i, 50531);
+                    for (size_t i = 0; i < 8; ++i) assets.releaseInterfaceFrame(50762, i, 50531);
+                }
                 if (currentFrontendScreen ==
                     swgb::FrontendScreen::CampaignBriefing) {
                     audio.resetSession();
@@ -1602,6 +1678,61 @@ int main() {
                 stickBoxMoved = false;
                 if (!started)
                     game.clearMatch();
+            } else if (action == swgb::FrontendAction::OpenDiplomacy) {
+                // dlg_dip 50221 and the tribute icons tradicon 50732.
+                std::array<const swgb::SpriteFrame *, 4> icons{};
+                for (size_t i = 0; i < icons.size(); ++i)
+                    icons[i] = assets.interfaceFrame(50732, i, 50500);
+                frontend.setDiplomacyArt(assets.interfaceFrame(50221, 0, 50500), icons);
+                frontend.setDiplomacy(game.diplomacyData());
+            } else if (action == swgb::FrontendAction::OpenChat) {
+                // Other players by name, and the taunt list (Taunt/taunts.txt:
+                // "number|text" lines).
+                std::vector<std::pair<int, std::string>> players;
+                for (const swgb::DiplomacyRow &row : game.diplomacyData().rows)
+                    if (!row.local && !row.defeated) players.push_back({row.player, row.name});
+                frontend.setChatPlayers(std::move(players));
+                static std::vector<std::pair<int, std::string>> taunts;
+                if (taunts.empty())
+                    if (FILE *file = fopen((std::string(kRoot) + "/Taunt/taunts.txt").c_str(), "r")) {
+                        char line[256];
+                        while (fgets(line, sizeof line, file)) {
+                            char *bar = strchr(line, '|');
+                            if (!bar) continue;
+                            *bar = 0;
+                            std::string name = bar + 1;
+                            while (!name.empty() && (name.back() == '\n' || name.back() == '\r'))
+                                name.pop_back();
+                            taunts.push_back({atoi(line), name});
+                        }
+                        fclose(file);
+                    }
+                if (taunts.empty())
+                    for (int number = 1; number <= 42; ++number) taunts.push_back({number, ""});
+                frontend.setTaunts(taunts);
+            } else if (action == swgb::FrontendAction::SendChat) {
+                const int local = game.localPlayerForTesting();
+                const int to = frontend.chatRecipient();
+                std::vector<int> recipients;
+                for (const swgb::DiplomacyRow &row : game.diplomacyData().rows) {
+                    if (row.local || row.defeated) continue;
+                    if (to == 0 || (to == 1 && row.ourStance == 0) || to == row.player)
+                        recipients.push_back(row.player);
+                }
+                game.sendChat(local, recipients, std::to_string(frontend.chatTaunt()));
+            } else if (action == swgb::FrontendAction::ApplyDiplomacy) {
+                const swgb::DiplomacyResult &result = frontend.diplomacyResult();
+                const int local = game.localPlayerForTesting();
+                for (const auto &[player, stance] : result.stances)
+                    game.setStance(local, player, stance);
+                const float fee = game.diplomacyData().fee;
+                for (const auto &[player, amounts] : result.tributes)
+                    for (int type = 0; type < 4; ++type)
+                        if (amounts[(size_t)type] > 0)
+                            game.payTribute(local, player, type, (float)amounts[(size_t)type], fee);
+                game.setAlliedVictory(local, result.alliedVictory);
+                logf("diplomacy: %u stance changes, %u tributes", (unsigned)result.stances.size(),
+                     (unsigned)result.tributes.size());
             } else if (
                 action ==
                 swgb::FrontendAction::SaveMatch) {
@@ -1679,7 +1810,9 @@ int main() {
                 frontend.screen() ==
                     swgb::FrontendScreen::Gameplay ||
                 frontend.screen() ==
-                    swgb::FrontendScreen::Objectives;
+                    swgb::FrontendScreen::Objectives ||
+                frontend.screen() == swgb::FrontendScreen::Diplomacy ||
+                frontend.screen() == swgb::FrontendScreen::Chat;
             // Simulation: either one variable step per frame (simrate 0, the
             // original update), or fixed steps of 1/simHz with input handled
             // every frame and moving objects drawn between steps.
@@ -1783,6 +1916,10 @@ int main() {
                     frontend.renderObjectivesOverlay(
                         renderer, kScreenW,
                         kScreenH);
+                else if (frontend.screen() == swgb::FrontendScreen::Diplomacy)
+                    frontend.renderDiplomacyOverlay(renderer, kScreenW, kScreenH);
+                else if (frontend.screen() == swgb::FrontendScreen::Chat)
+                    frontend.renderChatOverlay(renderer, kScreenW, kScreenH);
             } else if (frontend.screen() ==
                      swgb::FrontendScreen::ScenarioEditor)
                 editor.render(

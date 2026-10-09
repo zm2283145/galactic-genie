@@ -14,7 +14,7 @@ namespace {
 
 constexpr char kSaveMagic[8] = {
     'S', 'W', 'G', 'B', 'S', 'A', 'V', 'E'};
-constexpr uint32_t kSaveVersion = 6;
+constexpr uint32_t kSaveVersion = 7;
 constexpr uint32_t kOldestSaveVersion = 1;
 constexpr size_t kMaxSaveBytes = 32u * 1024u * 1024u;
 constexpr uint32_t kMaxObjects = 20000;
@@ -697,6 +697,11 @@ bool Game::saveMatch(
     }
     for (const auto &values : resources_)
         writeMap(writer, values);
+    for (size_t i = 0; i < 3; ++i) {
+        writer.scalar(commodityPrice_[i]);
+        writer.scalar(commodityCounter_[i]);
+        writer.scalar(commodityAccumulator_[i]);
+    }
     for (const auto &values : researchedTechs_)
         writeSet(writer, values);
     for (const auto &values : disabledTechs_)
@@ -873,6 +878,10 @@ bool Game::saveMatch(
         SAVE_FIELD(triggerAttack);
         SAVE_FIELD(frozen);
         writer.string(object.triggerName);
+        SAVE_FIELD(tradeMarketId);
+        SAVE_FIELD(tradeHomeId);
+        SAVE_FIELD(tradeCarrying);
+        SAVE_FIELD(conversionCountdown);
 #undef SAVE_FIELD
     }
 
@@ -899,6 +908,9 @@ bool Game::saveMatch(
         SAVE_PROJECTILE(aimY);
         SAVE_PROJECTILE(blastWidth);
         SAVE_PROJECTILE(blastLevel);
+        SAVE_PROJECTILE(arcHeight);
+        SAVE_PROJECTILE(arcVelocity);
+        SAVE_PROJECTILE(arcGravity);
 #undef SAVE_PROJECTILE
     }
     writer.scalar((uint32_t)remains_.size());
@@ -1389,6 +1401,17 @@ bool Game::loadMatch(
             if (err) *err = reader.error();
             return false;
         }
+    std::array<float, 3> commodityPrice{{1.0f, 1.0f, 1.3f}};
+    std::array<int, 3> commodityCounter{};
+    std::array<float, 3> commodityAccumulator{};
+    if (version >= 7)
+        for (size_t i = 0; i < 3; ++i)
+            if (!reader.scalar(commodityPrice[i]) || !reader.scalar(commodityCounter[i]) ||
+                !reader.scalar(commodityAccumulator[i]) ||
+                !std::isfinite(commodityPrice[i])) {
+                if (err) *err = reader.error();
+                return false;
+            }
     for (auto &values : researchedTechs)
         if (!readSet(reader, values, 8192)) {
             if (err) *err = reader.error();
@@ -1648,6 +1671,14 @@ bool Game::loadMatch(
             if (err) *err = reader.error();
             return false;
         }
+        if (version >= 7 &&
+            (!LOAD_FIELD(tradeMarketId) ||
+             !LOAD_FIELD(tradeHomeId) ||
+             !LOAD_FIELD(tradeCarrying) ||
+             !LOAD_FIELD(conversionCountdown))) {
+            if (err) *err = reader.error();
+            return false;
+        }
 #undef LOAD_FIELD
         object.unit =
             resolveUnit(object.player, unitId);
@@ -1809,6 +1840,13 @@ bool Game::loadMatch(
             !reader.scalar(projectile.aimY) ||
             !reader.scalar(projectile.blastWidth) ||
             !reader.scalar(projectile.blastLevel)) {
+            if (err) *err = reader.error();
+            return false;
+        }
+        if (version >= 7 &&
+            (!reader.scalar(projectile.arcHeight) ||
+             !reader.scalar(projectile.arcVelocity) ||
+             !reader.scalar(projectile.arcGravity))) {
             if (err) *err = reader.error();
             return false;
         }
@@ -2330,6 +2368,9 @@ bool Game::loadMatch(
     visibilityTouched_.fill(true);
     players_ = std::move(players);
     resources_ = std::move(resources);
+    commodityPrice_ = commodityPrice;
+    commodityCounter_ = commodityCounter;
+    commodityAccumulator_ = commodityAccumulator;
     researchedTechs_ =
         std::move(researchedTechs);
     disabledTechs_ =

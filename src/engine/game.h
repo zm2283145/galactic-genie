@@ -158,6 +158,34 @@ struct MatchSaveMetadata {
     uint32_t campaignEntry = 0;
 };
 
+// One row of the Diplomacy dialog.
+struct DiplomacyRow {
+    int player = 0;
+    std::string name, civilization;
+    int techLevel = 1;
+    int theirStance = 1, ourStance = 1; // 0 ally, 1 neutral, 3 enemy
+    bool local = false, defeated = false;
+    uint8_t red = 255, green = 255, blue = 255;
+};
+struct DiplomacyData {
+    std::vector<DiplomacyRow> rows;
+    std::array<int, 4> stock{}; // the local player's food, carbon, ore, nova
+    float fee = 0.3f;           // attribute 46
+    bool hasMarket = false, lockTeams = false, alliedVictory = false;
+};
+// One player's row on the Achievements screen. cells[tab][column] holds the
+// text of the Score (0), Military, Economy, Technology and Society (4) tabs.
+struct AchievementsPlayer {
+    int player = 0;
+    std::string name;
+    int color = 0;
+    uint8_t red = 255, green = 255, blue = 255;
+    bool active = true;
+    std::array<std::array<std::string, 6>, 5> cells{};
+    int total = 0;
+    std::vector<int> timeline;
+};
+
 class Game {
 public:
     explicit Game(Assets &assets) : assets_(assets) {
@@ -955,6 +983,23 @@ public:
     bool objectActive(uint32_t spawnId) const;
     float resource(int player, int resourceId) const;
     bool researchTechnology(int player, int technologyId);
+    // The original's score (exe 0x602752 registers the elements per player;
+    // 0x607630 updates them): military, economy, technology and society
+    // points, and their total.
+    struct ScoreBreakdown {
+        int military = 0, economy = 0, technology = 0, society = 0, total = 0;
+    };
+    ScoreBreakdown playerScoreBreakdown(int player) const;
+    // Highest value an attribute reached this game (score elements of type 3
+    // and 4 keep these for the achievements screen).
+    float peakAttribute(int player, int attribute) const;
+    // Achievements screen values: game time a tech level was reached (-1:
+    // not reached), researched share of the civilization's technologies, and
+    // the score total sampled every minute (the Timeline tab).
+    float techLevelTime(int player, int level) const;
+    int researchPercent(int player) const;
+    std::vector<int> scoreTimeline(int player) const;
+    float elapsedGameTime() const { return simulationTime_; }
     const std::string &currentInstruction() const { return currentInstruction_; }
     const std::string &statusMessageForTesting() const {
         return statusMessage_;
@@ -1126,6 +1171,12 @@ public:
         if (Object *o = findObject(spawnId)) o->attackMode = (AttackMode)mode;
     }
     size_t projectileCountForTesting() const { return projectiles_.size(); }
+    // Index of the first projectile the source launched (count if none).
+    size_t projectileFromForTesting(uint32_t sourceId) const {
+        for (size_t i = 0; i < projectiles_.size(); ++i)
+            if (projectiles_[i].sourceId == sourceId) return i;
+        return projectiles_.size();
+    }
     float farthestProjectileDistanceForTesting(
         uint32_t sourceId) const;
     int firstProjectileUnitForTesting() const {
@@ -1381,6 +1432,28 @@ public:
         int player) const;
     int holocronCountForTesting() const;
     int playerScoreForTesting(int player) const;
+    bool issueTradeOrderForTesting(uint32_t traderId, uint32_t marketId);
+    // Spaceport trading, tribute and diplomacy (the original's market buttons
+    // and Diplomacy dialog). Resource types 0 food, 1 carbon, 2 ore, 3 nova.
+    bool ownsMarket(int player) const;
+    int commodityBuyPrice(int player, int resourceType) const;
+    int commoditySellPrice(int player, int resourceType) const;
+    bool buyCommodity(int player, int resourceType, int lots);
+    bool sellCommodity(int player, int resourceType, int lots);
+    float payTribute(int from, int to, int resourceType, float amount, float feeFactor);
+    void setStance(int from, int to, int stance);
+    void setAlliedVictory(int player, bool enabled);
+    // Chat and taunts. A message starting with a number plays that taunt
+    // (Taunt/tauntNNN.mp3) and computer recipients see it as a taunt.
+    void sendChat(int from, const std::vector<int> &recipients, const std::string &text);
+    void setTauntPlayer(std::function<void(int)> player) { playTaunt_ = std::move(player); }
+    std::string lastChatForTesting() const {
+        return chatLines_.empty() ? std::string() : chatLines_.back().text;
+    }
+    // The Diplomacy dialog's rows and the local player's stock.
+    DiplomacyData diplomacyData() const;
+    // The rows of the Achievements screen, one per player who took part.
+    std::vector<AchievementsPlayer> achievementsPlayers() const;
 
     static constexpr int kTileHalfW = 48;
     static constexpr int kTileHalfH = 24;
@@ -1469,6 +1542,10 @@ private:
         uint32_t carriedHolocronId = 0;
         // Line 2: shields (updated for every object) and friends.
         uint32_t holocronTargetId = 0;
+        // Trade (Cargo Trader, task action 111): the foreign market it trades
+        // with, its home market and whether it carries goods home.
+        uint32_t tradeMarketId = 0, tradeHomeId = 0;
+        bool tradeCarrying = false;
         float shieldPoints = 0, maxShieldPoints = 0;
         float shieldRegenerationTime = 0;
         float shieldDrainTime = 0;
@@ -1529,7 +1606,8 @@ private:
         uint32_t guardTargetId = 0;
         uint32_t followTargetId = 0;
         float conversionProgress = 0;
-        float conversionRecharge = 0;
+        float conversionRecharge = 0; // faith deficit (100 - faith)
+        float conversionCountdown = 0; // to the next conversion roll
         uint32_t carriedById = 0;
         bool wander = false;
         bool drawShadows = true;
@@ -1629,6 +1707,11 @@ private:
 
     struct AiPlayerState {
         AiProgram program;
+        // Player bound by the last true fact with an any-<kind> selector,
+        // read back as this-any-<kind> (AoK script semantics).
+        std::unordered_map<std::string, int> thisAny;
+        // Taunts received: (sender, taunt number), until acknowledged.
+        std::set<std::pair<int, int>> taunts;
         std::unordered_map<int, int> goals;
         std::unordered_map<std::string, int>
             strategicNumbers;
@@ -1691,7 +1774,11 @@ private:
         float aimX = 0, aimY = 0;
         float blastWidth = 0;   // splash radius (attacker or projectile)
         int blastLevel = 3;     // 3 = target only; <= 2 also hits friends
+        // Ballistic arc (projectile arc, exe 0x407729): height above the
+        // straight flight line, its vertical speed and gravity.
+        float arcHeight = 0, arcVelocity = 0, arcGravity = 0;
     };
+    void initProjectileArc(Projectile &projectile, float destX, float destY) const;
 
     struct Remains {
         const dat::Unit *deadUnit = nullptr;
@@ -1891,9 +1978,9 @@ private:
         const Object &converter) const;
     float conversionChargeFraction(
         const Object &converter) const;
-    bool canConvert(
-        const Object &converter,
-        const Object &target) const;
+    bool canConvert(const Object &converter, const Object &target,
+                    bool requireFaith = true) const;
+    float conversionRange(const Object &converter, const Object &target) const;
     bool issueConversion(
         Object &converter, Object &target);
     void updateConversion(float dt);
@@ -1952,7 +2039,11 @@ private:
     float buildingProjectileTotal(const Object &building) const;
     int garrisonVolleySize(const Object &building) const;
     void launchVolleyBolt(Object &source, const Object &target);
-    enum class BuildingCommand : uint8_t { Eject, ToggleGate, SetGatherPoint, RemoveGatherPoint };
+    enum class BuildingCommand : uint8_t {
+        Eject, ToggleGate, SetGatherPoint, RemoveGatherPoint,
+        // Spaceport (exe 0x505c4d): btncmd frames 18 carbon, 19 food, 21 ore.
+        SellCarbon, SellFood, SellOre, BuyCarbon, BuyFood, BuyOre,
+    };
     std::vector<BuildingCommand> buildingCommands(const Object &building) const;
     std::vector<UnitCommand> unitCommands(const Object &unit) const;
     int unitCommandIcon(UnitCommand command) const;
@@ -2162,6 +2253,34 @@ private:
     void updateProjectiles(float dt);
     void updateRemains(float dt);
     void damageObject(Object &object, int damage, uint32_t attackerId);
+    // Statistic attributes the original keeps per player (kills, razings,
+    // tribute, building and technology value...). Values live with the
+    // stockpiles in resources_, so saves and Accumulate Attribute see them.
+    void addAttribute(int player, int attribute, float amount);
+    void creditDestruction(const Object &victim, int attackerPlayer);
+    void creditBuildingCompleted(const Object &building);
+    void creditTribute(int sender, int receiver, int resourceType, float received,
+                       float fee);
+    void moveCommodityPrice(int resourceType, bool up);
+    void resetCommodityPrices();
+    std::array<float, 3> commodityPrice_{{1.0f, 1.0f, 1.3f}};
+    std::array<int, 3> commodityCounter_{};
+    std::array<float, 3> commodityAccumulator_{};
+    void updatePeakAttributes();
+    const dat::Task *tradeTask(const Object &trader, const Object &market) const;
+    bool issueTradeOrder(Object &trader, Object &market);
+    void updateTrade();
+    int lastTradeSecond_ = -1;
+    float tradeIncome(const Object &trader, const Object &home, const Object &market) const;
+    int lastPeakSecond_ = -1;
+    struct ChatLine {
+        int player = 0;
+        std::string text;
+        float age = 0;
+    };
+    std::deque<ChatLine> chatLines_;
+    std::function<void(int)> playTaunt_;
+    float derivedAttribute(int player, int attribute, bool &derived) const;
     void killObject(Object &object, bool countKill = true);
     bool transferOwnership(
         Object &object, int player,
@@ -2262,6 +2381,7 @@ private:
                         uint8_t customKind = 0);
     void defeatCheatPlayer(int player);
     void updateConquest(float dt);
+    bool conquestCounts(const Object &object) const;
     void updateVictoryConditions(float dt);
     int playerScore(int player) const;
     bool playersShareVictory(

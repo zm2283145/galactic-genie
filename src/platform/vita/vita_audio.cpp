@@ -203,6 +203,23 @@ float VitaAudio::play(const std::string &name) {
     return duration;
 }
 
+// Taunt N: Taunt/tauntNNN.mp3 (copied from the game's Taunt folder).
+void VitaAudio::playTaunt(int number) {
+    if (!running_ || number <= 0 || number > 999) return;
+    char name[32];
+    snprintf(name, sizeof name, "/taunt%03d.mp3", number);
+    auto clip = std::make_shared<AudioClip>();
+    std::string err;
+    if (!loadMp3(tauntDir_ + name, *clip, &err)) {
+        log(err);
+        return;
+    }
+    sceKernelLockMutex(mutex_, 1, nullptr);
+    if (queue_.size() < kMaxQueuedClips) queue_.push_back(std::move(clip));
+    sceKernelUnlockMutex(mutex_, 1);
+    log(std::string("playing taunt ") + name);
+}
+
 int VitaAudio::decoderEntry(SceSize args, void *argp) {
     if (args != sizeof(VitaAudio *) || !argp) return -1;
     VitaAudio *self = *static_cast<VitaAudio **>(argp);

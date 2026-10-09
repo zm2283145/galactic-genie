@@ -296,6 +296,8 @@ static int cmdUnit(const char *dataDir, int id) {
                    unit.projectileSpawningArea[1],
                    unit.projectileSpawningArea[2],
                    unit.displayedAttack, unit.displayedMeleeArmour);
+            printf("  accuracy %d%% dispersion %.3f blast %.2f\n", unit.accuracyPercent,
+                   unit.accuracyDispersion, unit.blastWidth);
             if (graphic)
                 for (const auto &delta : graphic->deltas) {
                    const auto *child =
@@ -852,9 +854,13 @@ static const char *conditionName(int type) {
 
 // audit-triggers <file.cpx|.cp1>...: every trigger condition/effect type the
 // archives use, with the ones the runtime does not support.
+static int triggerFieldForAudit(const std::vector<int32_t> &fields, size_t index) {
+    return index < fields.size() ? (int)fields[index] : -1;
+}
+
 static int cmdAuditTriggers(int argc, char **argv) {
     std::map<int, int> conditions, effects;
-    std::map<int, std::set<std::string>> conditionWhere, effectWhere;
+    std::map<int, std::set<std::string>> conditionWhere, effectWhere, attributeWhere;
     for (int a = 2; a < argc; ++a) {
         std::string err;
         auto archive = CpxArchive::open(argv[a], &err);
@@ -871,6 +877,8 @@ static int cmdAuditTriggers(int argc, char **argv) {
                 for (const ScenarioCondition &condition : trigger.conditions) {
                     conditions[condition.type]++;
                     conditionWhere[condition.type].insert(where);
+                    if (condition.type == 8)
+                        attributeWhere[triggerFieldForAudit(condition.fields, 1)].insert(where);
                 }
                 for (const ScenarioEffect &effect : trigger.effects) {
                     effects[effect.type]++;
@@ -892,6 +900,9 @@ static int cmdAuditTriggers(int argc, char **argv) {
         printf("effect    %2d: %5d uses %s%s\n", type, count, ok ? "" : "UNSUPPORTED in ",
                ok ? "" : (*effectWhere[type].begin()).c_str());
     }
+    for (const auto &[attribute, where] : attributeWhere)
+        printf("accumulate attribute %3d: %zu scenarios, first %s\n", attribute, where.size(),
+               where.begin()->c_str());
     printf("%d unsupported types\n", unsupported);
     return unsupported ? 1 : 0;
 }
@@ -7653,7 +7664,8 @@ static int cmdTestSkirmish(const char *dataDir) {
     frontend.update(input, -1);
     input = {};
     input.menuDown = true;
-    for (int row = 0; row < 4; ++row)
+    // Restart sits after Diplomacy and Chat.
+    for (int row = 0; row < 6; ++row)
         frontend.update(input, -1);
     input = {};
     input.menuActivate = true;
@@ -9052,12 +9064,12 @@ static int cmdTestCoreGameplay(
                 2, 1, 3);
             const uint32_t source =
                 game.spawnObjectForTesting(
-                    7, 6, 1,
+                    7, 315, 1,
                     20.0f, 20.0f);
             const uint32_t target =
                 game.spawnObjectForTesting(
                     7, 460, 2,
-                    25.0f, 20.0f);
+                    23.5f, 20.0f);
             game.setAttackModeForTesting(
                 source, 3);
             game.setAttackModeForTesting(
@@ -9066,24 +9078,23 @@ static int cmdTestCoreGameplay(
                     source, target))
                 continue;
             for (int frame = 0;
-                 frame < 300 &&
-                 game.projectileCountForTesting() ==
-                     0;
+                 frame < 900 &&
+                 game.projectileFromForTesting(source) ==
+                     game.projectileCountForTesting();
                  ++frame)
                 game.update(
                     1.0f / 30.0f, {});
-            if (game.projectileCountForTesting() ==
-                0)
+            if (game.projectileFromForTesting(source) ==
+                game.projectileCountForTesting())
                 continue;
             const auto aim =
-                game.projectileAimForTesting(0);
+                game.projectileAimForTesting(game.projectileFromForTesting(source));
             const bool fixed =
-                game.projectileUsesFixedAimForTesting(
-                    0);
-            const float dx = aim[0] - 25.0f;
+                game.projectileUsesFixedAimForTesting(game.projectileFromForTesting(source));
+            const float dx = aim[0] - 23.5f;
             const float dy = aim[1] - 20.0f;
             if (fixed &&
-                dx * dx + dy * dy > 0.25f)
+                dx * dx + dy * dy > 0.000001f)
                 misses++;
             else
                 hits++;
@@ -9125,12 +9136,12 @@ static int cmdTestCoreGameplay(
                 2, 1, 3);
             const uint32_t source =
                 replay.spawnObjectForTesting(
-                    7, 6, 1,
+                    7, 315, 1,
                     20.0f, 20.0f);
             const uint32_t target =
                 replay.spawnObjectForTesting(
                     7, 460, 2,
-                    25.0f, 20.0f);
+                    23.5f, 20.0f);
             replay.setAttackModeForTesting(
                 source, 3);
             replay.setAttackModeForTesting(
@@ -9138,14 +9149,14 @@ static int cmdTestCoreGameplay(
             replay.issueAttackForTesting(
                 source, target);
             for (int frame = 0;
-                 frame < 300 &&
-                 replay.projectileCountForTesting() ==
-                     0;
+                 frame < 900 &&
+                 replay.projectileFromForTesting(source) ==
+                     replay.projectileCountForTesting();
                  ++frame)
                 replay.update(
                     1.0f / 30.0f, {});
             const auto aim =
-                replay.projectileAimForTesting(0);
+                replay.projectileAimForTesting(replay.projectileFromForTesting(source));
             deterministic =
                 std::abs(
                     aim[0] -
@@ -9431,9 +9442,9 @@ static int cmdTestMajorMechanics(
                     100.0f) < 0.01f &&
                 depletedPower >= 0.0f &&
                 depletedPower < 10.0f &&
-                std::abs(
-                    rechargedPower -
-                    100.0f) < 0.01f &&
+                // Faith refills at attribute 35 (1.6) per second.
+                rechargedPower > depletedPower + 12.0f &&
+                rechargedPower < depletedPower + 20.0f &&
                 game.convertCommandIconForTesting() ==
                     14 &&
                 game.invariantsForTesting(),
@@ -9481,7 +9492,8 @@ static int cmdTestMajorMechanics(
         step(game, 4.2f);
         const bool resisted =
             game.objectPlayer(target) == 2;
-        step(game, 2.1f);
+        // Resisted rolls fail until the (raised) maximum time guarantees it.
+        step(game, 25.0f);
         const bool completed =
             game.objectPlayer(target) == 1;
         report(
@@ -9927,8 +9939,9 @@ static int cmdTestMajorMechanics(
             SkirmishVictory::Score);
         score.setVictoryParametersForTesting(
             600.0f, 3600.0f, 8000);
+        // The original's score counts a tenth of the stockpile.
         score.setResourceForTesting(
-            1, 0, 10000.0f);
+            1, 0, 100000.0f);
         score.setResourceForTesting(
             2, 0, 0.0f);
         step(score, 0.2f);
@@ -9966,6 +9979,130 @@ static int cmdTestMajorMechanics(
                 std::to_string(
                     score
                         .victoryStateForTesting()));
+    }
+
+    {
+        // Statistic attributes the original keeps per player (kill credit
+        // 0x55b4e3, razing credit 0x5569b5, building completion 0x554a99)
+        // and the score built on them.
+        Game game = compact();
+        const int civilization1 = game.civilizationForPlayerForTesting(1);
+        const int civilization2 = game.civilizationForPlayerForTesting(2);
+        const uint32_t attacker = game.spawnObjectForTesting(civilization1, 83, 1, 30.0f, 30.0f);
+        const uint32_t worker = game.spawnObjectForTesting(civilization2, 83, 2, 60.0f, 60.0f);
+        const uint32_t temple = game.spawnObjectForTesting(civilization2, 104, 2, 66.0f, 60.0f);
+        const uint32_t fence = game.spawnObjectForTesting(civilization2, 72, 2, 70.0f, 66.0f);
+        game.damageObjectForTesting(worker, 100000, attacker);
+        game.damageObjectForTesting(temple, 100000, attacker);
+        game.damageObjectForTesting(fence, 100000, attacker);
+        const uint32_t built = game.spawnFoundationForTesting(civilization1, 104, 1, 40.0f, 40.0f, {});
+        game.completeFoundationForTesting(built);
+        step(game, 0.2f);
+        const auto r = [&](int player, int attribute) { return game.resource(player, attribute); };
+        const Game::ScoreBreakdown score = game.playerScoreBreakdown(1);
+        const bool ok = r(1, 20) == 1.0f && r(2, 154) == 1.0f && r(1, 43) == 1.0f &&
+                        r(2, 155) == 1.0f && r(1, 70) == 1.0f && r(1, 119) == 1.0f &&
+                        r(2, 136) == 1.0f && r(2, 144) == 1.0f && r(1, 170) > 50.0f && r(2, 152) == r(1, 170) &&
+                        r(1, 98) > 0.0f && r(1, 52) == 1.0f && r(1, 11) >= 1.0f &&
+                        score.military == (int)r(1, 170) / 5 &&
+                        score.economy >= (int)r(1, 98) / 5 && score.total > 0;
+        report("statistic-attributes", ok,
+               "kills=" + std::to_string(r(1, 20)) + " razings=" + std::to_string(r(1, 43)) +
+                   " value=" + std::to_string(r(1, 170)) + " building-sum=" +
+                   std::to_string(r(1, 98)) + " population=" + std::to_string(r(1, 11)) +
+                   " p2=" + std::to_string(r(1, 70)) + "/" + std::to_string(r(1, 119)) + "/" + std::to_string(r(2, 136)) + "/" + std::to_string(r(2, 152)) + "/" + std::to_string(r(1, 52)) +
+                   " score=" + std::to_string(score.military) + "/" +
+                   std::to_string(score.economy) + "/" + std::to_string(score.technology) +
+                   "/" + std::to_string(score.society));
+    }
+    {
+        // Trade: a Cargo Trader (931) between its Spaceport (84) and an
+        // ally's earns nova on each return home (exe 0x57334d).
+        Game game = compact();
+        // Neutral (an alliance of everyone would end the match).
+        game.setDiplomacyForTesting(1, 2, 1);
+        game.setDiplomacyForTesting(2, 1, 1);
+        const int civilization1 = game.civilizationForPlayerForTesting(1);
+        const int civilization2 = game.civilizationForPlayerForTesting(2);
+        const uint32_t home = game.spawnObjectForTesting(civilization1, 84, 1, 20.0f, 20.0f);
+        const uint32_t market = game.spawnObjectForTesting(civilization2, 84, 2, 20.0f, 50.0f);
+        const uint32_t trader = game.spawnObjectForTesting(civilization1, 931, 1, 26.0f, 26.0f);
+        game.setResourceForTesting(1, 3, 0.0f);
+        const bool ordered = game.issueTradeOrderForTesting(trader, market);
+        for (int t = 0; t < 24; ++t) {
+            step(game, t < 12 ? 0.5f : 10.0f);
+            if (getenv("SWGB_TRADE_DEBUG"))
+                printf("trade t=%d %s\n", t, game.describeObjectForTesting(trader).c_str());
+        }
+        const float nova = game.resource(1, 3);
+        report("trade", ordered && home && nova > 10.0f && game.resource(1, 101) == nova,
+               "ordered=" + std::to_string(ordered) + " nova=" + std::to_string(nova) +
+                   " income=" + std::to_string(game.resource(1, 101)));
+    }
+    {
+        // Spaceport market (exe 0x5d6260/0x5d6370): 100-unit lots at the
+        // global price with a 30% fee, 0.02 per lot; tribute (0x5bb890) with
+        // the attribute 46 fee on top; one-sided stance changes.
+        Game game = compact();
+        game.setResourceForTesting(1, 0, 1000.0f);
+        game.setResourceForTesting(1, 3, 1000.0f);
+        const int buy0 = game.commodityBuyPrice(1, 0), sell0 = game.commoditySellPrice(1, 0);
+        const bool bought = game.buyCommodity(1, 0, 1);
+        const int buy1 = game.commodityBuyPrice(1, 0);
+        const float foodAfterBuy = game.resource(1, 0), novaAfterBuy = game.resource(1, 3);
+        const bool sold = game.sellCommodity(1, 0, 1);
+        const int buyBack = game.commodityBuyPrice(1, 0);
+        const int oreBuy = game.commodityBuyPrice(1, 2);
+        game.setResourceForTesting(2, 0, 0.0f);
+        const float sent = game.payTribute(1, 2, 0, 100.0f, 0.3f);
+        const float food1 = game.resource(1, 0), food2 = game.resource(2, 0);
+        game.setStance(1, 2, 0);
+        const bool oneSided = game.diplomacyForTesting(1, 2) == 0 && game.diplomacyForTesting(2, 1) != 0;
+        const bool ok = buy0 == 130 && sell0 == 70 && bought && buy1 == 133 &&
+                        foodAfterBuy == 1100.0f && novaAfterBuy == 870.0f && sold &&
+                        buyBack == 130 && oreBuy == 169 && sent == 100.0f && food2 == 100.0f &&
+                        food1 == 1000.0f - 130.0f && oneSided;
+        report("market-tribute-diplomacy", ok,
+               "buy/sell " + std::to_string(buy0) + "/" + std::to_string(sell0) + " after buy " +
+                   std::to_string(buy1) + " back " + std::to_string(buyBack) + " ore " +
+                   std::to_string(oreBuy) + " tribute " + std::to_string(sent) + " food " +
+                   std::to_string(food1) + "/" + std::to_string(food2) + " stance " +
+                   std::to_string(oneSided));
+    }
+    {
+        // Computer diplomacy is scripted (exe: the built-in Diplomacy AI's
+        // stance calls are empty): chat, tribute facts and taunts.
+        Game game = compact();
+        game.setDiplomacyForTesting(2, 1, 3);
+        game.setResourceForTesting(1, 0, 1000.0f);
+        game.setResourceForTesting(2, 0, 1000.0f);
+        const int civilization2 = game.civilizationForPlayerForTesting(2);
+        game.spawnObjectForTesting(civilization2, 84, 2, 60.0f, 60.0f);
+        static const char script[] =
+            "(defrule (true) => (set-stance every-human neutral)"
+            " (chat-to-player-using-id every-human 22000) (disable-self))\n"
+            "(defrule (players-tribute any-human-neutral food >= 100) =>"
+            " (chat-to-player-using-id this-any-human-neutral 22002)"
+            " (set-stance this-any-human-neutral ally) (disable-self))\n"
+            "(defrule (taunt-detected any-human 3) (stance-toward this-any-human ally) =>"
+            " (acknowledge-taunt this-any-human 3) (tribute-to-player this-any-human food 100))\n";
+        std::string loadError;
+        const bool loaded = game.loadAiSourceForTesting(2, "diplomacy-test.per", script, {}, &loadError);
+        step(game, 3.0f);
+        const bool neutral = game.diplomacyForTesting(2, 1) == 1;
+        const std::string offer = game.lastChatForTesting();
+        game.payTribute(1, 2, 0, 100.0f, 0.3f);
+        step(game, 3.0f);
+        const bool allied = game.diplomacyForTesting(2, 1) == 0;
+        const float before = game.resource(1, 0);
+        game.sendChat(1, {2}, "3");
+        step(game, 3.0f);
+        const float after = game.resource(1, 0);
+        report("ai-diplomacy-script", loaded && neutral && allied && after == before + 100.0f &&
+                                          offer.find("allegiance") != std::string::npos,
+               "loaded " + std::to_string(loaded) + " neutral " + std::to_string(neutral) +
+                   " allied " + std::to_string(allied) + " food " + std::to_string(before) +
+                   "->" + std::to_string(after) + " chat '" + offer + "'" + loadError);
     }
 
     {
@@ -11272,7 +11409,7 @@ static int cmdTestFidelity(
                 2, 1, 3);
             const uint32_t source =
                 game.spawnObjectForTesting(
-                    7, 6, 1,
+                    7, 315, 1,
                     20.0f, 20.0f);
             const uint32_t target =
                 game.spawnObjectForTesting(
@@ -11287,16 +11424,16 @@ static int cmdTestFidelity(
                 continue;
             for (int frame = 0;
                  frame < 300 &&
-                 game.projectileCountForTesting() ==
-                     0;
+                 game.projectileFromForTesting(source) ==
+                     game.projectileCountForTesting();
                  ++frame)
                 game.update(
                     1.0f / 30.0f, {});
-            if (!game
-                     .projectileCountForTesting())
+            if (game.projectileFromForTesting(source) ==
+                game.projectileCountForTesting())
                 continue;
             const auto aim =
-                game.projectileAimForTesting(0);
+                game.projectileAimForTesting(game.projectileFromForTesting(source));
             const float dx =
                 aim[0] - 23.5f;
             const float dy =
@@ -11304,12 +11441,14 @@ static int cmdTestFidelity(
             const float missDistance =
                 std::sqrt(dx * dx +
                           dy * dy);
-            if (missDistance > 0.35f) {
+            // A miss (exe 0x4073a0) offsets each axis by up to half of
+            // distance x dispersion (0.33 for this unit, range 3).
+            if (missDistance > 0.001f) {
                 misses++;
                 missGeometry =
                     missGeometry &&
-                    missDistance >= 0.49f &&
-                    missDistance <= 0.96f;
+                    std::abs(dx) <= 0.65f &&
+                    std::abs(dy) <= 0.65f;
             } else {
                 hits++;
             }
@@ -11321,10 +11460,10 @@ static int cmdTestFidelity(
         report(
             "accuracy-statistical-boundary",
             hits + misses == trials &&
-                hitRate >= 0.25f &&
-                hitRate <= 0.65f &&
+                hitRate >= 0.6f &&
+                hitRate <= 0.9f &&
                 missGeometry,
-            "DAT=45% observed=" +
+            "DAT=75% observed=" +
                 std::to_string(hitRate) +
                 " hits/misses=" +
                 std::to_string(hits) +
@@ -12371,6 +12510,92 @@ static int cmdRenderCampaignMissions(int argc, char **argv) {
     return 0;
 }
 
+// render-achievements <Data> <Campaign dir> <archive substring> <entry> <seconds> <out-prefix>
+// Plays a campaign mission headless for the given time, then renders every
+// tab of the Achievements screen (<out-prefix>_<tab>.png).
+static int cmdRenderAchievements(int argc, char **argv) {
+    if (argc < 8) {
+        fprintf(stderr, "usage: render-achievements <Data> <Campaign> <archive> <entry> <seconds> <out-prefix>\n");
+        return 2;
+    }
+    SoftRenderer soft;
+    Assets assets(&soft);
+    std::string err;
+    if (!assets.init(argv[2], &err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    const std::filesystem::path campaignDir = argv[3];
+    CampaignCatalog catalog;
+    if (!catalog.discover(campaignDir.string(), [&](int id, const std::string &fb) {
+            const std::string &l = assets.localizedString(id); return l.empty() ? fb : l; }, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str()); return 1;
+    }
+    const std::string archive = argv[4];
+    const uint32_t entry = (uint32_t)atoi(argv[5]);
+    const float seconds = (float)atof(argv[6]);
+    const std::string aiDir = (campaignDir.parent_path() / "AI").string();
+    for (size_t c = 0; c < catalog.campaigns().size(); ++c) {
+        const CampaignInfo &campaign = catalog.campaigns()[c];
+        std::string upper = campaign.archiveName;
+        for (char &ch : upper) ch = (char)toupper((unsigned char)ch);
+        if (upper.find(archive) == std::string::npos) continue;
+        for (size_t m = 0; m < campaign.missions.size(); ++m) {
+            if (campaign.missions[m].entry != entry) continue;
+            Scenario scenario;
+            if (!catalog.loadScenario(c, m, scenario, &err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+            Game game(assets);
+            if (!game.initScenario(scenario, &err, campaign.archiveName, entry, 2, aiDir)) {
+                fprintf(stderr, "error: %s\n", err.c_str()); return 1;
+            }
+            for (float t = 0; t < seconds; t += 1.0f / 30.0f) game.update(1.0f / 30.0f, {});
+            Frontend frontend;
+            frontend.setStringLookup([&](int id, const std::string &fallback) {
+                const std::string &text = assets.localizedString(id);
+                return text.empty() ? fallback : text;
+            });
+            frontend.setOriginalMenuBackground(assets.interfaceFrame(50149, 0, 50531));
+            std::array<const SpriteFrame *, 12> tabs{};
+            std::array<const SpriteFrame *, 8> banners{};
+            for (size_t i = 0; i < tabs.size(); ++i) tabs[i] = assets.interfaceFrame(50765, i, 50531);
+            for (size_t i = 0; i < banners.size(); ++i) banners[i] = assets.interfaceFrame(50762, i, 50531);
+            frontend.setAchievementsArt(tabs, banners);
+            AchievementsData data;
+            data.players = game.achievementsPlayers();
+            data.elapsedSeconds = game.elapsedGameTime();
+            frontend.setAchievements(data);
+            for (const AchievementsPlayer &player : data.players) {
+                printf("player %d '%s' colour %d total %d:", player.player, player.name.c_str(),
+                       player.color, player.total);
+                for (const auto &tab : player.cells)
+                    for (const std::string &cell : tab) printf(" [%s]", cell.c_str());
+                printf(" timeline %zu\n", player.timeline.size());
+            }
+            {
+                // The Diplomacy dialog over the game view.
+                std::array<const SpriteFrame *, 4> icons{};
+                for (size_t i = 0; i < icons.size(); ++i)
+                    icons[i] = assets.interfaceFrame(50732, i, 50500);
+                frontend.setDiplomacyArt(assets.interfaceFrame(50221, 0, 50500), icons);
+                game.setLocalPlayerForTesting(1);
+                frontend.setDiplomacy(game.diplomacyData());
+                game.render(soft, 960, 544);
+                frontend.renderDiplomacyOverlay(soft, 960, 544);
+                soft.endFrame();
+                soft.savePng(std::string(argv[7]) + "_diplomacy.png");
+            }
+            for (size_t tab = 0; tab < 6; ++tab) {
+                frontend.showAchievementsForTesting(tab);
+                soft.beginFrame(960, 544, 1.0f, 0, 0, 0);
+                frontend.render(soft, 960, 544);
+                soft.endFrame();
+                const std::string out = std::string(argv[7]) + "_" + std::to_string(tab) + ".png";
+                soft.savePng(out);
+            }
+            return 0;
+        }
+    }
+    fprintf(stderr, "mission not found\n");
+    return 1;
+}
+
 // bench-campaign <Data> <Campaign dir> <archive substring> <entry> <seconds> [dt]
 // Runs a campaign mission headless (update + render into a null renderer) and
 // prints Vita-log-style phase averages every 5 simulated seconds.
@@ -12605,6 +12830,7 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "bench-campaign")) return cmdBenchCampaign(argc, argv);
     if (!strcmp(cmd, "render-campaign-missions")) return cmdRenderCampaignMissions(argc, argv);
     if (!strcmp(cmd, "audit-triggers")) return cmdAuditTriggers(argc, argv);
+    if (!strcmp(cmd, "render-achievements")) return cmdRenderAchievements(argc, argv);
     if (!strcmp(cmd, "render-campaign-scene")) return cmdRenderCampaignScene(argc, argv);
 #ifndef SWGB_BASE_BUILD
     if (!strcmp(cmd, "test-sound-select")) {
