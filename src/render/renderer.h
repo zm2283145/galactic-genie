@@ -50,6 +50,9 @@ public:
     // filled with the current frame's clear colour; endLayer() returns to the
     // frame; drawLayer() replaces the frame's pixels with the layer. Only
     // valid right after beginFrame(), before anything else is drawn.
+    // Switches the drawing canvas mid-frame (a 960x544 menu drawn over an
+    // 800x600 PC game is letterboxed inside it).
+    virtual void setCanvas(int, int) {}
     virtual bool supportsLayer() const { return false; }
     virtual bool beginLayer() { return false; }
     virtual void endLayer() {}

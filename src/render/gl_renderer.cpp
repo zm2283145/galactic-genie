@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "gl_renderer.h"
+#include <algorithm>
 #include <cmath>
 
-#if defined(__vita__)
+#if defined(__vita__) || defined(SWGB_PC)
 #include <vitaGL.h>
 #else
 #include <GL/gl.h>
+#endif
+#if defined(SWGB_PC)
+// The window's letterboxed game area (src/platform/pc/pc_shim.cpp).
+extern "C" int swgbPcViewport(int *x, int *y, int *w, int *h);
 #endif
 
 namespace swgb {
@@ -97,6 +102,39 @@ void (*g_glTrace)(const char *) = nullptr;
 bool g_skipGlClear = false;
 #define GL_TRACE(x) do { if (g_glTrace && traceFrame) g_glTrace(x); } while (0)
 
+void GlRenderer::setScreenViewport() {
+#if defined(SWGB_PC)
+    int x = 0, y = 0, w = frameW_, h = frameH_;
+    swgbPcViewport(&x, &y, &w, &h);
+    // A canvas with another shape (the 960x544 menus in the 800x600 PC
+    // window) is letterboxed inside the game area.
+    if (frameW_ > 0 && frameH_ > 0) {
+        const float scale = std::min(w / (float)frameW_, h / (float)frameH_);
+        const int cw = (int)(frameW_ * scale), ch = (int)(frameH_ * scale);
+        x += (w - cw) / 2;
+        y += (h - ch) / 2;
+        w = cw;
+        h = ch;
+    }
+    glViewport(x, y, w, h);
+#else
+    glViewport(0, 0, frameW_, frameH_);
+#endif
+}
+
+void GlRenderer::setCanvas(int w, int h) {
+    if (w == frameW_ && h == frameH_) return;
+    flush();
+    frameW_ = w;
+    frameH_ = h;
+    setScreenViewport();
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0, w, h, 0, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+}
+
 void GlRenderer::beginFrame(int screenW, int screenH, float scale, uint8_t r, uint8_t g, uint8_t b) {
     static int frameCount = 0;
     const bool traceFrame = frameCount++ < 2;
@@ -108,7 +146,7 @@ void GlRenderer::beginFrame(int screenW, int screenH, float scale, uint8_t r, ui
     clear_[1] = g / 255.0f;
     clear_[2] = b / 255.0f;
     GL_TRACE("viewport");
-    glViewport(0, 0, screenW, screenH);
+    setScreenViewport();
     GL_TRACE("clearcolor");
     glClearColor(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
     GL_TRACE("clear");
@@ -310,7 +348,7 @@ void GlRenderer::endLayer() {
     if (!inLayer_) return;
     flush();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(0, 0, frameW_, frameH_);
+    setScreenViewport();
     inLayer_ = false;
     layerReady_ = true;
     current_ = currentMask_ = nullptr;

@@ -112,6 +112,45 @@ if(VITA)
     endif()
 else()
     find_package(ZLIB REQUIRED)
+    # The PC game: the Vita front end and main loop on SDL2 + OpenGL
+    # (src/platform/pc: SDL implementations of the Vita calls it makes).
+    find_package(SDL2 QUIET)
+    find_package(OpenGL QUIET)
+    find_library(SWGB_VORBISFILE vorbisfile)
+    if(SDL2_FOUND AND OPENGL_FOUND AND SWGB_VORBISFILE)
+        add_executable(swgb_pc
+            ${SWGB_CORE_SOURCES}
+            src/platform/vita/main_vita.cpp
+            src/platform/vita/vita_audio.cpp
+            src/platform/pc/pc_shim.cpp
+            src/platform/pc/pc_video_stub.cpp
+            src/render/gl_renderer.cpp
+        )
+        target_compile_definitions(swgb_pc PRIVATE SWGB_PC=1 SWGB_ROOT=".")
+        target_include_directories(swgb_pc PRIVATE src/platform/pc/shim)
+        if(TARGET SDL2::SDL2)
+            # SDL2main (WinMain -> SDL_main) must come before SDL2; MinGW
+            # also needs libmingw32 first.
+            if(MINGW)
+                target_link_libraries(swgb_pc PRIVATE mingw32)
+            endif()
+            if(TARGET SDL2::SDL2main)
+                target_link_libraries(swgb_pc PRIVATE SDL2::SDL2main)
+            endif()
+            target_link_libraries(swgb_pc PRIVATE SDL2::SDL2)
+        else()
+            target_include_directories(swgb_pc PRIVATE ${SDL2_INCLUDE_DIRS})
+            target_link_libraries(swgb_pc PRIVATE ${SDL2_LIBRARIES})
+        endif()
+        find_library(SWGB_VORBIS vorbis)
+        find_library(SWGB_OGG ogg)
+        find_package(Threads REQUIRED)
+        target_link_libraries(swgb_pc PRIVATE OpenGL::GL ZLIB::ZLIB ${SWGB_VORBISFILE} ${SWGB_VORBIS}
+                              ${SWGB_OGG} Threads::Threads)
+        if(WIN32)
+            set_target_properties(swgb_pc PROPERTIES WIN32_EXECUTABLE ON)
+        endif()
+    endif()
     add_executable(swgbtool
         tools/swgbtool.cpp
         ${SWGB_CORE_SOURCES}

@@ -40,4 +40,14 @@ private:
     std::vector<CpxEntry> entries_;
 };
 
+// Writes a campaign archive (version 1.00): the campaign name, then each
+// scenario's identifier (its title), file name and SCX bytes.
+struct CpxWriteEntry {
+    std::string identifier;
+    std::string filename;
+    std::vector<uint8_t> data;
+};
+bool writeCpxBytes(const std::string &name, const std::vector<CpxWriteEntry> &entries,
+                   std::vector<uint8_t> &out, std::string *err = nullptr);
+
 } // namespace swgb

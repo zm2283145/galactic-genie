@@ -3734,4 +3734,36 @@ void Frontend::renderHistory(Renderer &renderer, int screenW, int screenH) const
                226, 233);
 }
 
+
+FrontendAction Frontend::openFromGame(FrontendScreen target) {
+    if (screen_ != FrontendScreen::Gameplay) return FrontendAction::None;
+    switch (target) {
+    case FrontendScreen::Pause:
+        screen_ = FrontendScreen::Pause;
+        selection_ = 0;
+        return FrontendAction::None;
+    case FrontendScreen::Objectives:
+        screen_ = FrontendScreen::Objectives;
+        objectivesReturnScreen_ = FrontendScreen::Gameplay;
+        objectivesPage_ = 0;
+        selection_ = 0;
+        return FrontendAction::None;
+    case FrontendScreen::Diplomacy:
+        screen_ = FrontendScreen::Diplomacy;
+        return FrontendAction::OpenDiplomacy;
+    case FrontendScreen::Chat:
+        screen_ = FrontendScreen::Chat;
+        chatSelection_ = 1;
+        return FrontendAction::OpenChat;
+    case FrontendScreen::TechTree:
+        screen_ = FrontendScreen::TechTree;
+        techTreeCivilization_ = -1;
+        techTreeSelection_ = 0;
+        techTreeScroll_ = 0.0f;
+        return FrontendAction::OpenTechTree;
+    default:
+        return FrontendAction::None;
+    }
+}
+
 } // namespace swgb

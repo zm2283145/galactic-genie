@@ -81,6 +81,21 @@ public:
         return currentPath_;
     }
     int playtestDifficulty() const;
+    // Custom campaigns are written to this folder (the game's Campaign
+    // folder, where Custom Campaigns are listed from).
+    void setCampaignDirectory(std::string directory) {
+        campaignDirectory_ = std::move(directory);
+    }
+    // True once after a campaign archive was saved (the catalog reloads).
+    bool takeCampaignSaved() {
+        const bool saved = campaignSaved_;
+        campaignSaved_ = false;
+        return saved;
+    }
+    // Campaign builder (testing): scenarios from the import folder.
+    bool buildCampaignForTesting(const std::string &name,
+                                 const std::vector<std::string> &scenarioPaths,
+                                 std::string *error = nullptr);
 
     bool createForTesting(
         ScenarioTemplate scenarioTemplate,
@@ -198,6 +213,21 @@ private:
     size_t selectedObject_ = 0;
     size_t selectedIssue_ = 0;
     EditorMapTool mapTool_ = EditorMapTool::Terrain;
+    // Campaign builder (hub entry "BUILD CAMPAIGN").
+    bool campaignMode_ = false;
+    std::string campaignDirectory_;
+    bool campaignSaved_ = false;
+    std::vector<std::string> campaignAvailable_; // .scx paths
+    std::vector<std::string> campaignEntries_;
+    size_t campaignColumn_ = 0;
+    size_t campaignAvailableSelection_ = 0;
+    size_t campaignEntrySelection_ = 0;
+    int campaignNumber_ = 1;
+    void openCampaignBuilder();
+    void updateCampaignBuilder(const InputState &input);
+    void renderCampaignBuilder(Renderer &renderer, int screenWidth) const;
+    bool writeCampaign(const std::string &name, const std::vector<std::string> &paths,
+                       std::string *error);
     uint8_t brushValue_ = 0;
     int brushSize_ = 1;
     bool circularBrush_ = true;

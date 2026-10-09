@@ -2,6 +2,7 @@
 #include "editor.h"
 
 #include "assets.h"
+#include "../core/cpx.h"
 #include "menu_framework.h"
 #include "ui_text.h"
 
@@ -11,6 +12,7 @@
 #include <ctime>
 #include <limits>
 #include <set>
+#include <dirent.h>
 
 namespace swgb {
 namespace {
@@ -401,7 +403,11 @@ EditorAction ScenarioEditor::update(
 
 void ScenarioEditor::updateHub(
     const InputState &input) {
-    constexpr size_t count = 11;
+    if (campaignMode_) {
+        updateCampaignBuilder(input);
+        return;
+    }
+    constexpr size_t count = 12;
     if (input.menuUp)
         selection_ = (selection_ + count - 1) % count;
     if (input.menuDown)
@@ -459,10 +465,188 @@ void ScenarioEditor::updateHub(
     case 9:
         requestAction(PendingAction::Import);
         break;
+    case 10:
+        openCampaignBuilder();
+        break;
     default:
         status_ = "__CLOSE__";
         break;
     }
+}
+
+// --- Campaign builder ---------------------------------------------------------
+// Picks exported .scx scenarios (Scenarios/Import and Scenarios) in order and
+// writes them as a campaign archive (.cpx 1.00) into the Campaign folder,
+// where Single Player > Custom Campaign lists it.
+
+void ScenarioEditor::openCampaignBuilder() {
+    campaignMode_ = true;
+    campaignAvailable_.clear();
+    for (const std::string &directory : {importDirectory_, rootDirectory_}) {
+        DIR *dir = opendir(directory.c_str());
+        if (!dir) continue;
+        std::vector<std::string> names;
+        while (dirent *entry = readdir(dir)) {
+            std::string name = entry->d_name;
+            std::string lowered = name;
+            for (char &c : lowered) c = (char)std::tolower((unsigned char)c);
+            if (lowered.size() > 4 && lowered.compare(lowered.size() - 4, 4, ".scx") == 0)
+                names.push_back(name);
+        }
+        closedir(dir);
+        std::sort(names.begin(), names.end());
+        for (const std::string &name : names)
+            campaignAvailable_.push_back(joinScenarioPath(directory, name));
+    }
+    campaignColumn_ = 0;
+    campaignAvailableSelection_ = 0;
+    campaignEntrySelection_ = 0;
+    status_ = campaignAvailable_.empty() ? "NO .SCX SCENARIOS: EXPORT SOME FIRST" : "";
+}
+
+bool ScenarioEditor::writeCampaign(const std::string &name,
+                                   const std::vector<std::string> &paths,
+                                   std::string *error) {
+    std::vector<CpxWriteEntry> entries;
+    for (const std::string &path : paths) {
+        CpxWriteEntry entry;
+        FILE *file = std::fopen(path.c_str(), "rb");
+        if (!file) {
+            if (error) *error = "cannot read " + shortPath(path);
+            return false;
+        }
+        char buffer[65536];
+        size_t n;
+        while ((n = std::fread(buffer, 1, sizeof buffer, file)) > 0)
+            entry.data.insert(entry.data.end(), buffer, buffer + n);
+        std::fclose(file);
+        Scenario check;
+        std::string scenarioError;
+        if (!check.load(entry.data, &scenarioError)) {
+            if (error) *error = shortPath(path) + ": " + scenarioError;
+            return false;
+        }
+        const size_t slash = path.find_last_of("/\\");
+        entry.filename = slash == std::string::npos ? path : path.substr(slash + 1);
+        entry.identifier = entry.filename.size() > 4
+                               ? entry.filename.substr(0, entry.filename.size() - 4)
+                               : entry.filename;
+        entries.push_back(std::move(entry));
+    }
+    std::vector<uint8_t> bytes;
+    if (!writeCpxBytes(name, entries, bytes, error)) return false;
+    const std::string target = joinScenarioPath(
+        campaignDirectory_.empty() ? rootDirectory_ : campaignDirectory_,
+        sanitizeScenarioFilename(name) + ".cpx");
+    FILE *file = std::fopen(target.c_str(), "wb");
+    if (!file || std::fwrite(bytes.data(), 1, bytes.size(), file) != bytes.size()) {
+        if (file) std::fclose(file);
+        if (error) *error = "cannot write " + shortPath(target);
+        return false;
+    }
+    std::fclose(file);
+    campaignSaved_ = true;
+    status_ = "SAVED CAMPAIGN " + shortPath(target);
+    return true;
+}
+
+bool ScenarioEditor::buildCampaignForTesting(const std::string &name,
+                                             const std::vector<std::string> &scenarioPaths,
+                                             std::string *error) {
+    return writeCampaign(name, scenarioPaths, error);
+}
+
+void ScenarioEditor::updateCampaignBuilder(const InputState &input) {
+    if (input.menuBack) {
+        campaignMode_ = false;
+        status_.clear();
+        return;
+    }
+    if (input.menuLeft) campaignColumn_ = 0;
+    if (input.menuRight) campaignColumn_ = 1;
+    // Campaign column rows: entries, then the name row and SAVE.
+    const size_t campaignRows = campaignEntries_.size() + 2;
+    if (campaignColumn_ == 0 && !campaignAvailable_.empty()) {
+        const size_t count = campaignAvailable_.size();
+        if (input.menuUp) campaignAvailableSelection_ = (campaignAvailableSelection_ + count - 1) % count;
+        if (input.menuDown) campaignAvailableSelection_ = (campaignAvailableSelection_ + 1) % count;
+        if (input.menuActivate) {
+            campaignEntries_.push_back(campaignAvailable_[campaignAvailableSelection_]);
+            status_ = "ADDED SCENARIO " + std::to_string(campaignEntries_.size());
+        }
+        return;
+    }
+    if (campaignColumn_ != 1) return;
+    if (input.menuUp) campaignEntrySelection_ = (campaignEntrySelection_ + campaignRows - 1) % campaignRows;
+    if (input.menuDown) campaignEntrySelection_ = (campaignEntrySelection_ + 1) % campaignRows;
+    const size_t index = campaignEntrySelection_;
+    if (index < campaignEntries_.size()) {
+        // L / R move the scenario up or down; X removes it.
+        if (input.actionTabLeft && index > 0) {
+            std::swap(campaignEntries_[index], campaignEntries_[index - 1]);
+            campaignEntrySelection_--;
+        } else if (input.actionTabRight && index + 1 < campaignEntries_.size()) {
+            std::swap(campaignEntries_[index], campaignEntries_[index + 1]);
+            campaignEntrySelection_++;
+        } else if (input.menuActivate) {
+            campaignEntries_.erase(campaignEntries_.begin() + (ptrdiff_t)index);
+            if (campaignEntrySelection_ > 0 && campaignEntrySelection_ >= campaignEntries_.size())
+                campaignEntrySelection_ = campaignEntries_.empty() ? 0 : campaignEntries_.size() - 1;
+        }
+        return;
+    }
+    if (index == campaignEntries_.size()) {
+        // Name: "Custom Campaign N" (L / R or X change N).
+        if (input.actionTabLeft) campaignNumber_ = std::max(1, campaignNumber_ - 1);
+        if (input.actionTabRight || input.menuActivate) campaignNumber_ = std::min(99, campaignNumber_ + 1);
+        return;
+    }
+    if (input.menuActivate) {
+        if (campaignEntries_.empty()) {
+            status_ = "ADD AT LEAST ONE SCENARIO";
+            return;
+        }
+        std::string error;
+        if (!writeCampaign("Custom Campaign " + std::to_string(campaignNumber_), campaignEntries_,
+                           &error))
+            status_ = "CAMPAIGN SAVE FAILED: " + error;
+    }
+}
+
+void ScenarioEditor::renderCampaignBuilder(Renderer &renderer, int screenWidth) const {
+    title(renderer, "BUILD CAMPAIGN", screenWidth);
+    drawModernPanel(renderer, 40, 79, 430, 418);
+    drawModernPanel(renderer, 490, 79, 430, 418);
+    drawUiText(renderer, {"SCENARIOS (.SCX)"}, 60, 90, 1.0f, 202, 168, 74);
+    drawUiText(renderer, {"CAMPAIGN ORDER"}, 510, 90, 1.0f, 202, 168, 74);
+    const size_t visible = 10;
+    const size_t firstAvailable =
+        campaignAvailableSelection_ >= visible ? campaignAvailableSelection_ - visible + 1 : 0;
+    for (size_t row = 0; row < visible && firstAvailable + row < campaignAvailable_.size(); ++row) {
+        const size_t index = firstAvailable + row;
+        drawModernMenuRow(renderer, shortPath(campaignAvailable_[index]), "", 52, 116 + row * 34.0f,
+                          406, campaignColumn_ == 0 && index == campaignAvailableSelection_);
+    }
+    const size_t rows = campaignEntries_.size() + 2;
+    const size_t firstEntry = campaignEntrySelection_ >= visible ? campaignEntrySelection_ - visible + 1 : 0;
+    for (size_t row = 0; row < visible && firstEntry + row < rows; ++row) {
+        const size_t index = firstEntry + row;
+        const bool selected = campaignColumn_ == 1 && index == campaignEntrySelection_;
+        if (index < campaignEntries_.size())
+            drawModernMenuRow(renderer, std::to_string(index + 1) + ". " + shortPath(campaignEntries_[index]),
+                              "", 502, 116 + row * 34.0f, 406, selected);
+        else if (index == campaignEntries_.size())
+            drawModernMenuRow(renderer, "NAME", "Custom Campaign " + std::to_string(campaignNumber_), 502,
+                              116 + row * 34.0f, 406, selected);
+        else
+            drawModernMenuRow(renderer, "SAVE CAMPAIGN", "", 502, 116 + row * 34.0f, 406, selected);
+    }
+    drawModernTooltip(renderer,
+                      "LEFT/RIGHT COLUMN  X ADD/REMOVE  L/R MOVE OR RENAME  X SAVE  O BACK", 40, 507,
+                      880);
+    if (!status_.empty())
+        drawModernStatusPill(renderer, status_, 58, 68,
+                             status_.find("FAILED") != std::string::npos);
 }
 
 void ScenarioEditor::requestAction(
@@ -1874,6 +2058,10 @@ void ScenarioEditor::renderConfirmation(
 void ScenarioEditor::renderHub(
     Renderer &renderer, int screenWidth,
     int) const {
+    if (campaignMode_) {
+        renderCampaignBuilder(renderer, screenWidth);
+        return;
+    }
     title(renderer, "SCENARIO EDITOR", screenWidth);
     drawModernPanel(
         renderer, 90, 79, 780, 418);
@@ -1896,13 +2084,14 @@ void ScenarioEditor::renderHub(
             {"IMPORT STOCK SCX",
              shortPath(joinScenarioPath(
                  importDirectory_, "import.scx"))},
+            {"BUILD CAMPAIGN", "FROM EXPORTED .SCX"},
             {"BACK TO MAIN MENU", ""}};
     for (size_t row = 0; row < entries.size();
          ++row)
         drawModernMenuRow(
             renderer, entries[row].first,
             entries[row].second,
-            112, 100 + row * 34.0f, 736,
+            112, 100 + row * 32.0f, 736,
             row == selection_,
             (row == 7 && recentPath_.empty()));
     drawModernTooltip(

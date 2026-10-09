@@ -12559,6 +12559,42 @@ static int cmdTestEditor(
             std::to_string(importedNative.size()) +
             " " + err);
 
+    // Campaign builder: an exported scenario becomes a one-mission Custom
+    // Campaign the catalog lists.
+    {
+        const std::string folder = "test-editor-campaign";
+        std::filesystem::remove_all(folder);
+        std::filesystem::create_directories(folder);
+        const std::string scx = folder + "/first.scx";
+        bool wrote = false;
+        if (FILE *file = std::fopen(scx.c_str(), "wb")) {
+            wrote = std::fwrite(exact.data(), 1, exact.size(), file) == exact.size();
+            std::fclose(file);
+        }
+        ScenarioEditor builder(assets, folder, folder);
+        builder.setCampaignDirectory(folder);
+        std::string campaignError;
+        const bool built =
+            wrote && builder.buildCampaignForTesting("Custom Campaign 1", {scx, scx}, &campaignError);
+        CampaignCatalog catalog;
+        const bool listed =
+            built && catalog.discover(folder, [](int, const std::string &fallback) { return fallback; },
+                                      &campaignError);
+        size_t missions = 0;
+        bool custom = false;
+        Scenario mission;
+        bool loads = false;
+        if (listed && !catalog.campaigns().empty()) {
+            custom = catalog.campaigns()[0].custom;
+            missions = catalog.campaigns()[0].missions.size();
+            loads = catalog.loadScenario(0, 1, mission, &campaignError);
+        }
+        report("campaign-builder", built && listed && custom && missions == 2 && loads &&
+                                       builder.takeCampaignSaved(),
+               "missions " + std::to_string(missions) + " " + campaignError);
+        std::filesystem::remove_all(folder);
+    }
+
     const char *nativePath =
         "test-editor.swscenario";
     std::remove(nativePath);
@@ -12916,6 +12952,38 @@ static int cmdRenderCampaignMissions(int argc, char **argv) {
         soft.savePng(out);
         printf("campaign selection (%s) -> %s\n", clone ? "Clone Campaigns" : "original", out.c_str());
     }
+    return 0;
+}
+
+// cpx-roundtrip <file.cpx>: rewrite a campaign archive and compare.
+static int cmdCpxRoundtrip(int argc, char **argv) {
+    if (argc < 3) return 2;
+    std::string err;
+    auto archive = CpxArchive::open(argv[2], &err);
+    if (!archive) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    std::vector<CpxWriteEntry> entries;
+    for (size_t i = 0; i < archive->entries().size(); ++i) {
+        CpxWriteEntry entry;
+        entry.identifier = archive->entries()[i].identifier;
+        entry.filename = archive->entries()[i].filename;
+        if (!archive->read(i, entry.data, &err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+        entries.push_back(std::move(entry));
+    }
+    std::vector<uint8_t> written;
+    if (!writeCpxBytes(archive->name(), entries, written, &err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    FILE *file = fopen(argv[2], "rb");
+    std::vector<uint8_t> original;
+    if (file) {
+        char buffer[65536];
+        size_t n;
+        while ((n = fread(buffer, 1, sizeof buffer, file)) > 0) original.insert(original.end(), buffer, buffer + n);
+        fclose(file);
+    }
+    size_t diffs = 0, first = SIZE_MAX;
+    for (size_t i = 0; i < std::min(original.size(), written.size()); ++i)
+        if (original[i] != written[i]) { diffs++; if (first == SIZE_MAX) first = i; }
+    printf("entries %zu size %zu/%zu differing bytes %zu first %zd\n", entries.size(), original.size(),
+           written.size(), diffs, first == SIZE_MAX ? (ssize_t)-1 : (ssize_t)first);
     return 0;
 }
 
@@ -13504,6 +13572,7 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "render-achievements")) return cmdRenderAchievements(argc, argv);
     if (!strcmp(cmd, "render-history")) return cmdRenderHistory(argc, argv);
     if (!strcmp(cmd, "scx-diff")) return cmdScxDiff(argc, argv);
+    if (!strcmp(cmd, "cpx-roundtrip")) return cmdCpxRoundtrip(argc, argv);
     if (!strcmp(cmd, "rms-map")) return cmdRmsMap(argc, argv);
     if (!strcmp(cmd, "render-rms")) return cmdRenderRms(argc, argv);
     if (!strcmp(cmd, "iframe")) return cmdInterfaceFrame(argc, argv);

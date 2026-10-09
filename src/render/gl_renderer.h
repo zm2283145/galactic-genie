@@ -42,6 +42,10 @@ public:
     int quads() const { return quads_; }
 
 private:
+    void setScreenViewport();
+public:
+    void setCanvas(int w, int h) override;
+private:
     struct Vertex {
         float x, y;
         float u, v;

@@ -9479,7 +9479,9 @@ std::vector<const dat::Unit *> Game::buildingOptions(
 
 std::string Game::unitDisplayName(
     const dat::Unit &unit) const {
-    if (unit.name2 == "UNIT-WORKER")
+    // Workers carry per-civilization name ids in the original (0x48bbe0)
+    // that the string tables lack (their dat id names another unit).
+    if (unit.name2 == "UNIT-WORKER" || unit.name.rfind("UNIT-WORKER", 0) == 0)
         return "Worker";
     return displayUnitName(
         unit,
@@ -11776,6 +11778,24 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
         }
     }
 
+    if (actionMenuTab_ == ActionMenuTab::Research) {
+        const std::vector<int> options =
+            researchOptions(*subject);
+        if (optionIndex >= options.size()) return true;
+        queueProductionItem(*subject, nullptr, options[optionIndex]);
+    } else {
+        const std::vector<const dat::Unit *> options =
+            productionOptions(*subject);
+        if (optionIndex >= options.size()) return true;
+        queueProductionItem(*subject, options[optionIndex], -1);
+    }
+    return true;
+}
+
+// Queues a unit or a research at a building, paying for it (the original's
+// train/research button).
+bool Game::queueProductionItem(Object &building, const dat::Unit *unitToTrain, int researchId) {
+    Object *subject = &building;
     if (subject->productionQueue.size() >= 5) {
         showCannotDo(
             3088,
@@ -11784,11 +11804,8 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
     }
 
     ProductionItem item;
-    if (actionMenuTab_ == ActionMenuTab::Research) {
-        const std::vector<int> options =
-            researchOptions(*subject);
-        if (optionIndex >= options.size()) return true;
-        const int technologyId = options[optionIndex];
+    if (researchId >= 0) {
+        const int technologyId = researchId;
         const dat::Tech &technology =
             assets_.dat().techs[(size_t)technologyId];
         if (!technologyRequirementsMet(
@@ -11826,10 +11843,8 @@ bool Game::handleActionMenuClick(float screenX, float screenY,
             std::max(0.1f, (float)technology.researchTime);
         statusMessage_ = "RESEARCH QUEUED";
     } else {
-        const std::vector<const dat::Unit *> options =
-            productionOptions(*subject);
-        if (optionIndex >= options.size()) return true;
-        const dat::Unit *unit = options[optionIndex];
+        if (!unitToTrain) return false;
+        const dat::Unit *unit = unitToTrain;
         const float factor = unitCostFactor(localPlayer_, *unit);
         for (const dat::ResourceCost &cost : unit->costs) {
             if (!cost.flag || cost.type < 0 ||
@@ -24254,7 +24269,7 @@ bool Game::updateInputPhase(float dt, const InputState &in, WorldInput &worldInp
     }
     const bool minimapInput =
         !cheatMenuOpen_ &&
-        handleMinimapInput(in);
+        (originalInterface_ ? handleOriginalHudInput(in) : handleMinimapInput(in));
     const bool consumeWorldInput =
         cheatMenuOpen_ || minimapInput;
     if (cheatMenuOpen_) {
@@ -24561,7 +24576,7 @@ void Game::handleWorldInput(const WorldInput &worldInput) {
             gatherPointBuildingId_ = 0;
             placementHandled = true;
         } else if ((in.selectPressed || in.pointerTap) &&
-                   in.pointerY < in.screenH - kSelectionPanelHeight) {
+                   in.pointerY < in.screenH - selectionPanelHeight()) {
             setGatherPoint(*building, in.pointerX, in.pointerY, in.screenW, in.screenH);
             gatherPointBuildingId_ = 0;
             placementHandled = true;
@@ -24578,7 +24593,7 @@ void Game::handleWorldInput(const WorldInput &worldInput) {
                garrisonCursorActive_ &&
                (in.selectPressed || in.pointerTap) &&
                in.pointerY <
-                   in.screenH - kSelectionPanelHeight) {
+                   in.screenH - selectionPanelHeight()) {
         Object *building =
             objectAtScreen(in.pointerX, in.pointerY,
                            in.screenW, in.screenH);
@@ -24615,7 +24630,7 @@ void Game::handleWorldInput(const WorldInput &worldInput) {
                 in.pointerTap) &&
                in.pointerY <
                    in.screenH -
-                       kSelectionPanelHeight) {
+                       selectionPanelHeight()) {
         Object *target =
             objectAtScreen(
                 in.pointerX, in.pointerY,
@@ -24671,7 +24686,7 @@ void Game::handleWorldInput(const WorldInput &worldInput) {
          in.pointerTap) &&
         in.pointerY <
             in.screenH -
-                kSelectionPanelHeight) {
+                selectionPanelHeight()) {
         std::vector<Object *> selected =
             selectedObjectsInOrder(true);
         Object *acknowledgement = nullptr;
@@ -24823,7 +24838,7 @@ void Game::handleWorldInput(const WorldInput &worldInput) {
         (in.selectPressed || in.pointerTap) &&
         in.pointerY <
             in.screenH -
-                kSelectionPanelHeight) {
+                selectionPanelHeight()) {
         float targetX = 0.0f;
         float targetY = 0.0f;
         screenToWorld(
@@ -28278,6 +28293,10 @@ void Game::renderFrame(Renderer &r, int screenW, int screenH) {
         screenW - minimapSize - 10.0f;
     updateMinimapTexture(r);
     const float invZoom = 1.0f / zoom_;
+    // The PC build's original interface replaces the Vita HUD (minimap,
+    // groups, statistics, object panel and top bar) up to the overlays.
+    if (originalInterface_) drawOriginalHud(r, screenW, screenH, invZoom, panelObject);
+    if (!originalInterface_) {
     const float minimapX = minimapLeft * invZoom;
     const float minimapY = minimapTop * invZoom;
     r.fillRect(
@@ -29819,6 +29838,8 @@ void Game::renderFrame(Renderer &r, int screenW, int screenH) {
             180, 220, 235);
     }
 
+    } // !originalInterface_
+
     if (actionMenuOpen_) {
         Object *subject = findObject(actionMenuObjectId_);
         if (subject && subject->active) {
@@ -31283,4 +31304,589 @@ std::string Game::workerStatesForTesting(int player) const {
            " carrying " + std::to_string(carrying) + " targets " + std::to_string(targets) +
            " dropdist " + dropDistances;
 }
+
+// --- Original game screen (PC) --------------------------------------------------
+// Rect table 53290 at 800x600 (re_notes/game_screen.txt): the view is the top
+// 430 px, the civilization's panel art (51100+civ) fills the rest.
+
+namespace {
+constexpr float kHudPanelH = 170.0f;
+// Command grid: 41x41 buttons at (6+41c, 433+41r), slot = row*4+col, 15 used.
+constexpr float kHudGridX = 6.0f, kHudGridY = 3.0f, kHudGridStep = 41.0f;
+// Minimap diamond (Map View) relative to the panel's top-left.
+constexpr float kHudMapX = 453.0f, kHudMapY = 31.0f, kHudMapW = 266.0f, kHudMapH = 134.0f;
+// Right-hand column (btngame2x 50754 frames: Menu 0, Chat 2, Tech Tree 4,
+// Diplomacy 6, Objectives 8).
+struct HudSideButton {
+    float y;
+    int frame;
+    Game::HudRequest request;
+};
+constexpr HudSideButton kHudSideButtons[] = {
+    {37.0f, 0, Game::HudRequest::Menu},      {62.0f, 8, Game::HudRequest::Objectives},
+    {87.0f, 2, Game::HudRequest::Chat},      {112.0f, 6, Game::HudRequest::Diplomacy},
+    {137.0f, 4, Game::HudRequest::TechTree},
+};
+// Map-mode buttons (icomap_b 50788): normal 8, combat 4, economic 10,
+// statistics 6.
+struct HudMapButton {
+    float x, y, w, h;
+    int frame;
+};
+constexpr HudMapButton kHudMapButtons[] = {
+    {630.0f, 133.0f, 50.0f, 25.0f, 8}, {673.0f, 112.0f, 45.0f, 28.0f, 4},
+    {678.0f, 133.0f, 41.0f, 25.0f, 10}, {680.0f, 59.0f, 40.0f, 27.0f, 6},
+};
+} // namespace
+
+std::vector<Game::HudButton> Game::originalHudButtons(Object &subject) {
+    std::vector<HudButton> buttons;
+    std::array<bool, 15> used{};
+    auto add = [&](HudButton button, int preferred) {
+        int slot = preferred >= 0 && preferred < 15 && !used[(size_t)preferred] ? preferred : -1;
+        for (int i = 0; slot < 0 && i < 14; ++i)
+            if (!used[(size_t)i]) slot = i;
+        if (slot < 0) return;
+        used[(size_t)slot] = true;
+        button.slot = slot;
+        buttons.push_back(button);
+    };
+    if (subject.player != localPlayer_) return buttons;
+    if (originalHudStances_) {
+        for (int i = 0; i < 4; ++i) add({HudButton::Stance, 0, nullptr, i}, 4 + i);
+        add({HudButton::Back, 0, nullptr, 0}, 14);
+        return buttons;
+    }
+    if (isBuilder(subject)) {
+        if (originalHudPage_ == 0) {
+            add({HudButton::Page, 0, nullptr, 1}, 0);
+            add({HudButton::Page, 0, nullptr, 2}, 1);
+            add({HudButton::Page, 0, nullptr, 3}, 2);
+            add({HudButton::Unit, 0, nullptr, (int)UnitCommand::Stop}, 3);
+            if (isRepairer(subject)) add({HudButton::Repair, 0, nullptr, 0}, 7);
+            add({HudButton::Garrison, 0, nullptr, 0}, 12);
+            return buttons;
+        }
+        const ActionMenuTab tab = originalHudPage_ == 1   ? ActionMenuTab::Economy
+                                  : originalHudPage_ == 2 ? ActionMenuTab::Military
+                                                          : ActionMenuTab::Defense;
+        for (const dat::Unit *unit : buildingOptions(subject, tab))
+            add({HudButton::Build, 0, unit, 0}, unit->buttonId > 0 ? (unit->buttonId - 1) % 15 : -1);
+        add({HudButton::Back, 0, nullptr, 0}, 14);
+        return buttons;
+    }
+    if (subject.unit->type == dat::UT_Building) {
+        if (!subject.underConstruction) {
+            for (const dat::Unit *unit : productionOptions(subject))
+                add({HudButton::Train, 0, unit, 0}, unit->buttonId > 0 ? (unit->buttonId - 1) % 15 : -1);
+            for (int technologyId : researchOptions(subject)) {
+                const dat::Tech &tech = assets_.dat().techs[(size_t)technologyId];
+                add({HudButton::Research, 0, nullptr, technologyId},
+                    tech.buttonId > 0 ? (tech.buttonId - 1) % 15 : -1);
+            }
+            const std::vector<BuildingCommand> commands = buildingCommands(subject);
+            for (size_t i = 0; i < commands.size(); ++i)
+                add({HudButton::Building, 0, nullptr, (int)commands[i]}, 13 - (int)i);
+        }
+        return buttons;
+    }
+    const std::vector<UnitCommand> commands = unitCommands(subject);
+    static constexpr int kCommandSlots[] = {3, 0, 1, 2, 2, 5}; // Stop, Patrol, Guard, Follow, AG, Convert
+    for (UnitCommand command : commands)
+        add({HudButton::Unit, 0, nullptr, (int)command}, kCommandSlots[(int)command]);
+    if (canAttack(subject)) add({HudButton::Stance, 0, nullptr, -1}, 4);
+    if (selectedObjectsInOrder(true).size() > 1)
+        for (int i = 0; i < 4; ++i) add({HudButton::Formation, 0, nullptr, i}, 8 + i);
+    add({HudButton::Garrison, 0, nullptr, 0}, 12);
+    return buttons;
+}
+
+bool Game::hasIdleWorker() const {
+    if (localPlayer_ <= 0) return false;
+    for (size_t slot = 0, count = dynamicObjects().size(); slot < count; ++slot) {
+        const Object &object = objects_[dynamicObjectIndices_[slot]];
+        if (object.active && object.unit && object.player == localPlayer_ && object.garrisonedInId < 0 &&
+            object.state == State::Idle && !object.moveGoalActive && isBuilder(object))
+            return true;
+    }
+    return false;
+}
+
+void Game::selectNextIdleWorker() {
+    if (localPlayer_ <= 0) return;
+    Object *first = nullptr, *next = nullptr;
+    for (size_t slot = 0, count = dynamicObjects().size(); slot < count; ++slot) {
+        Object &object = objects_[dynamicObjectIndices_[slot]];
+        if (!object.active || !object.unit || object.player != localPlayer_ || object.garrisonedInId >= 0 ||
+            object.state != State::Idle || object.moveGoalActive || !isBuilder(object))
+            continue;
+        if (!first || object.spawnId < first->spawnId) first = &object;
+        if (object.spawnId > idleWorkerCursor_ && (!next || object.spawnId < next->spawnId)) next = &object;
+    }
+    Object *chosen = next ? next : first;
+    if (!chosen) return;
+    idleWorkerCursor_ = chosen->spawnId;
+    clearSelection();
+    selectObject(*chosen, true);
+    lookAt(chosen->x, chosen->y);
+}
+
+std::vector<Game::HudQueueIcon> Game::originalHudQueueIcons(const Object &building) const {
+    // Current item 40x40 at (100,83) of the object panel, the rest at
+    // y 124 from x 100 with a 38 px pitch (FUN_005dc330).
+    std::vector<HudQueueIcon> icons;
+    const auto &queue = building.productionQueue;
+    for (size_t i = 0; i < queue.size();) {
+        size_t count = 1;
+        if (i > 0)
+            while (i + count < queue.size() && queue[i + count].unit == queue[i].unit &&
+                   queue[i + count].technologyId == queue[i].technologyId)
+                ++count;
+        const size_t k = icons.size();
+        if (k == 0) icons.push_back({100.0f, 83.0f, i, count});
+        else icons.push_back({100.0f + 38.0f * (float)(k - 1), 124.0f, i, count});
+        i += count;
+        if (icons.size() >= 5) break;
+    }
+    return icons;
+}
+
+std::vector<std::string> Game::originalHudHelp(const HudButton &button, const Object &subject) const {
+    std::string help;
+    switch (button.kind) {
+    case HudButton::Train:
+    case HudButton::Build:
+        // Workers (class 58), 45/46 and unit 104 use per-civ string ids in
+        // the original (0x48bbe0) that the DLLs lack.
+        if (button.unit->cls == 58 || button.unit->cls == 45 || button.unit->cls == 46 || button.unit->id == 104)
+            help = "Creates " + unitDisplayName(*button.unit) + ".\n" + assets_.localizedString(20201) +
+                   std::to_string(button.unit->hitPoints) + " " + assets_.localizedString(20202) +
+                   std::to_string(button.unit->displayedAttack) + " " + assets_.localizedString(20204) +
+                   std::to_string(button.unit->displayedMeleeArmour) + " " + assets_.localizedString(20205) +
+                   std::to_string(button.unit->displayedPierceArmour);
+        else
+            help = originalHelpText(button.unit->languageDllCreation + 20000, button.unit, nullptr);
+        if (help.empty()) help = assets_.localizedString(button.unit->languageDllHelp);
+        if (help.empty()) help = unitDisplayName(*button.unit);
+        break;
+    case HudButton::Research: {
+        const dat::Tech &tech = assets_.dat().techs[(size_t)button.value];
+        help = originalHelpText(tech.languageDllDescription + 20000, nullptr, &tech);
+        break;
+    }
+    case HudButton::Unit:
+        help = unitCommandTitle((UnitCommand)button.value) + "\n" + unitCommandHelp((UnitCommand)button.value);
+        break;
+    case HudButton::Building:
+        help = buildingCommandTitle(subject, (BuildingCommand)button.value) + "\n" +
+               buildingCommandHelp(subject, (BuildingCommand)button.value);
+        break;
+    case HudButton::Stance:
+        help = button.value < 0 ? "Stances" : assets_.localizedString(kStanceHelpStrings[std::clamp(button.value, 0, 3)]);
+        break;
+    case HudButton::Page:
+        help = button.value == 1   ? "Build Economic Buildings"
+               : button.value == 2 ? "Build Military Buildings"
+                                   : "Build Defensive Buildings";
+        break;
+    case HudButton::Formation:
+        help = button.value == 0   ? "Line Formation"
+               : button.value == 1 ? "Box Formation"
+               : button.value == 2 ? "Staggered Formation"
+                                   : "Flank Formation";
+        break;
+    case HudButton::Garrison: help = "Garrison"; break;
+    case HudButton::Repair: help = "Repair"; break;
+    case HudButton::Back: help = "Cancel"; break;
+    }
+    std::vector<std::string> lines;
+    size_t start = 0;
+    for (;;) {
+        const size_t at = help.find('\n', start);
+        for (const std::string &line : wrapText(help.substr(start, at == std::string::npos ? std::string::npos
+                                                                                           : at - start),
+                                                 64))
+            lines.push_back(line);
+        if (at == std::string::npos) break;
+        start = at + 1;
+    }
+    while (!lines.empty() && lines.back().empty()) lines.pop_back();
+    if (lines.size() > 9) lines.resize(9);
+    return lines;
+}
+
+void Game::drawOriginalHud(Renderer &r, int screenW, int screenH, float invZoom,
+                           const Object *panelObject) {
+    const float left = (screenW - 800.0f) * 0.5f;
+    const float top = screenH - kHudPanelH;
+    auto drawFrame = [&](const SpriteFrame *frame, float x, float y, float w = -1, float h = -1) {
+        if (!frame || !frame->tex) return;
+        const float width = w < 0 ? frame->w : w, height = h < 0 ? frame->h : h;
+        r.draw(frame->tex, {x * invZoom, y * invZoom, width * invZoom, height * invZoom, frame->u, frame->v,
+                            frame->u + frame->w, frame->v + frame->h});
+    };
+    auto text = [&](const std::string &value, float x, float y, float scale, uint8_t red = 255,
+                    uint8_t green = 255, uint8_t blue = 255) {
+        drawBitmapText(r, {value}, (x + 1) * invZoom, (y + 1) * invZoom, scale * invZoom, 0, 0, 0);
+        drawBitmapText(r, {value}, x * invZoom, y * invZoom, scale * invZoom, red, green, blue);
+    };
+    auto rightText = [&](const std::string &value, float right, float y, float scale) {
+        text(value, right - textWidth(value, scale), y, scale);
+    };
+    const int civilization = std::clamp(localPlayer_ > 0 ? civilizationForPlayer(localPlayer_) : 1, 1, 8);
+    // Panel art: hotspot (0,-430) puts the 800x170 frame at the bottom.
+    if (const SpriteSheet *panel = assets_.interfaceSheet(51100 + civilization, 50500);
+        panel && !panel->frames.empty())
+        drawFrame(&panel->frames[0], left, top, 800.0f, kHudPanelH);
+    else
+        r.fillRect(left * invZoom, top * invZoom, 800.0f * invZoom, kHudPanelH * invZoom, 20, 24, 30, 255);
+    if (localPlayer_ > 0) {
+        // Resources (inventory panel 435,432): carbon, food, nova, ore,
+        // population, right-aligned.
+        static constexpr float kColumns[5] = {68, 139, 210, 281, 352};
+        static constexpr int kResources[4] = {1, 0, 3, 2};
+        for (int i = 0; i < 4; ++i)
+            rightText(std::to_string((int)std::floor(resource(localPlayer_, kResources[i]))),
+                      left + 435 + kColumns[i], top + 6, 0.8f);
+        rightText(std::to_string((int)std::lround(populationUsed(localPlayer_))) + "/" +
+                      std::to_string((int)std::lround(populationCapacity(localPlayer_))),
+                  left + 435 + kColumns[4], top + 6, 0.8f);
+        // Tech level (strings 4201-4204) centred in 291,431,124x24.
+        int techLevel = 1;
+        for (int id = 1; id <= 3; ++id)
+            if (researchedTechs_[(size_t)localPlayer_].count(id)) techLevel = id + 1;
+        std::string level = assets_.localizedString(4200 + techLevel);
+        if (level.empty()) level = "Tech Level " + std::to_string(techLevel);
+        text(level, left + 291 + (124 - textWidth(level, 0.8f)) * 0.5f, top + 5, 0.8f);
+    }
+    // Right column and map buttons.
+    if (const SpriteSheet *side = assets_.interfaceSheet(50754, 50500))
+        for (const HudSideButton &button : kHudSideButtons)
+            if ((size_t)button.frame < side->frames.size())
+                drawFrame(&side->frames[(size_t)button.frame], left + 743, top + button.y);
+    if (const SpriteSheet *mapButtons = assets_.interfaceSheet(50788, 50500))
+        for (size_t i = 0; i < std::size(kHudMapButtons); ++i) {
+            const HudMapButton &button = kHudMapButtons[i];
+            const bool on = i < 3 ? minimapMode_ == (int)(i == 0 ? 0 : i == 1 ? 1 : 2) : statisticsVisible_;
+            const size_t frame = (size_t)button.frame + (on ? 1 : 0);
+            if (frame < mapButtons->frames.size())
+                drawFrame(&mapButtons->frames[frame], left + button.x, top + button.y);
+        }
+    // Idle worker button (450,546): frame 12, flashing 16 while a worker idles.
+    if (const SpriteSheet *mapButtons = assets_.interfaceSheet(50788, 50500); mapButtons && localPlayer_ > 0) {
+        const bool blink = hasIdleWorker() && std::fmod(hudBlinkTime_, 1.0f) < 0.5f;
+        const size_t frame = blink ? 16 : 12;
+        if (frame < mapButtons->frames.size())
+            drawFrame(&mapButtons->frames[frame], left + 450, top + 116);
+    }
+    // Minimap in the diamond.
+    if (minimapTexture_) {
+        const float x = left + kHudMapX, y = top + kHudMapY;
+        r.draw(minimapTexture_, {x * invZoom, y * invZoom, kHudMapW * invZoom, kHudMapH * invZoom, 0, 0,
+                                 (float)minimapTextureSize_, (float)minimapTextureSize_});
+        // Camera position marker.
+        float cx = 0, cy = 0;
+        screenToWorld(screenW * 0.5f, (screenH - kHudPanelH) * 0.5f, screenW, screenH, cx, cy);
+        const auto point = minimapWorldToPoint(cx, cy, mapSize_, x, y, kHudMapW);
+        const float py = y + (point[1] - y) * (kHudMapH / kHudMapW);
+        r.fillRect((point[0] - 10) * invZoom, (py - 5) * invZoom, 20 * invZoom, 1 * invZoom, 255, 255, 255, 255);
+        r.fillRect((point[0] - 10) * invZoom, (py + 5) * invZoom, 20 * invZoom, 1 * invZoom, 255, 255, 255, 255);
+    }
+    // Statistics lines: 251x20 panels stacked up from the view's bottom.
+    if (statisticsVisible_) {
+        const auto lines = statisticsLines();
+        float y = top - 20.0f * lines.size() - 4.0f;
+        for (const auto &line : lines) {
+            const float width = textWidth(line.first, 0.8f);
+            drawBitmapText(r, {line.first}, (left + 796 - width + 1) * invZoom, (y + 1) * invZoom, 0.8f * invZoom,
+                           0, 0, 0);
+            drawBitmapText(r, {line.first}, (left + 796 - width) * invZoom, y * invZoom, 0.8f * invZoom,
+                           line.second[0], line.second[1], line.second[2]);
+            y += 20.0f;
+        }
+    }
+    // Object panel (175,430).
+    const float panelX = left + 175, panelY = top;
+    std::vector<Object *> selected = selectedObjectsInOrder(false);
+    if (selected.size() > 1) {
+        // Multi-selection: 40x40 icons, 41 pitch, with HP bars.
+        const int perRow = (int)((262 - 8) / 41);
+        for (size_t i = 0; i < selected.size() && i < 40; ++i) {
+            const Object &object = *selected[i];
+            const float x = panelX + 8 + (float)(i % (size_t)perRow) * 41;
+            const float y = panelY + 37 + (float)(i / (size_t)perRow) * 41;
+            const int iconSet = assets_.dat().civs[(size_t)std::clamp(civilizationForPlayer(object.player), 0,
+                                                                       (int)assets_.dat().civs.size() - 1)]
+                                    .iconSet;
+            const SpriteSheet *icons = assets_.interfaceSheet(
+                (object.unit->type == dat::UT_Building ? kBuildingIconSlpBase : kUnitIconSlpBase) +
+                std::max(1, iconSet) - 1);
+            if (icons && object.unit->iconId >= 0 && (size_t)object.unit->iconId < icons->frames.size())
+                drawFrame(&icons->frames[(size_t)object.unit->iconId], x + 2, y, 36, 36);
+            const float hp = std::clamp(object.hitPoints / std::max(1.0f, object.maxHitPoints), 0.0f, 1.0f);
+            r.fillRect((x + 2) * invZoom, (y + 36) * invZoom, 34 * invZoom, 2 * invZoom, 0, 0, 0, 255);
+            r.fillRect((x + 2) * invZoom, (y + 36) * invZoom, 34 * hp * invZoom, 2 * invZoom, 20, 205, 45, 255);
+        }
+    } else if (panelObject && panelObject->unit) {
+        const Object &object = *panelObject;
+        text(unitDisplayName(*object.unit), panelX + 5, panelY + 30, 0.8f, 0x22, 0xfe, 0x0b);
+        const int iconSet = assets_.dat().civs[(size_t)std::clamp(civilizationForPlayer(object.player), 0,
+                                                                   (int)assets_.dat().civs.size() - 1)]
+                                .iconSet;
+        const SpriteSheet *icons = assets_.interfaceSheet(
+            (object.unit->type == dat::UT_Building ? kBuildingIconSlpBase : kUnitIconSlpBase) +
+            std::max(1, iconSet) - 1);
+        if (icons && object.unit->iconId >= 0 && (size_t)object.unit->iconId < icons->frames.size())
+            drawFrame(&icons->frames[(size_t)object.unit->iconId], panelX + 5, panelY + 47, 36, 36);
+        if (!isGatherable(object)) {
+            const float hp = std::clamp(object.hitPoints / std::max(1.0f, object.maxHitPoints), 0.0f, 1.0f);
+            r.fillRect((panelX + 5) * invZoom, (panelY + 89) * invZoom, 40 * invZoom, 4 * invZoom, 60, 0, 0, 255);
+            r.fillRect((panelX + 5) * invZoom, (panelY + 89) * invZoom, 40 * hp * invZoom, 4 * invZoom, 20, 205,
+                       45, 255);
+            text(std::to_string((int)std::ceil(object.hitPoints)) + "/" +
+                     std::to_string((int)std::lround(object.maxHitPoints)),
+                 panelX + 48, panelY + 84, 0.7f);
+        } else {
+            text(std::to_string((int)std::floor(object.resourceAmount)), panelX + 48, panelY + 84, 0.7f);
+        }
+        if (object.player > 0) {
+            text(factionName(civilizationForPlayer(object.player)), panelX + 125, panelY + 60, 0.75f);
+            text(playerDisplayName(object.player), panelX + 125, panelY + 75, 0.75f);
+        }
+        // Stat lines: attack, armour, range (itemicon frames 7, 8, 6).
+        const SpriteSheet *itemIcons = assets_.interfaceSheet(50731, 50500);
+        std::vector<std::pair<int, std::string>> stats;
+        if (canAttack(object) && !object.unit->attacks.empty()) {
+            int attack = 0;
+            for (const dat::AttackOrArmor &value : object.unit->attacks)
+                attack = std::max(attack, modifiedAttackAmount(object, value));
+            stats.push_back({7, std::to_string(attack)});
+            stats.push_back({6, std::to_string((int)std::lround(object.unit->maxRange))});
+        }
+        if (object.unit->type >= dat::UT_Combatant) {
+            bool present = false;
+            stats.push_back({8, std::to_string(modifiedArmourAmount(object, 4, present)) + "/" +
+                                    std::to_string(modifiedArmourAmount(object, 3, present))});
+        }
+        for (size_t i = 0; i < stats.size() && i < 3; ++i) {
+            const float y = panelY + 107 + 18.0f * i - 2;
+            if (itemIcons && (size_t)stats[i].first < itemIcons->frames.size())
+                drawFrame(&itemIcons->frames[(size_t)stats[i].first], panelX + 10, y);
+            text(stats[i].second, panelX + 30, y + 2, 0.7f);
+        }
+        // Production: the current item and its progress, then the queue.
+        if (object.player == localPlayer_ && !object.productionQueue.empty()) {
+            const ProductionItem &item = object.productionQueue.front();
+            const float progress =
+                item.duration > 0 ? std::clamp(1.0f - object.productionRemaining / item.duration, 0.0f, 1.0f) : 0;
+            r.fillRect((panelX + 143) * invZoom, (panelY + 114) * invZoom, 104 * invZoom, 10 * invZoom, 0, 0, 0,
+                       255);
+            r.fillRect((panelX + 143) * invZoom, (panelY + 114) * invZoom, 104 * progress * invZoom, 10 * invZoom,
+                       200, 170, 40, 255);
+            text(std::string(item.unit ? "Creating" : "Researching") + " (" +
+                     std::to_string((int)(progress * 100)) + "%)",
+                 panelX + 143, panelY + 87, 0.7f);
+            const int iconSetLocal = assets_.dat().civs[(size_t)std::clamp(civilizationForPlayer(localPlayer_), 0,
+                                                                            (int)assets_.dat().civs.size() - 1)]
+                                         .iconSet;
+            for (const HudQueueIcon &icon : originalHudQueueIcons(object)) {
+                const ProductionItem &queued = object.productionQueue[icon.index];
+                const SpriteSheet *sheet =
+                    queued.unit ? assets_.interfaceSheet(kUnitIconSlpBase + std::max(1, iconSetLocal) - 1)
+                                : assets_.interfaceSheet(kTechnologyIconSlpBase + std::max(1, iconSetLocal) - 1);
+                const int iconId =
+                    queued.unit ? queued.unit->iconId
+                                : queued.technologyId >= 0 ? assets_.dat().techs[(size_t)queued.technologyId].iconId
+                                                           : -1;
+                if (sheet && iconId >= 0 && (size_t)iconId < sheet->frames.size())
+                    drawFrame(&sheet->frames[(size_t)iconId], panelX + icon.x + 2, panelY + icon.y + 2, 36, 36);
+                if (icon.count > 1)
+                    text(std::to_string(icon.count), panelX + icon.x + 4, panelY + icon.y + 3, 0.7f);
+            }
+        }
+    }
+    // Command grid.
+    std::vector<std::string> helpLines;
+    if (panelObject && panelObject->player == localPlayer_) {
+        Object *subject = findObject(panelObject->spawnId);
+        if (subject) {
+            const int iconSet = assets_.dat().civs[(size_t)std::clamp(civilizationForPlayer(localPlayer_), 0,
+                                                                       (int)assets_.dat().civs.size() - 1)]
+                                    .iconSet;
+            const SpriteSheet *commandIcons = assets_.interfaceSheet(kCommandIconSlp);
+            for (const HudButton &button : originalHudButtons(*subject)) {
+                const float x = left + kHudGridX + (button.slot % 4) * kHudGridStep;
+                const float y = top + kHudGridY + (button.slot / 4) * kHudGridStep;
+                const SpriteSheet *sheet = commandIcons;
+                int frame = -1;
+                switch (button.kind) {
+                case HudButton::Train:
+                case HudButton::Build:
+                    sheet = assets_.interfaceSheet(
+                        (button.unit->type == dat::UT_Building ? kBuildingIconSlpBase : kUnitIconSlpBase) +
+                        std::max(1, iconSet) - 1);
+                    frame = button.unit->iconId;
+                    break;
+                case HudButton::Research:
+                    sheet = assets_.interfaceSheet(kTechnologyIconSlpBase + std::max(1, iconSet) - 1);
+                    frame = assets_.dat().techs[(size_t)button.value].iconId;
+                    break;
+                case HudButton::Page: frame = button.value == 1 ? 30 : button.value == 2 ? 31 : 29; break;
+                case HudButton::Unit: frame = unitCommandIcon((UnitCommand)button.value); break;
+                case HudButton::Building:
+                    frame = buildingCommandIcon(*subject, (BuildingCommand)button.value);
+                    break;
+                case HudButton::Stance: frame = button.value < 0 ? 22 : 22 + button.value; break;
+                case HudButton::Formation:
+                    frame = button.value == 0 ? 40 : button.value == 1 ? 43 : button.value == 2 ? 63 : 62;
+                    break;
+                case HudButton::Garrison: frame = (int)kCommandGarrisonIcon; break;
+                case HudButton::Repair: frame = (int)kCommandRepairIcon; break;
+                case HudButton::Back: frame = 0; break;
+                }
+                if (sheet && frame >= 0 && (size_t)frame < sheet->frames.size())
+                    drawFrame(&sheet->frames[(size_t)frame], x + 2, y + 2, 36, 36);
+                if (hudPointerX_ >= x && hudPointerX_ < x + kHudGridStep && hudPointerY_ >= y &&
+                    hudPointerY_ < y + kHudGridStep)
+                    helpLines = originalHudHelp(button, *subject);
+            }
+        }
+    }
+    // Rollover help: 540x128 at (4, view bottom - 130), rollback.slp 50150.
+    if (!helpLines.empty()) {
+        // The panel shrinks to the text and sits on the view's bottom edge.
+        const float helpH = std::min(128.0f, 12.0f + 13.0f * (float)helpLines.size());
+        const float helpX = left + 4, helpY = top - 2 - helpH;
+        const SpriteSheet *back = assets_.interfaceSheet(50150, 50500);
+        if (back && !back->frames.empty())
+            drawFrame(&back->frames[0], helpX, helpY, 540, helpH);
+        else
+            r.fillRect(helpX * invZoom, helpY * invZoom, 540 * invZoom, helpH * invZoom, 0, 0, 0, 200);
+        for (size_t i = 0; i < helpLines.size(); ++i)
+            text(helpLines[i], helpX + 8, helpY + 6 + 13.0f * (float)i, 0.75f, 255, 255, 255);
+    }
+}
+
+bool Game::handleOriginalHudInput(const InputState &in) {
+    const int screenW = in.screenW > 0 ? in.screenW : 800, screenH = in.screenH > 0 ? in.screenH : 600;
+    const float left = (screenW - 800.0f) * 0.5f;
+    const float top = screenH - kHudPanelH;
+    const float x = in.pointerX - left, y = in.pointerY - top;
+    hudPointerX_ = in.pointerX;
+    hudPointerY_ = in.pointerY;
+    hudBlinkTime_ += 1.0f / 30.0f;
+    if (!in.pointerDown) minimapDragging_ = false;
+    if ((in.selectPressed || in.pointerTap) && x >= 450 && x < 492 && y >= 116 && y < 158) {
+        selectNextIdleWorker();
+        playInterfaceFeedback(kInterfaceButtonSound);
+        return true;
+    }
+    const bool insideMap = x >= kHudMapX && x < kHudMapX + kHudMapW && y >= kHudMapY && y < kHudMapY + kHudMapH;
+    if (insideMap && (in.selectPressed || in.pointerDown || minimapDragging_)) {
+        minimapDragging_ = in.pointerDown;
+        // The diamond is the square minimap squashed to 2:1.
+        float worldX = 0, worldY = 0;
+        const float squareY = kHudMapY + (y - kHudMapY) * (kHudMapW / kHudMapH);
+        if (minimapPointToWorld(x + left, squareY + top, mapSize_, left + kHudMapX, top + kHudMapY, kHudMapW,
+                                worldX, worldY))
+            lookAt(worldX, worldY);
+        return true;
+    }
+    if (in.pointerY < top) return false;
+    if (!(in.selectPressed || in.pointerTap || in.commandPressed)) return true; // the panel takes the pointer
+    if (in.commandPressed) return true;
+    for (const HudSideButton &button : kHudSideButtons)
+        if (x >= 743 && x < 793 && y >= button.y && y < button.y + 19) {
+            hudRequest_ = button.request;
+            playInterfaceFeedback(kInterfaceButtonSound);
+            return true;
+        }
+    for (size_t i = 0; i < std::size(kHudMapButtons); ++i) {
+        const HudMapButton &button = kHudMapButtons[i];
+        if (x >= button.x && x < button.x + button.w && y >= button.y && y < button.y + button.h) {
+            if (i < 3) setMinimapMode((int)i);
+            else statisticsVisible_ = !statisticsVisible_;
+            playInterfaceFeedback(kInterfaceButtonSound);
+            return true;
+        }
+    }
+    // Multi-selection icons: click narrows the selection to that unit.
+    std::vector<Object *> selected = selectedObjectsInOrder(false);
+    // Production icons: a click cancels the last item of that stack.
+    if (selected.size() == 1 && selected[0] && selected[0]->player == localPlayer_ &&
+        !selected[0]->productionQueue.empty())
+        for (const HudQueueIcon &icon : originalHudQueueIcons(*selected[0]))
+            if (x >= 175 + icon.x && x < 175 + icon.x + 40 && y >= icon.y && y < icon.y + 40) {
+                cancelProductionItem(*selected[0], icon.index + icon.count - 1);
+                playInterfaceFeedback(kInterfaceButtonSound);
+                return true;
+            }
+    if (selected.size() > 1 && x >= 175 + 8 && x < 175 + 262 && y >= 37) {
+        const int perRow = (262 - 8) / 41;
+        const int column = (int)((x - 183) / 41), row = (int)((y - 37) / 41);
+        const size_t index = (size_t)(row * perRow + column);
+        if (column < perRow && index < selected.size()) {
+            Object *chosen = selected[index];
+            clearSelection();
+            selectObject(*chosen, true);
+            return true;
+        }
+    }
+    // Command grid.
+    if (x >= kHudGridX && x < kHudGridX + 4 * kHudGridStep && y >= kHudGridY && y < kHudGridY + 4 * kHudGridStep) {
+        const int slot = (int)((y - kHudGridY) / kHudGridStep) * 4 + (int)((x - kHudGridX) / kHudGridStep);
+        Object *subject = nullptr;
+        for (Object *object : selected)
+            if (object && object->player == localPlayer_) {
+                subject = object;
+                break;
+            }
+        if (!subject) return true;
+        for (const HudButton &button : originalHudButtons(*subject)) {
+            if (button.slot != slot) continue;
+            switch (button.kind) {
+            case HudButton::Train: queueProductionItem(*subject, button.unit, -1); break;
+            case HudButton::Research: queueProductionItem(*subject, nullptr, button.value); break;
+            case HudButton::Build:
+                beginBuildingPlacement(*subject, *button.unit);
+                originalHudPage_ = 0;
+                break;
+            case HudButton::Page: originalHudPage_ = button.value; break;
+            case HudButton::Unit: executeUnitCommand((UnitCommand)button.value); break;
+            case HudButton::Building: executeBuildingCommand(*subject, (BuildingCommand)button.value); break;
+            case HudButton::Stance:
+                if (button.value < 0) {
+                    originalHudStances_ = true;
+                } else {
+                    setSelectedAttackMode((AttackMode)button.value);
+                    originalHudStances_ = false;
+                }
+                break;
+            case HudButton::Formation:
+                selectedFormation_ = button.value == 0   ? FormationType::Line
+                                     : button.value == 1 ? FormationType::Box
+                                     : button.value == 2 ? FormationType::Staggered
+                                                         : FormationType::Flank;
+                formationChosen_ = true;
+                break;
+            case HudButton::Garrison:
+                garrisonCursorActive_ = !garrisonCursorActive_;
+                statusMessage_ = garrisonCursorActive_ ? "SELECT A BUILDING TO GARRISON" : "";
+                statusTime_ = 3.0f;
+                break;
+            case HudButton::Repair:
+                repairCursorActive_ = !repairCursorActive_;
+                break;
+            case HudButton::Back:
+                originalHudPage_ = 0;
+                originalHudStances_ = false;
+                break;
+            }
+            playInterfaceFeedback(kInterfaceButtonSound);
+            return true;
+        }
+    }
+    return true;
+}
+
 } // namespace swgb

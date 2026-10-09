@@ -98,4 +98,39 @@ bool CpxArchive::read(size_t index, std::vector<uint8_t> &out, std::string *err)
     return true;
 }
 
+bool writeCpxBytes(const std::string &name, const std::vector<CpxWriteEntry> &entries,
+                   std::vector<uint8_t> &out, std::string *err) {
+    if (entries.empty() || entries.size() > 10000) {
+        if (err) *err = "a campaign needs 1 to 10000 scenarios";
+        return false;
+    }
+    out.clear();
+    auto u32 = [&](uint32_t value) {
+        for (int shift = 0; shift < 32; shift += 8) out.push_back((uint8_t)(value >> shift));
+    };
+    auto fixed = [&](const std::string &value, size_t size) {
+        const size_t length = std::min(value.size(), size - 1);
+        out.insert(out.end(), value.begin(), value.begin() + (ptrdiff_t)length);
+        out.insert(out.end(), size - length, 0);
+    };
+    fixed("1.00", 5);
+    out.pop_back(); // the version is 4 bytes, not NUL-terminated
+    fixed(name, 256);
+    u32((uint32_t)entries.size());
+    uint64_t offset = 264ull + entries.size() * 520ull;
+    for (const CpxWriteEntry &entry : entries) {
+        if (offset + entry.data.size() > 0xffffffffull) {
+            if (err) *err = "campaign archive exceeds 4 GB";
+            return false;
+        }
+        u32((uint32_t)entry.data.size());
+        u32((uint32_t)offset);
+        fixed(entry.identifier, 255);
+        fixed(entry.filename, 257);
+        offset += entry.data.size();
+    }
+    for (const CpxWriteEntry &entry : entries) out.insert(out.end(), entry.data.begin(), entry.data.end());
+    return true;
+}
+
 } // namespace swgb

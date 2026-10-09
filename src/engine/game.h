@@ -2230,6 +2230,7 @@ private:
     bool handleActionMenuClick(float screenX, float screenY,
                                int screenW, int screenH);
     bool cancelProductionItem(Object &building, size_t index);
+    bool queueProductionItem(Object &building, const dat::Unit *unitToTrain, int researchId);
     bool openSelectedActionMenu();
     bool canProduce(const Object &building, const dat::Unit &effective) const;
     bool canResearch(const Object &building, int technologyId) const;
@@ -2927,6 +2928,38 @@ private:
     // Statistics panel (action 0x18, F4) and the mini-map mode (Normal /
     // Combat / Economic, actions 0x28-0x2a) whose page it shows.
     bool statisticsVisible_ = false;
+    bool originalInterface_ = false;
+public:
+    enum class HudRequest : uint8_t { None, Menu, Objectives, Chat, Diplomacy, TechTree };
+private:
+    HudRequest hudRequest_ = HudRequest::None;
+    int originalHudPage_ = 0; // builder: 0 commands, 1 economy, 2 military, 3 defense
+    bool originalHudStances_ = false;
+    struct HudButton {
+        enum Kind : uint8_t { Train, Research, Build, Page, Unit, Building, Stance, Formation, Garrison,
+                              Repair, Back } kind;
+        int slot;
+        const dat::Unit *unit = nullptr;
+        int value = 0;
+    };
+    std::vector<HudButton> originalHudButtons(Object &subject);
+    void drawOriginalHud(Renderer &r, int screenW, int screenH, float invZoom, const Object *panelObject);
+    bool handleOriginalHudInput(const InputState &in);
+    std::vector<std::string> originalHudHelp(const HudButton &button, const Object &subject) const;
+    // Idle worker button (icomap frame 12, flashing 16 while any is idle).
+    bool hasIdleWorker() const;
+    void selectNextIdleWorker();
+    // Production icons in the object panel: (x, y, queue index) per
+    // stack (consecutive equal items share one icon with a count).
+    struct HudQueueIcon {
+        float x, y;
+        size_t index, count;
+    };
+    std::vector<HudQueueIcon> originalHudQueueIcons(const Object &building) const;
+    float hudPointerX_ = -1, hudPointerY_ = -1;
+    uint32_t idleWorkerCursor_ = 0;
+    float hudBlinkTime_ = 0;
+    float selectionPanelHeight() const { return originalInterface_ ? 170.0f : 112.0f; }
     int scrollSpeed_ = 84;
     bool friendOrFoeColors_ = false;
     bool oneClickGarrison_ = false;
@@ -2934,6 +2967,16 @@ private:
     std::vector<std::pair<std::string, std::array<uint8_t, 3>>> statisticsLines() const;
 public:
     bool statisticsVisible() const { return statisticsVisible_; }
+    // The original game screen (PC, 800x600): one bottom panel with the
+    // civilization's art, resources, minimap, command grid and object info
+    // (screen info 50056 / rect table 53290).
+    void setOriginalInterface(bool on) { originalInterface_ = on; }
+    bool originalInterface() const { return originalInterface_; }
+    HudRequest takeHudRequest() {
+        const HudRequest request = hudRequest_;
+        hudRequest_ = HudRequest::None;
+        return request;
+    }
     // Options dialog settings (screen info 50018).
     void setGameSpeed(SkirmishGameSpeed speed) { gameSpeed_ = speed; }
     void setScrollSpeed(int speed) { scrollSpeed_ = std::clamp(speed, 10, 200); }

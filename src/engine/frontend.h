@@ -147,6 +147,9 @@ public:
     void setCampaignScene(const CampaignScene *scene) {
         campaignScene_ = scene;
     }
+    // The original game screen's buttons (PC): Menu, Objectives, Chat,
+    // Diplomacy and Technology Tree open these screens over the game.
+    FrontendAction openFromGame(FrontendScreen screen);
     // Opens the History screen at a topic (autostart tests).
     void openHistoryForTesting(size_t topic) {
         screen_ = FrontendScreen::History;

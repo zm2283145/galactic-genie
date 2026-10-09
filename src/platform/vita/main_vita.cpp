@@ -16,6 +16,21 @@
 #include "vita_audio.h"
 #include "vita_video.h"
 
+#ifndef SWGB_ROOT
+// The data folder ("ux0:data/swgb" on the Vita; the PC build passes its own).
+#define SWGB_ROOT "ux0:data/swgb"
+#endif
+#ifdef SWGB_PC
+#include "../pc/pc_platform.h"
+#include <SDL.h>
+#include <cstdlib>
+#ifdef _WIN32
+#include <direct.h>
+#define chdir _chdir
+#else
+#include <unistd.h>
+#endif
+#endif
 #include <psp2/ctrl.h>
 #include <psp2/kernel/clib.h>
 #include <atomic>
@@ -113,23 +128,31 @@ static bool pollImeDialog(std::string &) { return false; }
 
 namespace {
 
-const char *kRoot = "ux0:data/swgb";
-const char *kDataDir = "ux0:data/swgb/Data";
-const char *kCampaignDir = "ux0:data/swgb/Campaign";
-const char *kScenarioSoundDir = "ux0:data/swgb/Sound/Scenario";
-const char *kCampaignSoundDir = "ux0:data/swgb/Sound/Campaign";
-const char *kMusicDir = "ux0:data/swgb/Music";
-const char *kTerrainSoundDir = "ux0:data/swgb/Sound/Terrain";
-const char *kSettingsPath = "ux0:data/swgb/settings.bin";
-const char *kProfilePath = "ux0:data/swgb/campaign.profile";
-const char *kSavePath = "ux0:data/swgb/skirmish.save";
+const char *kRoot = SWGB_ROOT "";
+const char *kDataDir = SWGB_ROOT "/Data";
+const char *kCampaignDir = SWGB_ROOT "/Campaign";
+const char *kScenarioSoundDir = SWGB_ROOT "/Sound/Scenario";
+const char *kCampaignSoundDir = SWGB_ROOT "/Sound/Campaign";
+const char *kMusicDir = SWGB_ROOT "/Music";
+const char *kTerrainSoundDir = SWGB_ROOT "/Sound/Terrain";
+const char *kSettingsPath = SWGB_ROOT "/settings.bin";
+const char *kProfilePath = SWGB_ROOT "/campaign.profile";
+const char *kSavePath = SWGB_ROOT "/skirmish.save";
 const char *kPlaytestSavePath =
-    "ux0:data/swgb/Scenarios/playtest.save";
+    SWGB_ROOT "/Scenarios/playtest.save";
 const char *kScenarioRoot =
-    "ux0:data/swgb/Scenarios";
+    SWGB_ROOT "/Scenarios";
 const char *kScenarioImport =
-    "ux0:data/swgb/Scenarios/Import";
+    SWGB_ROOT "/Scenarios/Import";
+#ifdef SWGB_PC
+// The original game screen's 800x600 (the window scales it).
+const int kScreenW = 800, kScreenH = 600;
+#else
 const int kScreenW = 960, kScreenH = 544;
+#endif
+// Menus, the editor and the in-game overlays are laid out for 960x544 (on PC
+// they are letterboxed inside the 800x600 game screen).
+const int kUiW = 960, kUiH = 544;
 
 FILE *g_log = nullptr;
 // Vita3K only writes host files out when they are closed, so in Vita3K mode
@@ -151,7 +174,7 @@ void logf(const char *fmt, ...) {
     fputc('\n', g_log);
     if (g_logReopen) {
         fclose(g_log);
-        g_log = fopen("ux0:data/swgb/swgb.log", "a");
+        g_log = fopen(SWGB_ROOT "/swgb.log", "a");
     }
 }
 
@@ -283,11 +306,11 @@ void runStartupPresentation(
     };
     // Dev: encoding tests ux0:data/swgb/Video/test/t1.mp4 ... t9.mp4.
     for (int i = 1; i <= 9; ++i) {
-        const std::string test = "ux0:data/swgb/Video/test/t" + std::to_string(i) + ".mp4";
+        const std::string test = SWGB_ROOT "/Video/test/t" + std::to_string(i) + ".mp4";
         if (fileExists(test.c_str())) swgb::playMovie(test, renderer, kScreenW, kScreenH, movieLog);
     }
-    if (swgb::playMovie("ux0:data/swgb/Video/xlogo1.mp4", renderer, kScreenW, kScreenH, movieLog)) {
-        swgb::playMovie("ux0:data/swgb/Video/xintro.mp4", renderer, kScreenW, kScreenH, movieLog);
+    if (swgb::playMovie(SWGB_ROOT "/Video/xlogo1.mp4", renderer, kScreenW, kScreenH, movieLog)) {
+        swgb::playMovie(SWGB_ROOT "/Video/xintro.mp4", renderer, kScreenW, kScreenH, movieLog);
         return;
     }
     while (flow.stage() == swgb::StartupStage::Logo ||
@@ -319,33 +342,42 @@ void runStartupPresentation(
 
 } // namespace
 
+#ifdef SWGB_PC
+// The game folder (Data, Campaign, Sound, MUSIC, AI, History, Taunt) is the
+// first argument, SWGB_DATA, or the working directory; logs, settings and
+// saves are written there too.
+int main(int argc, char **argv) {
+    if (const char *folder = argc > 1 ? argv[1] : std::getenv("SWGB_DATA"))
+        if (chdir(folder) != 0) std::fprintf(stderr, "cannot open the game folder %s\n", folder);
+#else
 int main() {
+#endif
     sceIoMkdir(kRoot, 0777);
     sceIoMkdir(kScenarioRoot, 0777);
     sceIoMkdir(kScenarioImport, 0777);
     sceIoMkdir(
-        "ux0:data/swgb/Scenarios/scenarios", 0777);
+        SWGB_ROOT "/Scenarios/scenarios", 0777);
     sceIoMkdir(
-        "ux0:data/swgb/Scenarios/recent", 0777);
+        SWGB_ROOT "/Scenarios/recent", 0777);
     sceIoMkdir(
-        "ux0:data/swgb/Scenarios/autosave", 0777);
+        SWGB_ROOT "/Scenarios/autosave", 0777);
     sceIoMkdir(
-        "ux0:data/swgb/Scenarios/recovery", 0777);
-    g_log = fopen("ux0:data/swgb/swgb.log", "w");
+        SWGB_ROOT "/Scenarios/recovery", 0777);
+    g_log = fopen(SWGB_ROOT "/swgb.log", "w");
     logf("swgb-vita starting");
     {
         // Remote close for test runs: a file uploaded over FTP as
         // ux0:data/swgb/quit.txt ends the app within about a second, whatever
         // screen it is on (vitacompanion's destroy does not close it).
-        sceIoRemove("ux0:data/swgb/quit.txt");
+        sceIoRemove(SWGB_ROOT "/quit.txt");
         const SceUID thread = sceKernelCreateThread(
             "swgb_quit_watch",
             [](SceSize, void *) -> int {
                 for (;;) {
                     sceKernelDelayThread(1000000);
                     SceIoStat stat{};
-                    if (sceIoGetstat("ux0:data/swgb/quit.txt", &stat) >= 0) {
-                        sceIoRemove("ux0:data/swgb/quit.txt");
+                    if (sceIoGetstat(SWGB_ROOT "/quit.txt", &stat) >= 0) {
+                        sceIoRemove(SWGB_ROOT "/quit.txt");
                         // The game thread exits at the top of its next frame;
                         // exiting from here while it is drawing crashes.
                         g_quitRequested = true;
@@ -390,7 +422,7 @@ int main() {
     {
         swgb::g_glTrace = [](const char *what) { logf("gl: %s", what); };
         // Development runs under Vita3K: ux0:data/swgb/vita3k.txt
-        if (FILE *marker = fopen("ux0:data/swgb/vita3k.txt", "r")) {
+        if (FILE *marker = fopen(SWGB_ROOT "/vita3k.txt", "r")) {
             g_logReopen = true;
             // The marker's number is a watchdog in seconds: the emulator only
             // flushes its own log and our files when the app exits by itself.
@@ -422,8 +454,8 @@ int main() {
             // Cached terrain layer (render-to-texture). ux0:data/swgb/nolayer.txt
             // turns it off; layerflip.txt samples the layer the other way up.
             bool layers = true, flipped = true;
-            if (FILE *f = fopen("ux0:data/swgb/nolayer.txt", "r")) { fclose(f); layers = false; }
-            if (FILE *f = fopen("ux0:data/swgb/layerflip.txt", "r")) { fclose(f); flipped = false; }
+            if (FILE *f = fopen(SWGB_ROOT "/nolayer.txt", "r")) { fclose(f); layers = false; }
+            if (FILE *f = fopen(SWGB_ROOT "/layerflip.txt", "r")) { fclose(f); flipped = false; }
             renderer.setLayersEnabled(layers);
             renderer.setLayerFlipped(flipped);
             logf("terrain layer cache: %s%s", layers ? "on" : "off", flipped ? "" : " (unflipped)");
@@ -488,7 +520,7 @@ int main() {
         }
         swgb::Assets &assets = *assetOwner;
         // Unattended test runs (autostart.txt) skip the intro movies.
-        if (!fileExists("ux0:data/swgb/autostart.txt"))
+        if (!fileExists(SWGB_ROOT "/autostart.txt"))
             runStartupPresentation(renderer);
         {
             SceKernelFreeMemorySizeInfo info{};
@@ -505,6 +537,7 @@ int main() {
         frontend.showMainMenu();
         swgb::ScenarioEditor editor(
             assets, kScenarioRoot, kScenarioImport);
+        editor.setCampaignDirectory(kCampaignDir);
         frontend.setStringLookup(
             [&](int id, const std::string &fallback) {
                 const std::string &localized =
@@ -532,8 +565,8 @@ int main() {
         frontend.setDataStatus(
             catalog.campaigns().size(),
             catalog.missionCount(),
-            fileExists("ux0:data/swgb/xlogo1.avi") ||
-                fileExists("ux0:data/swgb/xintro.avi"));
+            fileExists(SWGB_ROOT "/xlogo1.avi") ||
+                fileExists(SWGB_ROOT "/xintro.avi"));
         swgb::UserSettings userSettings;
         std::string settingsError;
         if (!swgb::loadSettings(
@@ -816,7 +849,7 @@ int main() {
             // Unit sprite atlases decode on a worker core; syncsheets.txt
             // turns that off for comparison runs.
             bool asyncSheets = true;
-            if (FILE *f = fopen("ux0:data/swgb/syncsheets.txt", "r")) { fclose(f); asyncSheets = false; }
+            if (FILE *f = fopen(SWGB_ROOT "/syncsheets.txt", "r")) { fclose(f); asyncSheets = false; }
             assets.setAsyncSheetBuilds(asyncSheets);
             logf("sprite sheet builds: %s", asyncSheets ? "worker thread" : "main thread");
         }
@@ -860,6 +893,9 @@ int main() {
                     logf("slow sound %s %s: %llu us", kind, name.c_str(), (unsigned long long)us);
             }
         };
+#ifdef SWGB_PC
+        game.setOriginalInterface(true);
+#endif
         game.setTauntPlayer([&](int number) {
             if (userSettings.audioTaunts) audio.playTaunt(number);
         });
@@ -953,7 +989,7 @@ int main() {
                         : "Computer Expanded.per";
                 const std::string aiPath =
                     std::string(
-                        "ux0:data/swgb/AI/") +
+                        SWGB_ROOT "/AI/") +
                     personality;
                 const std::unordered_set<std::string> defines =
                     swgb::skirmishAiDefines(settings, slot);
@@ -1013,7 +1049,7 @@ int main() {
                     mission->archiveName,
                     mission->entry,
                     campaignProfile.difficulty,
-                    "ux0:data/swgb/AI")) {
+                    SWGB_ROOT "/AI")) {
                 logf(
                     "campaign simulation initialization failed after %llu ms: %s",
                     (unsigned long long)(
@@ -1060,7 +1096,7 @@ int main() {
                     playtestScenario, &err,
                     std::string(), 0,
                     editor.playtestDifficulty(),
-                    "ux0:data/swgb/AI"))
+                    SWGB_ROOT "/AI"))
                 return false;
             campaignMatch = false;
             frontend.setCampaignMatch(false);
@@ -1127,7 +1163,7 @@ int main() {
         bool autostartPending = false;
         uint64_t autostartGameplayStart = 0;
         bool autostartLaunched = false;
-        if (FILE *autostart = fopen("ux0:data/swgb/autostart.txt", "r")) {
+        if (FILE *autostart = fopen(SWGB_ROOT "/autostart.txt", "r")) {
             char key[64] = {}, value[128] = {};
             int number = 0;
             char line[256];
@@ -1169,7 +1205,7 @@ int main() {
         // or "simrate N" in autostart.txt); 0 = one variable step per frame
         // as before.
         int simHz = 15;
-        if (FILE *rate = fopen("ux0:data/swgb/simrate.txt", "r")) {
+        if (FILE *rate = fopen(SWGB_ROOT "/simrate.txt", "r")) {
             int value = -1;
             if (fscanf(rate, "%d", &value) == 1 && value >= 0 && value <= 60) simHz = value;
             fclose(rate);
@@ -1183,7 +1219,7 @@ int main() {
         // default 30; 0 = as fast as vsync allows); the simulation gets what
         // the frame has left after drawing.
         int fpsCap = 30;
-        if (FILE *cap = fopen("ux0:data/swgb/fpscap.txt", "r")) {
+        if (FILE *cap = fopen(SWGB_ROOT "/fpscap.txt", "r")) {
             int value = -1;
             if (fscanf(cap, "%d", &value) == 1 && value >= 0 && value <= 60) fpsCap = value;
             fclose(cap);
@@ -1371,6 +1407,96 @@ int main() {
                 touching = false;
             }
 
+#ifdef SWGB_PC
+            // PC: the mouse is the pointer. Left click selects (left drag
+            // draws a selection box), right click commands, the wheel
+            // zooms; menus take left clicks as taps. Escape pauses a game.
+            {
+                const swgb_pc::Mouse &mouse = swgb_pc::mouse();
+                const bool playing = frontend.screen() == swgb::FrontendScreen::Gameplay;
+                static bool mouseDragging = false, mouseDragMoved = false;
+                static float mouseDragX = 0, mouseDragY = 0;
+                cursorX = mouse.x;
+                cursorY = mouse.y;
+                in.pointerX = cursorX;
+                in.pointerY = cursorY;
+                in.cursorVisible = true;
+                in.selectPressed = false;
+                in.commandPressed = false;
+                in.pointerDown = mouse.left;
+                if (mouse.leftPressed) {
+                    mouseDragging = true;
+                    mouseDragMoved = false;
+                    mouseDragX = cursorX;
+                    mouseDragY = cursorY;
+                }
+                if (mouseDragging) {
+                    const float dx = cursorX - mouseDragX, dy = cursorY - mouseDragY;
+                    if (dx * dx + dy * dy > 25.0f) mouseDragMoved = true;
+                    if (playing && mouseDragMoved) {
+                        in.boxSelectActive = mouse.left;
+                        in.boxStartX = mouseDragX;
+                        in.boxStartY = mouseDragY;
+                        in.boxEndX = cursorX;
+                        in.boxEndY = cursorY;
+                    }
+                    if (mouse.leftReleased) {
+                        if (mouseDragMoved && playing) {
+                            in.boxSelectActive = false;
+                            in.boxSelectCommit = true;
+                        } else if (playing) {
+                            in.selectPressed = true;
+                        } else {
+                            in.pointerTap = true;
+                        }
+                        mouseDragging = false;
+                    }
+                }
+                if (mouse.rightPressed) {
+                    if (playing) in.commandPressed = true;
+                    else in.menuBack = true;
+                }
+                if (mouse.wheel > 0) in.zoomStep = 1;
+                if (mouse.wheel < 0) in.zoomStep = -1;
+                if (!playing) {
+                    // Menus use the 960x544 layout letterboxed in 800x600.
+                    const float scale = std::min(kScreenW / (float)kUiW, kScreenH / (float)kUiH);
+                    const float ox = (kScreenW - kUiW * scale) * 0.5f, oy = (kScreenH - kUiH * scale) * 0.5f;
+                    in.screenW = kUiW;
+                    in.screenH = kUiH;
+                    in.pointerX = (cursorX - ox) / scale;
+                    in.pointerY = (cursorY - oy) / scale;
+                }
+                if (swgb_pc::keyPressed(SDL_SCANCODE_ESCAPE) && playing) {
+                    in.pausePressed = true;
+                    in.menuBack = false;
+                }
+                // Control groups: 1-4 recall, Ctrl+1-4 assign.
+                for (int group = 0; group < 4; ++group)
+                    if (playing && swgb_pc::keyPressed(SDL_SCANCODE_1 + group)) {
+                        in.controlGroup = group;
+                        in.controlGroupAssign = swgb_pc::keyDown(SDL_SCANCODE_LCTRL) ||
+                                                swgb_pc::keyDown(SDL_SCANCODE_RCTRL);
+                    }
+                // Arrow keys scroll the map; WASD too.
+                if (playing) {
+                    if (swgb_pc::keyDown(SDL_SCANCODE_A)) in.scrollX = -1;
+                    if (swgb_pc::keyDown(SDL_SCANCODE_D)) in.scrollX = 1;
+                    if (swgb_pc::keyDown(SDL_SCANCODE_W)) in.scrollY = -1;
+                    if (swgb_pc::keyDown(SDL_SCANCODE_S)) in.scrollY = 1;
+                    // Edge scrolling, as in the original (the pointer within
+                    // a few pixels of the screen edge), while the window has
+                    // the mouse.
+                    if (mouse.inside) {
+                        const float margin = 3.0f;
+                        if (cursorX < margin) in.scrollX = -1;
+                        else if (cursorX > kScreenW - 1 - margin) in.scrollX = 1;
+                        if (cursorY < margin) in.scrollY = -1;
+                        else if (cursorY > kScreenH - 1 - margin) in.scrollY = 1;
+                    }
+                }
+            }
+#endif
             swgb::FrontendAction action =
                 swgb::FrontendAction::None;
             if (g_imeActive) {
@@ -1400,6 +1526,31 @@ int main() {
             else
                 action = frontend.update(
                     in, game.victoryStateForTesting(), dt);
+#ifdef SWGB_PC
+            // Headless checks: SWGB_PC_SELECT=<unit id> selects the first such
+            // object of the local player once a game is running.
+            if (const char *selectUnit = std::getenv("SWGB_PC_SELECT")) {
+                static bool selectedOnce = false;
+                if (!selectedOnce && frontend.screen() == swgb::FrontendScreen::Gameplay &&
+                    game.localPlayerForTesting() > 0) {
+                    const uint32_t id = game.firstObjectForTesting(game.localPlayerForTesting(), std::atoi(selectUnit));
+                    if (id && game.selectObjectForTesting(id)) selectedOnce = true;
+                }
+            }
+            // The original panel's Menu / Objectives / Chat / Diplomacy /
+            // Tech Tree buttons.
+            if (action == swgb::FrontendAction::None) {
+                using Request = swgb::Game::HudRequest;
+                const Request request = game.takeHudRequest();
+                if (request != Request::None)
+                    action = frontend.openFromGame(
+                        request == Request::Menu         ? swgb::FrontendScreen::Pause
+                        : request == Request::Objectives ? swgb::FrontendScreen::Objectives
+                        : request == Request::Chat       ? swgb::FrontendScreen::Chat
+                        : request == Request::Diplomacy  ? swgb::FrontendScreen::Diplomacy
+                                                         : swgb::FrontendScreen::TechTree);
+            }
+#endif
             if (autostartPending &&
                 frontend.screen() == swgb::FrontendScreen::Title)
                 frontend.showMainMenu();
@@ -1510,8 +1661,8 @@ int main() {
                 if (step != autostartTechTreeStep) {
                     autostartTechTreeStep = step;
                     swgb::InputState press;
-                    press.screenW = kScreenW;
-                    press.screenH = kScreenH;
+                    press.screenW = kUiW;
+                    press.screenH = kUiH;
                     if (step < 30) press.menuRight = true;
                     else if (step == 30) press.actionTabRight = true;
                     else if (step < 40) press.menuDown = true;
@@ -1763,13 +1914,24 @@ int main() {
             } else if (
                 editorAction ==
                 swgb::EditorAction::Close) {
+                if (editor.takeCampaignSaved()) {
+                    // List the new Custom Campaign.
+                    std::string discoverError;
+                    if (!catalog.discover(
+                            kCampaignDir,
+                            [&](int id, const std::string &fallback) {
+                                const std::string &localized = assets.localizedString(id);
+                                return localized.empty() ? fallback : localized;
+                            },
+                            &discoverError))
+                        logf("campaign rescan failed: %s", discoverError.c_str());
+                }
                 frontend.showMainMenu();
                 frontend.setPlaytestMatch(false);
             } else if (
                 editorAction ==
                 swgb::EditorAction::Playtest) {
-                editor.render(
-                    renderer, kScreenW, kScreenH);
+                editor.render(renderer, kUiW, kUiH);
                 vglSwapBuffers(GL_FALSE);
                 const bool started =
                     startEditorPlaytest();
@@ -1795,8 +1957,7 @@ int main() {
                     swgb::FrontendAction::RestartMatch ||
                 action ==
                     swgb::FrontendAction::LoadMatch) {
-                frontend.render(
-                    renderer, kScreenW, kScreenH);
+                frontend.render(renderer, kUiW, kUiH);
                 vglSwapBuffers(GL_FALSE);
                 err.clear();
                 bool started = false;
@@ -2116,23 +2277,21 @@ int main() {
             if (renderMatch) {
                 game.render(
                     renderer, kScreenW, kScreenH);
+                renderer.setCanvas(kUiW, kUiH);
                 if (frontend.screen() ==
                     swgb::FrontendScreen::Objectives)
                     frontend.renderObjectivesOverlay(
-                        renderer, kScreenW,
-                        kScreenH);
+                        renderer, kUiW, kUiH);
                 else if (frontend.screen() == swgb::FrontendScreen::Diplomacy)
-                    frontend.renderDiplomacyOverlay(renderer, kScreenW, kScreenH);
+                    frontend.renderDiplomacyOverlay(renderer, kUiW, kUiH);
                 else if (frontend.screen() == swgb::FrontendScreen::Chat)
-                    frontend.renderChatOverlay(renderer, kScreenW, kScreenH);
-                frontend.renderGameOverOverlay(renderer, kScreenW, kScreenH);
+                    frontend.renderChatOverlay(renderer, kUiW, kUiH);
+                frontend.renderGameOverOverlay(renderer, kUiW, kUiH);
             } else if (frontend.screen() ==
                      swgb::FrontendScreen::ScenarioEditor)
-                editor.render(
-                    renderer, kScreenW, kScreenH);
+                editor.render(renderer, kUiW, kUiH);
             else
-                frontend.render(
-                    renderer, kScreenW, kScreenH);
+                frontend.render(renderer, kUiW, kUiH);
             const uint64_t t2 = sceKernelGetProcessTimeWide();
             if (renderMatch) {
                 const swgb::RenderStats &render =
