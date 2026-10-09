@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "frontend.h"
+#include "rms.h"
 #include "campaign_scene.h"
 #include "menu_framework.h"
 #include "ui_text.h"
@@ -16,6 +17,9 @@ constexpr float kMenuTop = 154.0f;
 constexpr float kMenuRow = 46.0f;
 constexpr float kLobbyTop = 91.0f;
 constexpr float kLobbyRow = 28.0f;
+// The match settings page has more rows.
+constexpr float kLobbySettingsRow = 23.5f;
+constexpr size_t kLobbySettingsRows = 18;
 constexpr float kOriginalMenuTop = 93.0f;
 constexpr float kOriginalMenuRow = 58.5f;
 constexpr float kOriginalMenuEntryHeight = 38.0f;
@@ -187,6 +191,11 @@ const char *optionLabel(size_t row) {
     return row < labels.size() ? labels[row] : "";
 }
 
+std::string upperCase(std::string value) {
+    for (char &c : value) c = (char)std::toupper((unsigned char)c);
+    return value;
+}
+
 std::string lobbyValue(
     const SkirmishSettings &settings,
     size_t page, size_t selectedSlot,
@@ -231,27 +240,41 @@ std::string lobbyValue(
         default: return {};
         }
     }
+    static const char *sizeNames[6] = {"TINY", "SMALL", "MEDIUM", "LARGE", "HUGE", "GIANT"};
     switch (row) {
-    case 0: return mapStyleName(settings.mapStyle);
+    case 0: return gameTypeName(settings.gameType);
     case 1:
+        return settings.mapType != 0
+                   ? upperCase(rmsMapName(settings.mapType))
+                   : std::string("PORT: ") + mapStyleName(settings.mapStyle);
+    case 2:
+        if (settings.mapType != 0) {
+            const int width = rmsMapWidth(settings.mapType, settings.mapSizeIndex);
+            return std::string(sizeNames[std::max(0, std::min(5, settings.mapSizeIndex))]) +
+                   " (" + std::to_string(width) + " x " + std::to_string(width) + ")";
+        }
         return std::to_string(settings.mapSize) + " x " +
                std::to_string(settings.mapSize);
-    case 2: return std::to_string(settings.startingResources);
-    case 3: return std::to_string(settings.populationCap);
-    case 4:
-        return "TECH LEVEL " +
-               std::to_string(settings.startingTechLevel);
+    case 3:
+        if (settings.gameType == kGameDeathMatch) return "DEATH MATCH";
+        return settings.mapType != 0 ? resourceLevelName(settings.resourceLevel)
+                                     : std::to_string(settings.startingResources);
+    case 4: return std::to_string(settings.populationCap);
     case 5:
         return "TECH LEVEL " +
+               std::to_string(settings.startingTechLevel);
+    case 6:
+        return "TECH LEVEL " +
                std::to_string(settings.endingTechLevel);
-    case 6: return revealName(settings.reveal);
-    case 7:
+    case 7: return revealName(settings.reveal);
+    case 8: return settings.fixedPositions ? "YES" : "NO";
+    case 9:
         return settings.teamsLocked ? "LOCKED" : "UNLOCKED";
-    case 8:
+    case 10:
         return settings.cheatsEnabled ? "ENABLED" : "DISABLED";
-    case 9: return gameSpeedName(settings.gameSpeed);
-    case 10: return victoryName(settings.victory);
-    case 11:
+    case 11: return gameSpeedName(settings.gameSpeed);
+    case 12: return victoryName(settings.victory);
+    case 13:
         if (settings.victory ==
             SkirmishVictory::TimeLimit)
             return std::to_string(
@@ -262,16 +285,16 @@ std::string lobbyValue(
             return std::to_string(
                 settings.scoreLimit);
         return "AUTOMATIC";
-    case 12: {
+    case 14: {
         char value[16];
         std::snprintf(
             value, sizeof value, "0x%08X",
             settings.seed);
         return value;
     }
-    case 13: return "PLAYER SLOTS";
-    case 14: return "START MATCH";
-    case 15: return "BACK";
+    case 15: return "PLAYER SLOTS";
+    case 16: return "START MATCH";
+    case 17: return "BACK";
     default: return {};
     }
 }
@@ -282,10 +305,10 @@ const char *lobbyLabel(size_t page, size_t row) {
         "Civilization", "Difficulty", "Personality",
         "Team", "Allied Victory", "", "", "",
     }};
-    static constexpr std::array<const char *, 16> matchLabels{{
-        "Random Map", "Map Size", "Starting Resources",
+    static constexpr std::array<const char *, 18> matchLabels{{
+        "Game Type", "Map", "Map Size", "Resources",
         "Population", "Starting Age", "Ending Age",
-        "Reveal Map", "Teams", "Cheats", "Game Speed",
+        "Reveal Map", "Team Together", "Teams", "Cheats", "Game Speed",
         "Victory", "Victory Target", "Seed", "", "", "",
     }};
     return page == 0
@@ -444,31 +467,66 @@ void Frontend::adjustLobbyValue(int direction) {
         refreshLobbyPreview();
         return;
     }
+    // Map choices: the original maps, then the port's own generator styles
+    // (negative: -(style + 1)).
+    static const std::vector<int> mapChoices = [] {
+        std::vector<int> choices;
+        for (int type = 9; type <= 61; ++type)
+            if (rmsScriptForMapType(type)) choices.push_back(type);
+        for (int style = 0; style < 10; ++style) choices.push_back(-(style + 1));
+        return choices;
+    }();
+    const int step = direction < 0 ? -1 : 1;
     switch (selection_) {
-    case 0:
-        settings_.mapStyle =
-            (SkirmishMapStyle)(((int)settings_.mapStyle + 10 +
-                                (direction < 0 ? -1 : 1)) %
-                               10);
-        if (settings_.mapStyle ==
-            SkirmishMapStyle::CompactIslands)
-            settings_.mapSize = 96;
+    case 0: {
+        // Random Map, Terminate the Commander, Death Match, Commander of the
+        // Base, Monument Race, Defend the Monument (Scenario/Campaign are
+        // their own menus).
+        static constexpr int types[] = {0, 1, 2, 5, 6, 7};
+        size_t index = 0;
+        for (size_t i = 0; i < 6; ++i)
+            if (types[i] == settings_.gameType) index = i;
+        index = (index + 6 + (size_t)(step < 0 ? 5 : 1)) % 6;
+        settings_.gameType = (uint8_t)types[index];
         break;
-    case 1:
-        if (settings_.mapStyle !=
+    }
+    case 1: {
+        const int current = settings_.mapType != 0 ? settings_.mapType
+                                                   : -((int)settings_.mapStyle + 1);
+        auto found = std::find(mapChoices.begin(), mapChoices.end(), current);
+        size_t index = found == mapChoices.end() ? 0 : (size_t)(found - mapChoices.begin());
+        index = (index + mapChoices.size() + (size_t)(step < 0 ? mapChoices.size() - 1 : 1)) %
+                mapChoices.size();
+        const int choice = mapChoices[index];
+        if (choice > 0) {
+            settings_.mapType = choice;
+        } else {
+            settings_.mapType = 0;
+            settings_.mapStyle = (SkirmishMapStyle)(-choice - 1);
+            if (settings_.mapStyle == SkirmishMapStyle::CompactIslands) settings_.mapSize = 96;
+        }
+        break;
+    }
+    case 2:
+        if (settings_.mapType != 0)
+            settings_.mapSizeIndex = (settings_.mapSizeIndex + 6 + step) % 6;
+        else if (settings_.mapStyle !=
             SkirmishMapStyle::CompactIslands)
             settings_.mapSize =
                 cycle(settings_.mapSize, mapSizes);
         break;
-    case 2:
-        settings_.startingResources =
-            cycle(settings_.startingResources, resources);
-        break;
     case 3:
+        if (settings_.mapType != 0)
+            settings_.resourceLevel = (uint8_t)((settings_.resourceLevel + 4 + step) % 4);
+        else
+            settings_.startingResources =
+                cycle(settings_.startingResources, resources);
+        break;
+    case 4:
         settings_.populationCap =
             cycle(settings_.populationCap, populations);
         break;
-    case 4:
+    case 5:
         settings_.startingTechLevel =
             1 + (settings_.startingTechLevel - 1 + 4 +
                  (direction < 0 ? -1 : 1)) %
@@ -478,7 +536,7 @@ void Frontend::adjustLobbyValue(int direction) {
                 settings_.endingTechLevel,
                 settings_.startingTechLevel);
         break;
-    case 5:
+    case 6:
         settings_.endingTechLevel =
             settings_.startingTechLevel +
             (settings_.endingTechLevel -
@@ -487,35 +545,38 @@ void Frontend::adjustLobbyValue(int direction) {
              (direction < 0 ? -1 : 1)) %
                 (5 - settings_.startingTechLevel);
         break;
-    case 6:
+    case 7:
         settings_.reveal =
             (SkirmishReveal)(
                 ((int)settings_.reveal + 3 +
                  (direction < 0 ? -1 : 1)) %
                 3);
         break;
-    case 7:
+    case 8:
+        settings_.fixedPositions = !settings_.fixedPositions;
+        break;
+    case 9:
         settings_.teamsLocked =
             !settings_.teamsLocked;
         break;
-    case 8:
+    case 10:
         settings_.cheatsEnabled =
             !settings_.cheatsEnabled;
         break;
-    case 9:
+    case 11:
         settings_.gameSpeed =
             (SkirmishGameSpeed)(
                 ((int)settings_.gameSpeed + 3 +
                  (direction < 0 ? -1 : 1)) %
                 3);
         break;
-    case 10:
+    case 12:
         settings_.victory =
             (SkirmishVictory)(((int)settings_.victory + 5 +
                                (direction < 0 ? -1 : 1)) %
                               5);
         break;
-    case 11:
+    case 13:
         if (settings_.victory ==
             SkirmishVictory::TimeLimit)
             settings_.timeLimitMinutes =
@@ -531,7 +592,7 @@ void Frontend::adjustLobbyValue(int direction) {
                         (direction < 0 ? -500 : 500),
                     500, 20000);
         break;
-    case 12:
+    case 14:
         settings_.seed += direction < 0 ? UINT32_MAX : 1u;
         break;
     default: break;
@@ -576,10 +637,70 @@ void Frontend::beginConfirmation(
     screen_ = FrontendScreen::Confirm;
 }
 
+bool Frontend::trainingCampaign() const {
+    if (!campaignMatch_ || !catalog_ ||
+        campaignSelection_ >= catalog_->campaigns().size())
+        return false;
+    const CampaignInfo &campaign = catalog_->campaigns()[campaignSelection_];
+    return !campaign.expansion && !campaign.custom && campaign.originalNumber == 8;
+}
+
+std::string Frontend::gameOverLabel() const {
+    if (!gameOverPending_) return std::string();
+    return outcome_ == 1 ? text(9004, "You are victorious!")
+                         : text(9005, "You have been defeated!");
+}
+
+// After the game-over pause (and a won mission's closing scene): Basic
+// Training returns to its mission list; everything else opens the
+// Achievements screen (0x5ec940 -> 0x5e85b0, mode 2).
+FrontendAction Frontend::finishGameOver() {
+    gameOverPending_ = false;
+    if (playtestMatch_) {
+        screen_ = FrontendScreen::Outcome;
+        selection_ = 0;
+        return FrontendAction::None;
+    }
+    if (trainingCampaign()) {
+        screen_ = FrontendScreen::CampaignMissions;
+        selection_ = missionSelection_;
+        return FrontendAction::ReturnToCampaignBrowser;
+    }
+    achievementsReturn_ = FrontendScreen::Outcome;
+    achievementsMode_ = 2;
+    achievementsTab_ = 0;
+    achievementsButton_ = 0;
+    screen_ = FrontendScreen::Achievements;
+    selection_ = 0;
+    return FrontendAction::None;
+}
+
+// "Scenario Menu" (campaign) / "Main Menu" (0x5e8e30).
+FrontendAction Frontend::achievementsMainButton() {
+    achievementsMode_ = 0;
+    if (campaignMatch_ && catalog_ &&
+        campaignSelection_ < catalog_->campaigns().size()) {
+        const CampaignInfo &campaign = catalog_->campaigns()[campaignSelection_];
+        if (outcome_ == 1 && missionSelection_ + 1 >= campaign.missions.size()) {
+            // The campaign's last mission: back to the campaign picker.
+            screen_ = FrontendScreen::CampaignBrowser;
+            selection_ = campaignSelection_;
+        } else {
+            if (outcome_ == 1) ++missionSelection_;
+            screen_ = FrontendScreen::CampaignMissions;
+            selection_ = missionSelection_;
+        }
+        return FrontendAction::ReturnToCampaignBrowser;
+    }
+    screen_ = FrontendScreen::MainMenu;
+    selection_ = 0;
+    return FrontendAction::ReturnToMainMenu;
+}
+
 FrontendAction Frontend::update(
-    const InputState &input, int matchOutcome) {
+    const InputState &input, int matchOutcome, float dt) {
     if (screen_ == FrontendScreen::Gameplay &&
-        matchOutcome >= 0) {
+        matchOutcome >= 0 && !gameOverPending_) {
         outcome_ = matchOutcome;
         if (campaignMatch_ && matchOutcome == 1 &&
             profile_) {
@@ -590,20 +711,29 @@ FrontendAction Frontend::update(
                 profileChanged_ = true;
             }
         }
+        // The game screen shows "You are victorious!" / "You have been
+        // defeated!" for 5 s (0x4f8290) before the end-of-game screens.
+        gameOverPending_ = true;
+        gameOverSeconds_ = 0.0f;
+    }
+    if (gameOverPending_ && screen_ == FrontendScreen::Gameplay) {
+        gameOverSeconds_ += dt;
+        if (dt > 0.0f && gameOverSeconds_ < 5.0f) return FrontendAction::None;
         // A won campaign mission plays its closing scene first.
-        screen_ = campaignMatch_ && matchOutcome == 1 ? FrontendScreen::CampaignEpilogue
-                                                      : FrontendScreen::Outcome;
-        selection_ = 0;
-        return FrontendAction::None;
+        if (campaignMatch_ && outcome_ == 1 && !trainingCampaign()) {
+            gameOverPending_ = false;
+            screen_ = FrontendScreen::CampaignEpilogue;
+            selection_ = 0;
+            return FrontendAction::None;
+        }
+        return finishGameOver();
     }
     if (screen_ == FrontendScreen::CampaignEpilogue) {
         // The scene is loaded by the platform layer when this screen opens;
-        // without one (or once it ends or is skipped) the outcome menu follows.
+        // without one (or once it ends or is skipped) Achievements follows.
         if (!campaignScene_ || !campaignScene_->loaded() || campaignScene_->finished() ||
-            input.menuActivate || input.menuBack || input.pointerTap) {
-            screen_ = FrontendScreen::Outcome;
-            selection_ = 0;
-        }
+            input.menuActivate || input.menuBack || input.pointerTap)
+            return finishGameOver();
         return FrontendAction::None;
     }
     if (screen_ == FrontendScreen::Title) {
@@ -869,7 +999,14 @@ FrontendAction Frontend::update(
             screen_ = FrontendScreen::SinglePlayer;
             selection_ = customCampaigns_ ? 3 : cloneCampaigns_ ? 1 : 0;
         } else if ((input.menuActivate || touched < count) &&
+                   count && profile_ &&
+                   !profile_->isCampaignUnlocked(
+                       catalog_->campaigns()[selection_],
+                       catalog_->campaigns())) {
+            message_ = "CAMPAIGN LOCKED - COMPLETE THE CONFEDERACY CAMPAIGN";
+        } else if ((input.menuActivate || touched < count) &&
                    count) {
+            message_.clear();
             campaignSelection_ = selection_;
             missionSelection_ = 0;
             screen_ = FrontendScreen::CampaignMissions;
@@ -925,9 +1062,17 @@ FrontendAction Frontend::update(
                     kOriginalMissionRow * scaleY,
                     count);
         }
-        if (touched < count) selection_ = touched;
-        if (input.menuUp) moveSelection(-1, count);
-        if (input.menuDown) moveSelection(1, count);
+        // Only missions 0..highest unlocked are listed (0x508d80).
+        size_t listed = count;
+        if (campaign && profile_)
+            while (listed > 1 &&
+                   !profile_->isUnlocked(*campaign, listed - 1))
+                --listed;
+        if (touched < listed) selection_ = touched;
+        else touched = count;
+        if (input.menuUp) moveSelection(-1, listed);
+        if (input.menuDown) moveSelection(1, listed);
+        if (selection_ >= listed && listed) selection_ = listed - 1;
         if (input.menuLeft && profile_) {
             profile_->difficulty =
                 (profile_->difficulty + 4) % 5;
@@ -1034,9 +1179,10 @@ FrontendAction Frontend::update(
 
     if (screen_ == FrontendScreen::SkirmishLobby) {
         const size_t count =
-            lobbyPage_ == 0 ? 12u : 16u;
+            lobbyPage_ == 0 ? 12u : kLobbySettingsRows;
         const size_t touched =
-            rowFromPointer(input, kLobbyTop, kLobbyRow, count);
+            rowFromPointer(input, kLobbyTop,
+                           lobbyPage_ == 0 ? kLobbyRow : kLobbySettingsRow, count);
         if (touched < count) selection_ = touched;
         if (input.actionTabLeft ||
             input.actionTabRight) {
@@ -1050,15 +1196,15 @@ FrontendAction Frontend::update(
         const bool activated =
             input.menuActivate || touched < count;
         const size_t switchRow =
-            lobbyPage_ == 0 ? 9u : 13u;
+            lobbyPage_ == 0 ? 9u : 15u;
         const size_t startRow =
-            lobbyPage_ == 0 ? 10u : 14u;
+            lobbyPage_ == 0 ? 10u : 16u;
         const size_t backRow =
-            lobbyPage_ == 0 ? 11u : 15u;
+            lobbyPage_ == 0 ? 11u : 17u;
         if (activated &&
             selection_ < switchRow) {
             if (lobbyPage_ == 1 &&
-                selection_ == 12) {
+                selection_ == 14) {
                 settings_.seed =
                     settings_.seed * 1664525u +
                     1013904223u;
@@ -1135,9 +1281,9 @@ FrontendAction Frontend::update(
             }
             return FrontendAction::None;
         }
-        const size_t count = campaignMatch_ ? 11 : 10;
+        const size_t count = campaignMatch_ ? 12 : 11;
         const float top = campaignMatch_ ? 80.0f : 100.0f;
-        const float row = 39.0f;
+        const float row = 36.0f;
         const size_t touched =
             rowFromPointer(input, top, row, count);
         if (touched < count) selection_ = touched;
@@ -1152,11 +1298,19 @@ FrontendAction Frontend::update(
         } else if ((input.menuActivate || touched < count) && selection_ == 3) {
             // Chat (menu-bar button, action 13).
             screen_ = FrontendScreen::Chat;
-            chatSelection_ = 0;
+            chatSelection_ = 1;
             return FrontendAction::OpenChat;
+        } else if ((input.menuActivate || touched < count) && selection_ == 4) {
+            // Technology Tree (action 149).
+            screen_ = FrontendScreen::TechTree;
+            techTreeCivilization_ = -1;
+            techTreeSelection_ = 0;
+            techTreeScroll_ = 0.0f;
+            return FrontendAction::OpenTechTree;
         } else if (input.menuActivate || touched < count) {
-            // Entries after Diplomacy and Chat keep their old numbering.
-            const size_t pick = selection_ > 3 ? selection_ - 2 : selection_;
+            // Entries after Diplomacy, Chat and Technology Tree keep their old
+            // numbering.
+            const size_t pick = selection_ > 4 ? selection_ - 3 : selection_;
             if (pick == 0) {
                 screen_ = FrontendScreen::Gameplay;
             } else if (pick == 1) {
@@ -1316,9 +1470,8 @@ FrontendAction Frontend::update(
                         : 0;
             } else if (action ==
                        FrontendAction::CompleteCampaignMission) {
-                screen_ = FrontendScreen::Outcome;
                 outcome_ = 0;
-                selection_ = 0;
+                finishGameOver();
             } else if (action == FrontendAction::Quit) {
                 return action;
             } else {
@@ -1335,16 +1488,24 @@ FrontendAction Frontend::update(
 
     if (screen_ == FrontendScreen::Diplomacy)
         return updateDiplomacy(input);
+    if (screen_ == FrontendScreen::TechTree)
+        return updateTechTree(input);
     if (screen_ == FrontendScreen::Chat)
         return updateChat(input);
 
     if (screen_ == FrontendScreen::Achievements) {
-        // Six tabs along the bottom (Score .. Timeline) and the Back button.
+        // Six tabs along the bottom (Score .. Timeline) and the buttons.
         constexpr size_t tabs = 6;
+        const bool endOfGame = achievementsMode_ == 2;
+        // Play Again (single player, end of game) left of the main button.
+        const size_t buttons = endOfGame ? 2 : 1;
         if (input.menuLeft || input.actionTabLeft)
             achievementsTab_ = (achievementsTab_ + tabs - 1) % tabs;
         if (input.menuRight || input.actionTabRight)
             achievementsTab_ = (achievementsTab_ + 1) % tabs;
+        if (input.menuUp || input.menuDown)
+            achievementsButton_ = (achievementsButton_ + 1) % buttons;
+        int pressed = -1;
         if (input.pointerTap) {
             const float x = input.pointerX * 800.0f / 960.0f;
             const float y = input.pointerY * 600.0f / 544.0f;
@@ -1352,12 +1513,20 @@ FrontendAction Frontend::update(
                 if (x >= 82.0f + 108.0f * tab && x < 182.0f + 108.0f * tab && y >= 541.0f &&
                     y < 589.0f)
                     achievementsTab_ = tab;
-            if (x >= 645.0f && x < 775.0f && y >= 495.0f && y < 533.0f) {
-                screen_ = achievementsReturn_;
-                selection_ = 0;
-            }
+            if (x >= 645.0f && x < 775.0f && y >= 495.0f && y < 533.0f) pressed = 0;
+            if (endOfGame && x >= 509.0f && x < 645.0f && y >= 496.0f && y < 535.0f)
+                pressed = 1;
         }
-        if (input.menuBack || input.menuActivate || input.pausePressed) {
+        if (input.menuActivate) pressed = (int)achievementsButton_;
+        if (input.menuBack || input.pausePressed) pressed = 0;
+        if (pressed == 1) {
+            achievementsMode_ = 0;
+            screen_ = FrontendScreen::Loading;
+            message_ = campaignMatch_ ? "RESTARTING CAMPAIGN MISSION..." : "RESTARTING MATCH...";
+            return FrontendAction::RestartMatch;
+        }
+        if (pressed == 0) {
+            if (endOfGame) return achievementsMainButton();
             screen_ = achievementsReturn_;
             selection_ = 0;
         }
@@ -1824,6 +1993,20 @@ void Frontend::render(
                         index == selection_ ? 1 : 0],
                     placement.iconX,
                     placement.iconY);
+                if (profile_ &&
+                    !profile_->isCampaignUnlocked(
+                        catalog_->campaigns()[index],
+                        catalog_->campaigns())) {
+                    // Locked (the original draws a disabled frame).
+                    const SpriteFrame *icon =
+                        originalCampaignIcons_[index][0];
+                    renderer.fillRect(
+                        placement.iconX * originalScaleX,
+                        placement.iconY * originalScaleY,
+                        (icon ? icon->w : 63) * originalScaleX,
+                        (icon ? icon->h : 57) * originalScaleY,
+                        0, 0, 0, 150);
+                }
                 // The titles already carry their number ("2: OOM-9").
                 const std::string &title = catalog_->campaigns()[index].title;
                 const size_t colon = title.find(':');
@@ -1914,6 +2097,7 @@ void Frontend::render(
                     profile_ &&
                     profile_->isCompleted(
                         campaign->missions[index].key);
+                if (!unlocked) continue;
                 size_t state = 0;
                 if (!unlocked)
                     state = 3;
@@ -2016,6 +2200,7 @@ void Frontend::render(
                     profile_ &&
                     profile_->isCompleted(
                         campaign->missions[index].key);
+                if (!unlocked) continue;
                 const std::string entry =
                     std::string(
                         complete ? "[DONE] " : "") +
@@ -2141,12 +2326,13 @@ void Frontend::render(
             screenW, 235, 213, 145);
         panel(renderer, 48, 73, 864, 455);
         const size_t count =
-            lobbyPage_ == 0 ? 12u : 16u;
+            lobbyPage_ == 0 ? 12u : kLobbySettingsRows;
+        const float rowHeight = lobbyPage_ == 0 ? kLobbyRow : kLobbySettingsRow;
         for (size_t row = 0; row < count; ++row) {
-            const float y = kLobbyTop + row * kLobbyRow;
+            const float y = kLobbyTop + row * rowHeight;
             if (row == selection_)
                 renderer.fillRect(
-                    64, y - 4, 536, kLobbyRow - 1,
+                    64, y - 4, 536, rowHeight - 1,
                     30, 72, 102, 255);
             if (*lobbyLabel(lobbyPage_, row))
                 drawUiText(
@@ -2206,6 +2392,14 @@ void Frontend::render(
                 {"L/R CHANGE  L/R TRIGGER PAGE"},
                 638, 426, 0.66f,
                 143, 172, 194);
+        } else if (settings_.mapType != 0) {
+            // Original maps are generated by their script at match start.
+            drawUiText(
+                renderer,
+                {"ORIGINAL RANDOM MAP", upperCase(rmsMapName(settings_.mapType)), "",
+                 "GENERATED FROM THE", "GAME'S MAP SCRIPT", "", "L/R CHANGE",
+                 "X ON SEED: RANDOMIZE", "L/R TRIGGER: PLAYER SLOTS"},
+                652, 120, 0.68f, 163, 190, 208);
         } else {
             constexpr float previewX = 664.0f;
             constexpr float previewY = 110.0f;
@@ -2295,7 +2489,7 @@ void Frontend::render(
                       "OPTIONS", "END TEST",
                       "RETURN TO EDITOR"}
                 : std::vector<std::string>{
-            "RESUME", "OBJECTIVES / STATUS", "DIPLOMACY", "CHAT", "SAVE MATCH",
+            "RESUME", "OBJECTIVES / STATUS", "DIPLOMACY", "CHAT", "TECHNOLOGY TREE", "SAVE MATCH",
             "LOAD MATCH", "RESTART MATCH", "OPTIONS",
             "SURRENDER"};
         if (!playtestMatch_ && campaignMatch_)
@@ -2311,7 +2505,9 @@ void Frontend::render(
             playtestMatch_ ? 132.0f
                            : campaignMatch_ ? 80.0f
                                             : 100.0f,
-            playtestMatch_ ? 42.0f : 39.0f);
+            playtestMatch_ ? 42.0f : 36.0f);
+    } else if (screen_ == FrontendScreen::TechTree) {
+        renderTechTree(renderer, screenW, screenH);
     } else if (screen_ == FrontendScreen::Objectives) {
         renderObjectivesOverlay(
             renderer, screenW, screenH);
@@ -2444,22 +2640,21 @@ FrontendAction Frontend::updateChat(const InputState &input) {
         chatRecipient_ = (chatRecipient_ + recipients - 1) % recipients;
     if (input.menuRight || input.actionTabRight)
         chatRecipient_ = (chatRecipient_ + 1) % recipients;
-    if (!taunts_.empty()) {
-        if (input.menuUp) chatSelection_ = (chatSelection_ + taunts_.size() - 1) % taunts_.size();
-        if (input.menuDown) chatSelection_ = (chatSelection_ + 1) % taunts_.size();
-    }
-    if (input.pointerTap && input.screenW > 0 && input.screenH > 0 && !taunts_.empty()) {
+    const size_t rows = taunts_.size() + 1;
+    if (input.menuUp) chatSelection_ = (chatSelection_ + rows - 1) % rows;
+    if (input.menuDown) chatSelection_ = (chatSelection_ + 1) % rows;
+    bool activate = input.menuActivate;
+    if (input.pointerTap && input.screenW > 0 && input.screenH > 0) {
         const float y = input.pointerY * 544.0f / input.screenH;
         const size_t first = chatSelection_ >= 6 ? chatSelection_ - 6 : 0;
         if (y >= 150.0f && y < 150.0f + 13 * 24.0f) {
-            chatSelection_ = std::min(taunts_.size() - 1, first + (size_t)((y - 150.0f) / 24.0f));
-            screen_ = FrontendScreen::Gameplay;
-            return FrontendAction::SendChat;
+            chatSelection_ = std::min(rows - 1, first + (size_t)((y - 150.0f) / 24.0f));
+            activate = true;
         }
     }
-    if (input.menuActivate && !taunts_.empty()) {
+    if (activate) {
         screen_ = FrontendScreen::Gameplay;
-        return FrontendAction::SendChat;
+        return chatSelection_ == 0 ? FrontendAction::TypeChat : FrontendAction::SendChat;
     }
     return FrontendAction::None;
 }
@@ -2474,17 +2669,19 @@ void Frontend::renderChatOverlay(Renderer &renderer, int screenW, int screenH) c
                                            : chatPlayers_[chatRecipient_ - 2].second;
     centeredText(renderer, "< TO: " + to + " >", 116, 1.1f, screenW, 205, 228, 255);
     const size_t first = chatSelection_ >= 6 ? chatSelection_ - 6 : 0;
-    for (size_t row = 0; row < 13 && first + row < taunts_.size(); ++row) {
+    for (size_t row = 0; row < 13 && first + row < taunts_.size() + 1; ++row) {
         const size_t index = first + row;
         const float y = 150.0f + row * 24.0f;
         if (index == chatSelection_)
             renderer.fillRect(268 * sx, (y - 3) * sy, 424 * sx, 22 * sy, 30, 72, 102, 255);
         drawUiText(renderer,
-                   {std::to_string(taunts_[index].first) + "  " + taunts_[index].second},
+                   {index == 0 ? std::string("TYPE A MESSAGE...")
+                               : std::to_string(taunts_[index - 1].first) + "  " +
+                                     taunts_[index - 1].second},
                    280 * sx, y * sy, 1.05f * sy, index == chatSelection_ ? 255 : 205,
                    index == chatSelection_ ? 228 : 213, index == chatSelection_ ? 153 : 222);
     }
-    centeredText(renderer, "X: SEND TAUNT   L/R: RECIPIENT   O: BACK", 474, 0.9f, screenW, 205,
+    centeredText(renderer, "X: SEND   L/R: RECIPIENT   O: BACK", 474, 0.9f, screenW, 205,
                  213, 222);
 }
 
@@ -2600,6 +2797,257 @@ FrontendAction Frontend::updateDiplomacy(const InputState &input) {
     }
     if (input.menuActivate) return activate(diplomacyRow_, diplomacyColumn_);
     return FrontendAction::None;
+}
+
+namespace {
+// Technology Tree geometry, 800x600 layout (TribeTechHelpScreen 0x462060,
+// resolution 2): left panel 340, age strips 152, 64x64 nodes on a 67 px
+// column stride, Tech Level bands of 150.
+constexpr float kTtPanelW = 340.0f, kTtStripW = 152.0f, kTtColumn0 = 495.0f;
+constexpr float kTtStride = 67.0f, kTtBand = 150.0f, kTtNode = 64.0f;
+float techNodeX(const TechTreeNode &node) {
+    return kTtColumn0 + node.column * kTtStride + (node.width - 1) * kTtStride * 0.5f;
+}
+float techNodeY(const TechTreeNode &node) {
+    return (node.age - 1) * kTtBand + 4.0f + node.row * 72.0f;
+}
+float techContentWidth(const TechTreeData &data) {
+    return kTtColumn0 + data.columns * kTtStride + kTtStripW;
+}
+} // namespace
+
+FrontendAction Frontend::updateTechTree(const InputState &input) {
+    const float scale = input.screenH > 0 ? input.screenH / 600.0f : 544.0f / 600.0f;
+    const float viewW = (input.screenW > 0 ? input.screenW : 960) / scale;
+    const float maxScroll = std::max(0.0f, techContentWidth(techTree_) - viewW);
+    if (input.menuBack || input.pausePressed) {
+        screen_ = FrontendScreen::Pause;
+        selection_ = 4;
+        return FrontendAction::None;
+    }
+    if (input.actionTabLeft || input.actionTabRight) {
+        // The civilization list (drop-down 0x464566).
+        int civ = techTree_.civilization;
+        civ = input.actionTabLeft ? (civ + 6) % 8 + 1 : civ % 8 + 1;
+        techTreeCivilization_ = civ;
+        techTreeSelection_ = 0;
+        return FrontendAction::OpenTechTree;
+    }
+    const auto &nodes = techTree_.nodes;
+    if (nodes.empty()) return FrontendAction::None;
+    if (techTreeSelection_ >= nodes.size()) techTreeSelection_ = 0;
+    const TechTreeNode &current = nodes[techTreeSelection_];
+    const float cx = techNodeX(current), cy = techNodeY(current);
+    auto pick = [&](int dx, int dy) {
+        size_t best = techTreeSelection_;
+        float bestScore = std::numeric_limits<float>::max();
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            if (i == techTreeSelection_) continue;
+            const float x = techNodeX(nodes[i]), y = techNodeY(nodes[i]);
+            const float ddx = x - cx, ddy = y - cy;
+            if (dx && (ddx * dx <= 1.0f)) continue;
+            if (dy && (ddy * dy <= 1.0f)) continue;
+            const float score = dx ? std::fabs(ddx) + std::fabs(ddy) * 3.0f
+                                   : std::fabs(ddy) + std::fabs(ddx) * 3.0f;
+            if (score < bestScore) {
+                bestScore = score;
+                best = i;
+            }
+        }
+        techTreeSelection_ = best;
+    };
+    if (input.menuLeft) pick(-1, 0);
+    if (input.menuRight) pick(1, 0);
+    if (input.menuUp) pick(0, -1);
+    if (input.menuDown) pick(0, 1);
+    if (input.pointerTap) {
+        const float x = input.pointerX / scale + techTreeScroll_, y = input.pointerY / scale;
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            const float nx = techNodeX(nodes[i]), ny = techNodeY(nodes[i]);
+            if (x >= nx && x < nx + kTtNode && y >= ny && y < ny + kTtNode) techTreeSelection_ = i;
+        }
+    } else if (input.dragX != 0.0f) {
+        techTreeScroll_ = std::clamp(techTreeScroll_ - input.dragX / scale, 0.0f, maxScroll);
+        return FrontendAction::None;
+    }
+    if (input.menuLeft || input.menuRight || input.menuUp || input.menuDown || input.pointerTap) {
+        const float x = techNodeX(nodes[techTreeSelection_]);
+        if (x - 24.0f < techTreeScroll_ + kTtStripW * 0.3f)
+            techTreeScroll_ = x - 24.0f - kTtStripW * 0.3f;
+        if (x + kTtNode + 24.0f > techTreeScroll_ + viewW)
+            techTreeScroll_ = x + kTtNode + 24.0f - viewW;
+        techTreeScroll_ = std::clamp(techTreeScroll_, 0.0f, maxScroll);
+        if (input.menuLeft && techTreeSelection_ == 0) techTreeScroll_ = 0.0f;
+    }
+    return FrontendAction::None;
+}
+
+void Frontend::renderTechTree(Renderer &renderer, int screenW, int screenH) const {
+    const float s = screenH / 600.0f;
+    const float viewW = screenW / s;
+    const float scroll = techTreeScroll_;
+    auto art = [&](int slp, int frame) -> const SpriteFrame * {
+        return techTreeArt_ ? techTreeArt_(slp, frame) : nullptr;
+    };
+    auto draw = [&](const SpriteFrame *frame, float x, float y) {
+        if (!frame || !frame->tex) return;
+        const float sx = (x - scroll) * s, sy = y * s;
+        if (sx > screenW || sx + frame->w * s < 0) return;
+        renderer.draw(frame->tex, Quad{sx, sy, frame->w * s, frame->h * s, frame->u, frame->v,
+                                       frame->u + frame->w, frame->v + frame->h});
+    };
+    auto rect = [&](float x, float y, float w, float h, uint8_t r, uint8_t g, uint8_t b) {
+        renderer.fillRect((x - scroll) * s, y * s, w * s, h * s, r, g, b, 255);
+    };
+    auto label = [&](const std::string &value, float x, float y, float size, uint8_t r = 255,
+                     uint8_t g = 255, uint8_t b = 255) {
+        drawUiText(renderer, {value}, (x - scroll) * s, y * s, size * s, r, g, b);
+    };
+    auto centredLabel = [&](const std::string &value, float x, float y, float w, float size) {
+        const float width = uiTextWidth(value, size * s) / s;
+        label(value, x + (w - width) * 0.5f, y, size);
+    };
+    renderer.fillRect(0, 0, (float)screenW, (float)screenH, 0, 0, 0, 255);
+    const float contentW = techContentWidth(techTree_);
+    // Background: techback (frame 2) tiled, the left panel and both strips.
+    if (const SpriteFrame *tile = art(50341, 2))
+        for (float x = std::floor(scroll / tile->w) * tile->w; x < scroll + viewW && x < contentW;
+             x += tile->w)
+            draw(tile, x, 0);
+    draw(art(50342, 2), 0, 0);
+    const int highlighted = std::max(0, std::min(4, techTree_.currentAge));
+    draw(art(50342, 13 + highlighted), kTtPanelW, 0);
+    draw(art(50342, 13 + highlighted), contentW - kTtStripW, 0);
+    draw(art(53211, 0), 102, 528);
+    // Band labels on the strips: "1st" .. "4th" over "Tech Level".
+    static const char *ordinals[4] = {"1st", "2nd", "3rd", "4th"};
+    for (int band = 0; band < 4; ++band) {
+        const float y = band * kTtBand + kTtBand * 0.5f + 33.0f;
+        for (float x : {kTtPanelW, contentW - kTtStripW}) {
+            centredLabel(text(20110 + band, ordinals[band]), x, y, 150, 0.7f);
+            centredLabel(text(20114, "Tech Level"), x, y + 17, 150, 0.7f);
+        }
+    }
+    // Left panel: civilization, its bonuses and the legend.
+    label(text(20125, "Game Civilizations"), 55, 60, 0.8f, 255, 228, 153);
+    std::string civName =
+        (size_t)techTree_.civilization < techTree_.civilizationNames.size()
+            ? techTree_.civilizationNames[(size_t)techTree_.civilization]
+            : std::string();
+    if (techTree_.civilization == techTree_.playerCivilization)
+        civName += text(20126, " (Player)");
+    rect(55, 80, 230, 25, 20, 30, 45);
+    label("< " + civName + " >", 62, 85, 0.8f);
+    {
+        std::vector<std::string> lines;
+        std::string line;
+        std::string bonus = techTree_.bonus;
+        size_t start = 0;
+        while (start <= bonus.size() && lines.size() < 22) {
+            size_t end = bonus.find('\n', start);
+            if (end == std::string::npos) end = bonus.size();
+            std::string paragraph = bonus.substr(start, end - start);
+            while (!paragraph.empty() && paragraph.back() == '\r') paragraph.pop_back();
+            while (uiTextWidth(paragraph, 0.6f * s) / s > 270.0f && lines.size() < 22) {
+                size_t cut = paragraph.size();
+                while (cut > 0 && uiTextWidth(paragraph.substr(0, cut), 0.6f * s) / s > 270.0f) {
+                    const size_t space = paragraph.rfind(' ', cut - 1);
+                    if (space == std::string::npos || space == 0) {
+                        cut = cut - 1;
+                        break;
+                    }
+                    cut = space;
+                }
+                lines.push_back(paragraph.substr(0, cut));
+                paragraph.erase(0, std::min(paragraph.size(), cut + 1));
+            }
+            lines.push_back(paragraph);
+            start = end + 1;
+        }
+        for (size_t i = 0; i < lines.size(); ++i) label(lines[i], 30, 115 + i * 13.0f, 0.6f);
+    }
+    {
+        // "Not Researched" over the dark boxes, "Researched" over the bright.
+        std::string notResearched = text(20124, "Not Researched");
+        const size_t space = notResearched.find(' ');
+        if (space != std::string::npos) {
+            centredLabel(notResearched.substr(0, space), 40, 436, 60, 0.5f);
+            centredLabel(notResearched.substr(space + 1), 40, 448, 60, 0.5f);
+        } else {
+            centredLabel(notResearched, 40, 448, 60, 0.5f);
+        }
+        centredLabel(text(20128, "Researched"), 117, 448, 60, 0.5f);
+    }
+    label(text(20121, "Units"), 167, 470, 0.7f);
+    label(text(20122, "Buildings"), 167, 492, 0.7f);
+    label(text(20120, "Technologies"), 167, 514, 0.7f);
+    label(text(20119, "Not Available"), 167, 536, 0.7f);
+    // Lines (palette 0x87), then nodes.
+    const auto &nodes = techTree_.nodes;
+    for (const TechTreeNode &node : nodes) {
+        if (node.parent < 0 || (size_t)node.parent >= nodes.size()) continue;
+        const TechTreeNode &parent = nodes[(size_t)node.parent];
+        const float px = techNodeX(parent) + 31, py = techNodeY(parent) + kTtNode;
+        const float x = techNodeX(node) + 31, y = techNodeY(node);
+        if (x + 40 < scroll || px - 40 > scroll + viewW) continue;
+        if (std::fabs(px - x) < 1.0f) {
+            rect(x, py, 2, std::max(0.0f, y - py), 74, 117, 156);
+        } else {
+            const float mid = py + 3;
+            rect(px, py, 2, mid - py, 74, 117, 156);
+            rect(std::min(px, x), mid, std::fabs(px - x) + 2, 2, 74, 117, 156);
+            rect(x, mid, 2, std::max(0.0f, y - mid), 74, 117, 156);
+        }
+    }
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        const TechTreeNode &node = nodes[i];
+        const float x = techNodeX(node), y = techNodeY(node);
+        if (x + kTtNode < scroll || x > scroll + viewW) continue;
+        const int category = node.type == 1 ? 0 : node.type == 3 ? 1 : 2;
+        const int dark = node.status == 5 ? 0 : 1;
+        if (const SpriteFrame *box = art(53206, dark + 2 * category)) draw(box, x, y);
+        else rect(x, y, kTtNode, kTtNode, 60, 60, 80);
+        if (node.iconSlp >= 0 && node.iconFrame >= 0)
+            draw(art(node.iconSlp, node.iconFrame), x + 14, y + 3);
+        // Not available to this civilization: the red X (btntech frame 146).
+        if (node.status == 3) draw(art(53261, 146), x + 14, y + 3);
+        // Two name lines under the icon.
+        std::string first = node.name, second;
+        if (uiTextWidth(first, 0.5f * s) / s > 60.0f) {
+            const size_t space = first.find(' ');
+            if (space != std::string::npos) {
+                second = first.substr(space + 1);
+                first = first.substr(0, space);
+            }
+        }
+        label(first, x + 2, y + 41, 0.5f);
+        if (!second.empty()) label(second, x + 2, y + 51, 0.5f);
+        if (i == techTreeSelection_) {
+            // Highlight outline (palette 0x24).
+            rect(x - 2, y - 2, kTtNode + 4, 2, 255, 220, 90);
+            rect(x - 2, y + kTtNode, kTtNode + 4, 2, 255, 220, 90);
+            rect(x - 2, y, 2, kTtNode, 255, 220, 90);
+            rect(x + kTtNode, y, 2, kTtNode, 255, 220, 90);
+        }
+    }
+    // The selected node's help (TribePopUpHelp), fixed at the bottom.
+    if (techTreeSelection_ < nodes.size()) {
+        const TechTreeNode &node = nodes[techTreeSelection_];
+        const float boxW = 340.0f * s, boxH = 96.0f * s;
+        // Beside the node: right of it when there is room, else left.
+        float bx = (techNodeX(node) - scroll + kTtNode + 8.0f) * s;
+        if (bx + boxW > screenW) bx = (techNodeX(node) - scroll - 8.0f) * s - boxW;
+        bx = std::max(4.0f, std::min((float)screenW - boxW - 4.0f, bx));
+        float by = (techNodeY(node)) * s;
+        by = std::max(4.0f, std::min((float)screenH - boxH - 24.0f, by));
+        renderer.fillRect(bx, by, boxW, boxH, 10, 18, 28, 225);
+        renderer.fillRect(bx, by, boxW, 2, 120, 180, 250, 255);
+        drawUiText(renderer, {node.name}, bx + 8, by + 6, 0.8f * s, 255, 228, 153);
+        std::string help = node.help;
+        std::replace(help.begin(), help.end(), '\n', ' ');
+        wrappedText(renderer, help, bx + 8, by + 22 * s, 0.55f * s, 60, 6, 220, 226, 232);
+    }
+    drawUiText(renderer, {"L/R CIVILIZATION   O CLOSE"}, 8, screenH - 18.0f, 0.6f, 200, 210, 220);
 }
 
 void Frontend::renderDiplomacyOverlay(Renderer &renderer, int screenW, int screenH) const {
@@ -2881,9 +3329,33 @@ void Frontend::renderAchievements(Renderer &renderer, int screenW, int screenH) 
         centred(text(tabIds[index], tabFallbacks[index]), x, 541, 99, 48, 1.2f, 255,
                 selected ? 228 : 255, selected ? 153 : 255);
     }
-    centred(achievementsReturn_ == FrontendScreen::Outcome ? std::string("Back")
-                                                         : text(9881, "Return to Game"),
-            645, 495, 130, 38, 1.3f, 255, 255, 255);
+    if (achievementsMode_ == 2) {
+        const std::string main = campaignMatch_ ? text(9883, "Scenario Menu")
+                                                : text(9882, "Main Menu");
+        const bool focusMain = achievementsButton_ == 0;
+        centred(main, 645, 495, 130, 38, 1.3f, 255, focusMain ? 228 : 255,
+                focusMain ? 153 : 255);
+        centred(text(9946, "Play Again"), 509, 496, 136, 39, 1.3f, 255,
+                focusMain ? 255 : 228, focusMain ? 255 : 153);
+        // The screen's title (1150 / 1151).
+        centred(outcome_ == 1 ? text(1150, "You Are Victorious!")
+                              : text(1151, "You Have Been Defeated!"),
+                300, 10, 400, 23, 1.45f, 255, 228, 153);
+    } else {
+        centred(achievementsReturn_ == FrontendScreen::Outcome ? std::string("Back")
+                                                             : text(9881, "Return to Game"),
+                645, 495, 130, 38, 1.3f, 255, 255, 255);
+    }
+}
+
+void Frontend::renderGameOverOverlay(Renderer &renderer, int screenW, int screenH) const {
+    const std::string label = gameOverLabel();
+    if (label.empty()) return;
+    const float scale = 1.6f * screenH / 544.0f;
+    const float w = uiTextWidth(label, scale);
+    const float x = (screenW - w) * 0.5f, y = screenH * 0.3f;
+    drawUiText(renderer, {label}, x + 2, y + 2, scale, 0, 0, 0);
+    drawUiText(renderer, {label}, x, y, scale, 255, 255, 255);
 }
 
 void Frontend::renderObjectivesOverlay(

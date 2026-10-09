@@ -485,38 +485,78 @@ void readTech(R &r, Tech &t) {
     t.name2 = sizedStr(r);
 }
 
-// --- tech tree (validated, not stored yet) ---
-void skipCommon(R &r) { r.skip(4 + kTechTreeSlots * 4 * 2); }
-void skipI32List(R &r) { uint8_t n = r.u8(); r.skip((size_t)n * 4); }
+// --- tech tree ---
+void readCommon(R &r, TechTreeCommon &c) {
+    c.used = r.i32();
+    for (int i = 0; i < kTechTreeSlots; ++i) c.ids[(size_t)i] = r.i32();
+    for (int i = 0; i < kTechTreeSlots; ++i) c.modes[(size_t)i] = r.i32();
+}
+void readI32List(R &r, std::vector<int32_t> &out) {
+    const uint8_t n = r.u8();
+    out.resize(n);
+    for (uint8_t i = 0; i < n; ++i) out[i] = r.i32();
+}
 
-void readTechTree(R &r, bool wideUnitCount) {
+void readTechTree(R &r, bool wideUnitCount, TechTree &tree) {
+    tree = TechTree{};
     uint8_t ages = r.u8();
     uint8_t buildings = r.u8();
     int unitsCount = wideUnitCount ? r.i16() : r.u8();
     uint8_t researches = r.u8();
     r.i32(); // total unit tech groups
     for (int i = 0; i < ages; i++) {
-        r.i32(); r.u8();
-        skipI32List(r); skipI32List(r); skipI32List(r);
-        skipCommon(r);
+        TechTreeAge age;
+        age.id = r.i32();
+        age.status = r.u8();
+        readI32List(r, age.buildings);
+        readI32List(r, age.units);
+        readI32List(r, age.techs);
+        readCommon(r, age.common);
         r.u8(); r.skip(kTechTreeZones); r.skip(kTechTreeZones); r.u8(); r.i32();
+        tree.ages.push_back(std::move(age));
     }
     for (int i = 0; i < buildings; i++) {
-        r.i32(); r.u8();
-        skipI32List(r); skipI32List(r); skipI32List(r);
-        skipCommon(r);
-        r.u8(); r.skip(kTechTreeAges); r.skip(kTechTreeAges); r.i32(); r.i32();
+        TechTreeBuilding b;
+        b.id = r.i32();
+        b.status = r.u8();
+        readI32List(r, b.buildings);
+        readI32List(r, b.units);
+        readI32List(r, b.techs);
+        readCommon(r, b.common);
+        b.locationInAge = r.u8();
+        for (int k = 0; k < kTechTreeAges; ++k) b.totals[(size_t)k] = r.u8();
+        for (int k = 0; k < kTechTreeAges; ++k) b.firsts[(size_t)k] = r.u8();
+        b.lineMode = r.i32();
+        b.enablingResearch = r.i32();
+        tree.buildings.push_back(std::move(b));
     }
     for (int i = 0; i < unitsCount; i++) {
-        r.i32(); r.u8(); r.i32();
-        skipCommon(r);
-        r.i32(); skipI32List(r); r.i32(); r.i32(); r.i32(); r.i32();
+        TechTreeUnit u;
+        u.id = r.i32();
+        u.status = r.u8();
+        u.upperBuilding = r.i32();
+        readCommon(r, u.common);
+        u.verticalLine = r.i32();
+        readI32List(r, u.units);
+        u.locationInAge = r.i32();
+        u.requiredResearch = r.i32();
+        u.lineMode = r.i32();
+        u.enablingResearch = r.i32();
+        tree.units.push_back(std::move(u));
     }
     for (int i = 0; i < researches; i++) {
-        r.i32(); r.u8(); r.i32();
-        skipI32List(r); skipI32List(r); skipI32List(r);
-        skipCommon(r);
-        r.i32(); r.i32(); r.i32();
+        TechTreeResearch t;
+        t.id = r.i32();
+        t.status = r.u8();
+        t.upperBuilding = r.i32();
+        readI32List(r, t.buildings);
+        readI32List(r, t.units);
+        readI32List(r, t.techs);
+        readCommon(r, t.common);
+        t.verticalLine = r.i32();
+        t.locationInAge = r.i32();
+        t.lineMode = r.i32();
+        tree.researches.push_back(std::move(t));
     }
 }
 
@@ -663,7 +703,7 @@ bool DatFile::loadFromRaw(const std::vector<uint8_t> &raw, std::string *err) {
             R t(raw);
             t.seek(techTreeStart);
             try {
-                readTechTree(t, wide != 0);
+                readTechTree(t, wide != 0, techTree);
                 parsed = t.remaining() == 0;
             } catch (const FormatError &) {
             }

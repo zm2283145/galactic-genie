@@ -363,10 +363,27 @@ bool CampaignProfile::isCompleted(
 bool CampaignProfile::isUnlocked(
     const CampaignInfo &campaign,
     size_t mission) const {
+    // Basic Training (xcam8) lists every mission (0x508d80).
+    if (!campaign.expansion && !campaign.custom &&
+        campaign.originalNumber == 8)
+        return mission < campaign.missions.size();
     return developmentAccess || mission == 0 ||
            (mission <= campaign.missions.size() &&
             isCompleted(
                 campaign.missions[mission - 1].key));
+}
+
+bool CampaignProfile::isCampaignUnlocked(
+    const CampaignInfo &campaign,
+    const std::vector<CampaignInfo> &all) const {
+    if (developmentAccess || !campaign.expansion ||
+        campaign.originalNumber != 2)
+        return true;
+    for (const CampaignInfo &other : all)
+        if (other.expansion && other.originalNumber == 1 &&
+            !other.missions.empty())
+            return isCompleted(other.missions.back().key);
+    return true;
 }
 
 void CampaignProfile::complete(

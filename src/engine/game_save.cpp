@@ -14,7 +14,7 @@ namespace {
 
 constexpr char kSaveMagic[8] = {
     'S', 'W', 'G', 'B', 'S', 'A', 'V', 'E'};
-constexpr uint32_t kSaveVersion = 7;
+constexpr uint32_t kSaveVersion = 8;
 constexpr uint32_t kOldestSaveVersion = 1;
 constexpr size_t kMaxSaveBytes = 32u * 1024u * 1024u;
 constexpr uint32_t kMaxObjects = 20000;
@@ -169,6 +169,11 @@ void writeSettings(
     writer.scalar(settings.gameSpeed);
     writer.scalar(settings.timeLimitMinutes);
     writer.scalar(settings.scoreLimit);
+    writer.scalar(settings.mapType);
+    writer.scalar(settings.mapSizeIndex);
+    writer.scalar(settings.gameType);
+    writer.scalar(settings.resourceLevel);
+    writer.scalar(settings.fixedPositions);
 }
 
 bool readSettings(
@@ -265,6 +270,13 @@ bool readSettings(
             !reader.scalar(settings.scoreLimit))
             return false;
     }
+    if (version >= 8 &&
+        !(reader.scalar(settings.mapType) &&
+          reader.scalar(settings.mapSizeIndex) &&
+          reader.scalar(settings.gameType) &&
+          reader.scalar(settings.resourceLevel) &&
+          reader.scalar(settings.fixedPositions)))
+        return false;
     if (version == 1) {
         const uint8_t old =
             (uint8_t)settings.victory;
@@ -286,6 +298,11 @@ bool sameSettings(
     const SkirmishSettings &right) {
     return left.seed == right.seed &&
            left.mapSize == right.mapSize &&
+           left.mapType == right.mapType &&
+           left.mapSizeIndex == right.mapSizeIndex &&
+           left.gameType == right.gameType &&
+           left.resourceLevel == right.resourceLevel &&
+           left.fixedPositions == right.fixedPositions &&
            left.playerCivilization ==
                right.playerCivilization &&
            left.computerCivilization ==
@@ -911,6 +928,9 @@ bool Game::saveMatch(
         SAVE_PROJECTILE(arcHeight);
         SAVE_PROJECTILE(arcVelocity);
         SAVE_PROJECTILE(arcGravity);
+        SAVE_PROJECTILE(homing);
+        SAVE_PROJECTILE(accuracy);
+        SAVE_PROJECTILE(dispersion);
 #undef SAVE_PROJECTILE
     }
     writer.scalar((uint32_t)remains_.size());
@@ -1850,6 +1870,13 @@ bool Game::loadMatch(
             if (err) *err = reader.error();
             return false;
         }
+        if (version >= 8 &&
+            (!reader.scalar(projectile.homing) ||
+             !reader.scalar(projectile.accuracy) ||
+             !reader.scalar(projectile.dispersion))) {
+            if (err) *err = reader.error();
+            return false;
+        }
         projectile.unit =
             resolveUnit(projectile.player, unitId);
         if (!projectile.unit) {
@@ -2378,6 +2405,8 @@ bool Game::loadMatch(
     disabledUnits_ =
         std::move(disabledUnits);
     objects_ = std::move(objects);
+    dynamicObjectIndices_.clear();
+    dynamicObjectsScanned_ = 0;
     objectIndices_.clear();
     for (size_t index = 0;
          index < objects_.size(); ++index)
@@ -2422,6 +2451,7 @@ bool Game::loadMatch(
     cheatMenuOpen_ = false;
     garrisonCursorActive_ = false;
     repairCursorActive_ = false;
+    screenPickValid_ = false;
     attackGroundCursorActive_ = false;
     unitCommandCursorActive_ = false;
     boxSelectActive_ = false;

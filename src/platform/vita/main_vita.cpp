@@ -34,6 +34,11 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <set>
+#ifdef SWGB_ENABLE_IME
+#include <psp2/ime_dialog.h>
+#include <psp2/common_dialog.h>
+#endif
 #include <memory>
 #include <cstdlib>
 #include <string>
@@ -46,6 +51,65 @@
 int _newlib_heap_size_user = 192 * 1024 * 1024;
 
 namespace swgb { extern void (*g_glTrace)(const char *); extern bool g_skipGlClear; }
+
+#ifdef SWGB_ENABLE_IME
+// Typed chat: the system on-screen keyboard (SceImeDialog).
+static uint16_t g_imeTitle[32];
+static uint16_t g_imeInitial[2];
+static uint16_t g_imeText[SCE_IME_DIALOG_MAX_TEXT_LENGTH + 1];
+static bool g_imeActive = false;
+
+static void startImeDialog() {
+    SceImeDialogParam param;
+    sceImeDialogParamInit(&param);
+    const char *title = "Chat";
+    for (int i = 0; i < 31 && title[i]; ++i) g_imeTitle[i] = (uint16_t)title[i];
+    g_imeInitial[0] = 0;
+    g_imeText[0] = 0;
+    param.supportedLanguages = 0;
+    param.languagesForced = SCE_FALSE;
+    param.type = SCE_IME_TYPE_DEFAULT;
+    param.option = 0;
+    param.textBoxMode = SCE_IME_DIALOG_TEXTBOX_MODE_DEFAULT;
+    param.maxTextLength = 80;
+    param.title = g_imeTitle;
+    param.initialText = g_imeInitial;
+    param.inputTextBuffer = g_imeText;
+    g_imeActive = sceImeDialogInit(&param) >= 0;
+}
+
+// The typed text once the keyboard closes (empty when cancelled); false
+// while it is still open.
+static bool pollImeDialog(std::string &text) {
+    if (!g_imeActive) return false;
+    if (sceImeDialogGetStatus() != SCE_COMMON_DIALOG_STATUS_FINISHED) return false;
+    SceImeDialogResult result;
+    memset(&result, 0, sizeof result);
+    sceImeDialogGetResult(&result);
+    text.clear();
+    if (result.button == SCE_IME_DIALOG_BUTTON_ENTER)
+        for (int i = 0; g_imeText[i]; ++i) {
+            const uint16_t c = g_imeText[i];
+            if (c < 0x80) text += (char)c;
+            else if (c < 0x800) {
+                text += (char)(0xC0 | (c >> 6));
+                text += (char)(0x80 | (c & 0x3F));
+            } else {
+                text += (char)(0xE0 | (c >> 12));
+                text += (char)(0x80 | ((c >> 6) & 0x3F));
+                text += (char)(0x80 | (c & 0x3F));
+            }
+        }
+    sceImeDialogTerm();
+    g_imeActive = false;
+    return true;
+}
+
+#else
+static bool g_imeActive = false;
+static void startImeDialog() {}
+static bool pollImeDialog(std::string &) { return false; }
+#endif
 
 namespace {
 
@@ -834,6 +898,8 @@ int main() {
                 audio.playOiiaEffect();
             });
         bool campaignMatch = false;
+        std::set<std::pair<int, int>> techTreeFrames;
+        int chatTypedRecipient = 0;
         swgb::Scenario campaignScenario;
         swgb::Scenario playtestScenario;
         const auto startSkirmish = [&]() {
@@ -842,13 +908,6 @@ int main() {
                 frontend.settings();
             if (!game.initSkirmish(settings, &err))
                 return false;
-            static constexpr const char *difficulties[] = {
-                "DIFFICULTY-HARDEST",
-                "DIFFICULTY-HARD",
-                "DIFFICULTY-MODERATE",
-                "DIFFICULTY-EASY",
-                "DIFFICULTY-EASIEST",
-            };
             for (int slot = 0;
                  slot < swgb::kMaxSkirmishSlots;
                  ++slot) {
@@ -866,32 +925,8 @@ int main() {
                     std::string(
                         "ux0:data/swgb/AI/") +
                     personality;
-                std::unordered_set<std::string> defines{
-                    difficulties[std::max(
-                        0, std::min(
-                               4,
-                               (int)player
-                                   .difficulty))],
-                    "POPULATION-CAP-" +
-                        std::to_string(
-                            settings.populationCap),
-                };
-                if (settings.victory ==
-                    swgb::SkirmishVictory::Standard)
-                    defines.insert(
-                        "VICTORY-STANDARD");
-                else if (settings.victory ==
-                         swgb::SkirmishVictory::Conquest)
-                    defines.insert(
-                        "VICTORY-CONQUEST");
-                if (settings.mapStyle ==
-                        swgb::SkirmishMapStyle::Archipelago ||
-                    settings.mapStyle ==
-                        swgb::SkirmishMapStyle::CompactIslands)
-                    defines.insert(
-                        player.team > 0
-                            ? "TEAM-LAND-SATELLITES-MAP"
-                            : "LAND-SATELLITES-MAP");
+                const std::unordered_set<std::string> defines =
+                    swgb::skirmishAiDefines(settings, slot);
                 if (!game.loadAiScript(
                         slot + 1, aiPath,
                         defines, &err)) {
@@ -1045,9 +1080,17 @@ int main() {
         // achievements 1: at exit_after, show each Achievements tab for 1.5 s
         // first.
         bool autostartAchievements = false;
+        // techtree 1: at exit_after, open the Technology Tree, walk right,
+        // switch civilization, then exit.
+        bool autostartTechTree = false;
+        uint64_t autostartTechTreeStart = 0, autostartTechTreeStep = 0;
         uint64_t autostartAchievementsStart = 0;
         size_t autostartAchievementsTab = SIZE_MAX;
         int autostartBattle = 0, autostartBattleEnemy = 5;
+        // skirmish <map type> <size index> <seed> [players]: an original
+        // random map against computer players.
+        int autostartMapType = 0, autostartMapSize = 0, autostartSeed = 1, autostartPlayers = 2,
+            autostartGameType = 0;
         bool autostartPending = false;
         uint64_t autostartGameplayStart = 0;
         bool autostartLaunched = false;
@@ -1059,6 +1102,11 @@ int main() {
                 //   battle <units per side> <enemy player>          spawn a test fight
                 if (sscanf(line, "battle %d %d", &autostartBattle, &autostartBattleEnemy) >= 1)
                     continue;
+                if (sscanf(line, "skirmish %d %d %d %d %d", &autostartMapType, &autostartMapSize,
+                           &autostartSeed, &autostartPlayers, &autostartGameType) >= 3) {
+                    autostartPending = true;
+                    continue;
+                }
                 if (sscanf(line, "campaign %127s %d", value, &number) == 2) {
                     autostartArchive = value;
                     autostartEntry = number;
@@ -1074,6 +1122,8 @@ int main() {
                         autostartQuitAfter = (float)atof(value);
                     else if (std::string(key) == "achievements")
                         autostartAchievements = atoi(value) != 0;
+                    else if (std::string(key) == "techtree")
+                        autostartTechTree = atoi(value) != 0;
                 }
             }
             fclose(autostart);
@@ -1288,6 +1338,25 @@ int main() {
 
             swgb::FrontendAction action =
                 swgb::FrontendAction::None;
+            if (g_imeActive) {
+                // The keyboard owns the controls until it closes.
+                in = swgb::InputState{};
+                in.screenW = kScreenW;
+                in.screenH = kScreenH;
+                std::string typed;
+                if (pollImeDialog(typed) && !typed.empty() && game.localPlayerForTesting() > 0) {
+                    const int local = game.localPlayerForTesting();
+                    std::vector<int> recipients;
+                    for (const swgb::DiplomacyRow &row : game.diplomacyData().rows) {
+                        if (row.local || row.defeated) continue;
+                        if (chatTypedRecipient == 0 || (chatTypedRecipient == 1 && row.ourStance == 0) ||
+                            chatTypedRecipient == row.player)
+                            recipients.push_back(row.player);
+                    }
+                    game.sendChat(local, recipients, typed);
+                    logf("chat: typed message sent to %u players", (unsigned)recipients.size());
+                }
+            }
             swgb::EditorAction editorAction =
                 swgb::EditorAction::None;
             if (frontend.screen() ==
@@ -1295,7 +1364,7 @@ int main() {
                 editorAction = editor.update(dt, in);
             else
                 action = frontend.update(
-                    in, game.victoryStateForTesting());
+                    in, game.victoryStateForTesting(), dt);
             if (autostartPending &&
                 frontend.screen() == swgb::FrontendScreen::Title)
                 frontend.showMainMenu();
@@ -1303,6 +1372,23 @@ int main() {
                 frontend.screen() == swgb::FrontendScreen::MainMenu) {
                 autostartPending = false;
                 bool found = false;
+                if (autostartMapType > 0) {
+                    swgb::SkirmishSettings &settings = frontend.settingsForTesting();
+                    settings.mapType = autostartMapType;
+                    settings.mapSizeIndex = autostartMapSize;
+                    settings.seed = (uint32_t)autostartSeed;
+                    settings.gameType = (uint8_t)autostartGameType;
+                    for (int i = 0; i < swgb::kMaxSkirmishSlots; ++i)
+                        settings.slots[(size_t)i].type =
+                            i == 0 ? swgb::SkirmishSlotType::Human
+                            : i < autostartPlayers ? swgb::SkirmishSlotType::Computer
+                                                   : swgb::SkirmishSlotType::Closed;
+                    logf("autostart: skirmish map %d size %d seed %d players %d", autostartMapType,
+                         autostartMapSize, autostartSeed, autostartPlayers);
+                    action = swgb::FrontendAction::StartSkirmish;
+                    autostartLaunched = true;
+                    found = true;
+                }
                 for (size_t c = 0; c < catalog.campaigns().size() && !found; ++c) {
                     const swgb::CampaignInfo &campaign = catalog.campaigns()[c];
                     if (campaign.archiveName.find(autostartArchive) == std::string::npos)
@@ -1315,7 +1401,9 @@ int main() {
                         }
                 }
                 logf("autostart: mission %s", found ? "found" : "NOT FOUND");
-                if (found && autostartScene) {
+                if (autostartMapType > 0) {
+                    // (the skirmish above)
+                } else if (found && autostartScene) {
                     // Through the mission's opening scene, which starts it.
                     frontend.showScreenForTesting(swgb::FrontendScreen::CampaignBriefing, 0);
                     autostartLaunched = true;
@@ -1363,8 +1451,43 @@ int main() {
                 if ((now - autostartGameplayStart) / 1e6f >= autostartExitAfter) {
                     if (autostartAchievements && !autostartAchievementsStart) {
                         autostartAchievementsStart = now;
+                    } else if (autostartTechTree && !autostartTechTreeStart) {
+                        autostartTechTreeStart = now;
+                        frontend.showScreenForTesting(swgb::FrontendScreen::TechTree, 0);
+                        frontend.setTechTreeArt([&](int slp, int frame) -> const swgb::SpriteFrame * {
+                            if (frame < 0) return nullptr;
+                            techTreeFrames.insert({slp, frame});
+                            return assets.interfaceFrame(slp, (size_t)frame, 50500);
+                        });
+                        frontend.setTechTree(game.techTreeData(-1));
+                        logf("autostart: technology tree, %u nodes",
+                             (unsigned)game.techTreeData(-1).nodes.size());
+                    } else if (autostartTechTreeStart) {
                     } else {
                         logf("autostart: exiting after %.0f s of gameplay", autostartExitAfter);
+                        if (g_log) fflush(g_log);
+                        sceKernelExitProcess(0);
+                    }
+                }
+            }
+            if (autostartTechTreeStart) {
+                const uint64_t step = (now - autostartTechTreeStart) / 300000ull;
+                if (step != autostartTechTreeStep) {
+                    autostartTechTreeStep = step;
+                    swgb::InputState press;
+                    press.screenW = kScreenW;
+                    press.screenH = kScreenH;
+                    if (step < 30) press.menuRight = true;
+                    else if (step == 30) press.actionTabRight = true;
+                    else if (step < 40) press.menuDown = true;
+                    const swgb::FrontendAction pressed = frontend.update(press, -1, 0.0f);
+                    if (pressed == swgb::FrontendAction::OpenTechTree) {
+                        frontend.setTechTree(game.techTreeData(frontend.techTreeCivilization()));
+                        logf("autostart: technology tree civilization %d",
+                             frontend.techTreeCivilization());
+                    }
+                    if (step >= 45) {
+                        logf("autostart: technology tree shown, exiting");
                         if (g_log) fflush(g_log);
                         sceKernelExitProcess(0);
                     }
@@ -1418,6 +1541,7 @@ int main() {
                          currentFrontendScreen != Screen::Options &&
                          currentFrontendScreen != Screen::Diplomacy &&
                          currentFrontendScreen != Screen::Chat &&
+                         currentFrontendScreen != Screen::TechTree &&
                          currentFrontendScreen != Screen::Confirm)
                     matchMusic = false; // the in-game menus keep the game's music
                 if (matchMusic)
@@ -1433,6 +1557,12 @@ int main() {
             }
             if (currentFrontendScreen !=
                 previousFrontendScreen) {
+                if (previousFrontendScreen == swgb::FrontendScreen::TechTree) {
+                    frontend.setTechTreeArt({});
+                    for (const auto &frame : techTreeFrames)
+                        assets.releaseInterfaceFrame(frame.first, (size_t)frame.second, 50500);
+                    techTreeFrames.clear();
+                }
                 if (currentFrontendScreen == swgb::FrontendScreen::Achievements) {
                     // Tabs (sat_tabs 50765) and name banners (PNBnr1 50762),
                     // and this game's statistics.
@@ -1678,6 +1808,16 @@ int main() {
                 stickBoxMoved = false;
                 if (!started)
                     game.clearMatch();
+            } else if (action == swgb::FrontendAction::OpenTechTree) {
+                // techback 50341, techages 50342, technodex 53206, ttx 53211
+                // and the civilization's icons, palette 50500; released when
+                // the screen closes.
+                frontend.setTechTreeArt([&](int slp, int frame) -> const swgb::SpriteFrame * {
+                    if (frame < 0) return nullptr;
+                    techTreeFrames.insert({slp, frame});
+                    return assets.interfaceFrame(slp, (size_t)frame, 50500);
+                });
+                frontend.setTechTree(game.techTreeData(frontend.techTreeCivilization()));
             } else if (action == swgb::FrontendAction::OpenDiplomacy) {
                 // dlg_dip 50221 and the tribute icons tradicon 50732.
                 std::array<const swgb::SpriteFrame *, 4> icons{};
@@ -1710,6 +1850,9 @@ int main() {
                 if (taunts.empty())
                     for (int number = 1; number <= 42; ++number) taunts.push_back({number, ""});
                 frontend.setTaunts(taunts);
+            } else if (action == swgb::FrontendAction::TypeChat) {
+                startImeDialog();
+                chatTypedRecipient = frontend.chatRecipient();
             } else if (action == swgb::FrontendAction::SendChat) {
                 const int local = game.localPlayerForTesting();
                 const int to = frontend.chatRecipient();
@@ -1920,6 +2063,7 @@ int main() {
                     frontend.renderDiplomacyOverlay(renderer, kScreenW, kScreenH);
                 else if (frontend.screen() == swgb::FrontendScreen::Chat)
                     frontend.renderChatOverlay(renderer, kScreenW, kScreenH);
+                frontend.renderGameOverOverlay(renderer, kScreenW, kScreenH);
             } else if (frontend.screen() ==
                      swgb::FrontendScreen::ScenarioEditor)
                 editor.render(
@@ -1959,7 +2103,7 @@ int main() {
                 const uint64_t nowUs = sceKernelGetProcessTimeWide();
                 if (nowUs < due) sceKernelDelayThread((SceUInt)(due - nowUs));
             }
-            vglSwapBuffers(GL_FALSE);
+            vglSwapBuffers(g_imeActive ? GL_TRUE : GL_FALSE);
             const uint64_t t3 = sceKernelGetProcessTimeWide();
             frameStartUs = t3;
             updateUs += t1 - t0;

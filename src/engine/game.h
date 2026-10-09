@@ -173,6 +173,31 @@ struct DiplomacyData {
     float fee = 0.3f;           // attribute 46
     bool hasMarket = false, lockTeams = false, alliedVictory = false;
 };
+// The Technology Tree screen (TribeTechHelpScreen): one node per building,
+// unit and technology the civilization can have, laid out in building
+// columns and Tech Level bands.
+struct TechTreeNode {
+    int type = 0;       // 1 building, 3 unit, 4 technology
+    int id = 0;
+    int column = 0;     // first column (buildings may span several)
+    int width = 1;
+    int age = 1;        // Tech Level band 1..4
+    int row = 0;        // row inside the band
+    int status = 2;     // 2 not yet available, 3 not for this civ, 5 available / researched
+    int iconSlp = -1, iconFrame = -1;
+    int parent = -1;    // node drawn above (line), -1 none
+    std::string name, help;
+};
+struct TechTreeData {
+    int civilization = 1;
+    int playerCivilization = 1; // -1: not playing
+    int currentAge = 0;         // highlighted band (0..3), 4 none
+    int columns = 0;
+    std::array<int, 4> rows{};  // rows used per band
+    std::vector<TechTreeNode> nodes;
+    std::vector<std::string> civilizationNames; // index = civilization
+    std::string bonus;          // string 20149 + civ
+};
 // One player's row on the Achievements screen. cells[tab][column] holds the
 // text of the Score (0), Military, Economy, Technology and Society (4) tabs.
 struct AchievementsPlayer {
@@ -738,6 +763,23 @@ public:
         return difficulty_;
     }
     int difficultyForPlayer(int player) const;
+    // Active objects of a player (-1: any) with a unit id (-1: any).
+    int unitCountForTesting(int player, int unitId) const {
+        int count = 0;
+        for (const Object &object : objects_)
+            if (object.active && object.unit && (player < 0 || object.player == player) &&
+                (unitId < 0 || object.unit->id == unitId))
+                count++;
+        return count;
+    }
+    std::string workerStatesForTesting(int player) const;
+    uint32_t firstObjectForTesting(int player, int unitId) const {
+        for (const Object &object : objects_)
+            if (object.active && object.unit && object.player == player &&
+                object.unit->id == unitId)
+                return object.spawnId;
+        return 0;
+    }
     int activePlayerCountForTesting() const {
         return (int)std::count_if(
             players_.begin(), players_.end(),
@@ -1452,6 +1494,8 @@ public:
     }
     // The Diplomacy dialog's rows and the local player's stock.
     DiplomacyData diplomacyData() const;
+    // civilization -1: the local player's.
+    TechTreeData techTreeData(int civilization = -1) const;
     // The rows of the Achievements screen, one per player who took part.
     std::vector<AchievementsPlayer> achievementsPlayers() const;
 
@@ -1707,6 +1751,16 @@ private:
 
     struct AiPlayerState {
         AiProgram program;
+        // Resources a worker could not reach, skipped until the given
+        // simulation time (generated maps).
+        std::unordered_map<uint32_t, float> unreachableResources;
+        // resource-found: the resource types (bits 0..3) with a known
+        // deposit, rescanned when older than a few seconds.
+        uint8_t resourceFoundMask = 0;
+        float resourceFoundTime = -1.0e9f;
+        // dropsite-min-distance per resource type, recomputed every 2 s.
+        std::array<int, 4> dropsiteDistance{};
+        std::array<float, 4> dropsiteDistanceTime{-1.0e9f, -1.0e9f, -1.0e9f, -1.0e9f};
         // Player bound by the last true fact with an any-<kind> selector,
         // read back as this-any-<kind> (AoK script semantics).
         std::unordered_map<std::string, int> thisAny;
@@ -1777,8 +1831,13 @@ private:
         // Ballistic arc (projectile arc, exe 0x407729): height above the
         // straight flight line, its vertical speed and gravity.
         float arcHeight = 0, arcVelocity = 0, arcGravity = 0;
+        // Homing missiles (projectile type 1, 0x407840): re-aim at the
+        // target every update with a new accuracy roll (save v8).
+        bool homing = false;
+        float accuracy = 100.0f, dispersion = 0.0f;
     };
     void initProjectileArc(Projectile &projectile, float destX, float destY) const;
+    void rollProjectileAim(Projectile &projectile, const Object &target);
 
     struct Remains {
         const dat::Unit *deadUnit = nullptr;
@@ -1819,6 +1878,28 @@ private:
         bool addStartingResources,
         std::string *err);
     void resetMatchState();
+    bool generateOriginalMap(const SkirmishSettings &settings,
+                             const std::vector<int> &activeSlots,
+                             std::array<std::array<float, 2>, kMaxSkirmishSlots> &starts,
+                             std::string *err);
+    uint8_t gameType_ = 0;
+    // Commander of the Base (ENGINE-HOLDTHIS 826) and Defend the Monument.
+    uint32_t baseObjectId_ = 0;
+    float baseRemaining_ = 2750.0f; // seconds (5500 timer units)
+    float baseCheckTime_ = 0.0f;
+    int baseHolder_ = -1;           // team leader holding it, -1 none
+    bool baseWarned1000_ = false, baseWarned500_ = false;
+    int defenderPlayer_ = 0;
+    uint32_t defenderMonumentId_ = 0;
+    void setupSpecialGameType(const SkirmishSettings &settings,
+                              const std::vector<int> &activeSlots);
+    Object *spawnWithAnnexes(int unitId, int player, float x, float y, float facing);
+    void updateSpecialGameType(float dt);
+    // Self Regeneration (player attribute 96: 1 HP every N s for trait 0x20
+    // units, exe 0x55aa8c) and heroes' 1 HP every 2 s.
+    std::array<float, 17> regenerationTime_{};
+    float heroRegenerationTime_ = 0.0f;
+    void updateRegeneration(float dt);
     void generateTerrain(
         int size, SkirmishMapStyle style);
     void spawnStartingResources(
@@ -1890,6 +1971,13 @@ private:
                                  int screenW, int screenH) const;
     void syncFarmTerrain(Object &farm, bool dying = false);
     float playerAttribute(int player, int attribute) const;
+    // Cost modifiers: unit attribute 100 (all resource costs) and player
+    // attribute 85 (research costs, every tech but 0-3; exe 0x5c0285).
+    float unitCostFactor(int player, const dat::Unit &unit) const;
+    float techCostFactor(int player, int technologyId) const;
+    static int scaledCost(int amount, float factor) {
+        return factor == 1.0f ? amount : (int)(amount * factor);
+    }
     const Object *findObject(uint32_t spawnId) const;
     int civilizationForPlayer(int player) const;
     void rebuildAdjacency();
@@ -1947,8 +2035,11 @@ private:
     bool inSourceArea(const Object &object, int x1, int y1, int x2, int y2) const;
     bool issueMove(Object &object, float targetX, float targetY,
                    const Object *goalObject = nullptr, float clearance = 0.0f);
+    // autoFormation: the player has not picked a formation for the group
+    // (0x480060 with -1): a column when the goal is over 10 tiles away.
     void issueGroupMove(std::vector<Object *> targets, float targetX, float targetY,
-                        FormationType formation = FormationType::Line);
+                        FormationType formation = FormationType::Line,
+                        bool autoFormation = false);
     bool findPath(const Object &object, float targetX, float targetY,
                   std::vector<std::array<float, 2>> &path,
                   const Object *goalObject = nullptr, float clearance = 0.0f) const;
@@ -2448,6 +2539,14 @@ private:
     std::vector<Projectile> projectiles_;
     std::vector<Remains> remains_;
     std::vector<uint32_t> mobileObjectIndices_;
+    // Every object except gaia's inert scenery (trees, mines, cliffs, forage:
+    // gaia, immobile, not a building, holocron or temple), extended as
+    // objects are appended. Per-update scans use it so maps with thousands
+    // of trees do not stream them all every update.
+    mutable std::vector<uint32_t> dynamicObjectIndices_;
+    std::unordered_map<uint64_t, std::pair<uint64_t, bool>> militaryProducerMemo_;
+    mutable size_t dynamicObjectsScanned_ = 0;
+    const std::vector<uint32_t> &dynamicObjects() const;
     std::vector<std::vector<uint32_t>> mobileObjectCells_;
     std::vector<uint32_t> combatObjectIndices_;
     std::vector<std::vector<uint32_t>> combatObjectCells_;
@@ -2461,6 +2560,11 @@ private:
     std::vector<uint32_t> discoverableObjectIndices_;
     std::vector<uint32_t> minimapObjectIndices_;
     std::vector<uint32_t> screenPickObjectIndices_;
+    // The pick list is built by render(); before the first render after a
+    // load or a camera jump (lookAt), picking scans every object instead.
+    bool screenPickValid_ = false;
+    std::vector<uint32_t> screenPickFallback_;
+    const std::vector<uint32_t> &screenPickCandidates();
     // Ids of the objects the last rendered frame showed in the world view
     // (sorted): the original's Object Visible / Object Not Visible trigger
     // conditions look the object up in the main view's draw list.
@@ -2751,6 +2855,7 @@ private:
     bool forceSightCheat_ = false;
     bool enemyIntelligenceCheat_ = false;
     bool garrisonCursorActive_ = false;
+    bool formationChosen_ = false;
     bool repairCursorActive_ = false;
     bool attackGroundCursorActive_ = false;
     bool attackGroundJustBegun_ = false;

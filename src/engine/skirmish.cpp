@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "skirmish.h"
 
+#include "rms.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -194,7 +196,15 @@ bool validateSkirmishSettings(
         if (error) *error = message;
         return false;
     };
-    if (settings.mapSize < 48 ||
+    if (settings.mapType != 0) {
+        if (!rmsScriptForMapType(settings.mapType) || settings.mapSizeIndex < 0 ||
+            settings.mapSizeIndex > 5 || settings.gameType > 7 || settings.gameType == 3 ||
+            settings.gameType == 4 || settings.resourceLevel > 3 ||
+            (settings.gameType == 7 && (settings.mapType == 17 || settings.mapType == 37))) {
+            if (error) *error = "unsupported original random map settings";
+            return false;
+        }
+    } else if (settings.mapSize < 48 ||
         settings.mapSize > 160 ||
         (settings.mapSize != 48 &&
          settings.mapSize % 32))
@@ -468,6 +478,94 @@ SkirmishPreview generateSkirmishPreview(
     }
     preview.hash = hash;
     return preview;
+}
+
+const char *gameTypeName(int gameType) {
+    switch (gameType) {
+    case kGameTerminateCommander: return "TERMINATE THE COMMANDER";
+    case kGameDeathMatch: return "DEATH MATCH";
+    case kGameCommanderOfTheBase: return "COMMANDER OF THE BASE";
+    case kGameMonumentRace: return "MONUMENT RACE";
+    case kGameDefendTheMonument: return "DEFEND THE MONUMENT";
+    default: return "RANDOM MAP";
+    }
+}
+
+const char *resourceLevelName(int level) {
+    switch (level) {
+    case 1: return "LOW";
+    case 2: return "MEDIUM";
+    case 3: return "HIGH";
+    default: return "STANDARD";
+    }
+}
+
+std::array<int, 4> originalStartingResources(int gameType, int resourceLevel) {
+    if (gameType == kGameDeathMatch) return {{20000, 20000, 5000, 10000}};
+    if (gameType == kGameTerminateCommander) return {{500, 500, 150, 0}};
+    switch (resourceLevel) {
+    case 2: return {{500, 500, 450, 300}};
+    case 3: return {{1000, 1000, 850, 700}};
+    default: return {{200, 200, 250, 100}};
+    }
+}
+
+std::unordered_set<std::string> skirmishAiDefines(const SkirmishSettings &settings, int slot) {
+    static const char *difficulties[] = {"DIFFICULTY-HARDEST", "DIFFICULTY-HARD",
+                                         "DIFFICULTY-MODERATE", "DIFFICULTY-EASY",
+                                         "DIFFICULTY-EASIEST"};
+    const SkirmishSlot &player = settings.slots[(size_t)std::max(0, std::min(7, slot))];
+    std::unordered_set<std::string> defines{
+        difficulties[std::max(0, std::min(4, (int)player.difficulty))],
+        "POPULATION-CAP-" + std::to_string(settings.populationCap),
+    };
+    switch (settings.victory) {
+    case SkirmishVictory::Standard: defines.insert("VICTORY-STANDARD"); break;
+    case SkirmishVictory::Conquest: defines.insert("VICTORY-CONQUEST"); break;
+    case SkirmishVictory::TimeLimit: defines.insert("VICTORY-TIME-LIMIT"); break;
+    case SkirmishVictory::Score: defines.insert("VICTORY-SCORE"); break;
+    default: break;
+    }
+    if (settings.teamsLocked) defines.insert("TEAMS-LOCKED");
+    static const char *starts[] = {"TECH-LEVEL-1-START", "TECH-LEVEL-2-START",
+                                   "TECH-LEVEL-3-START", "TECH-LEVEL-4-START"};
+    defines.insert(starts[std::max(0, std::min(3, settings.startingTechLevel - 1))]);
+    if (settings.gameType == kGameTerminateCommander) defines.insert("TERMINATE-THE-COMMANDER");
+    if (settings.gameType == kGameDeathMatch) defines.insert("DEATH-MATCH");
+    if (settings.gameType == kGameCommanderOfTheBase) defines.insert("EMPEROR");
+    if (settings.gameType == kGameMonumentRace) defines.insert("MONUMENT-RACE");
+    if (settings.gameType == kGameDefendTheMonument) defines.insert("DEFEND-MONUMENT");
+    if (settings.mapType == 0) {
+        if (settings.mapStyle == SkirmishMapStyle::Archipelago ||
+            settings.mapStyle == SkirmishMapStyle::CompactIslands)
+            defines.insert(player.team > 0 ? "TEAM-LAND-SATELLITES-MAP" : "LAND-SATELLITES-MAP");
+        return defines;
+    }
+    static const char *sizes[] = {"TINY-MAP", "SMALL-MAP", "MEDIUM-MAP",
+                                  "NORMAL-MAP", "LARGE-MAP", "GIANT-MAP"};
+    defines.insert(sizes[std::max(0, std::min(5, settings.mapSizeIndex))]);
+    static const std::pair<int, const char *> maps[] = {
+        {9, "DESERT-MAP"}, {10, "WATER-MASS-MAP"}, {11, "SEA-MAP"}, {12, "FOREST-MAP"},
+        {13, "SHORELINE-MAP"}, {14, "LAND-MASS-MAP"}, {15, "SPACE-MASS-MAP"},
+        {16, "NOVA-LAKE-MAP"}, {17, "FORTRESS-MAP"}, {18, "NOVA-ASSAULT-MAP"},
+        {19, "PRECIPICE-MAP"}, {20, "LAND-SATELLITES-MAP"}, {21, "SPACE-SATELLITES-MAP"},
+        {22, "LARGE-SEA-MAP"}, {23, "PLANETS-AND-MOONS-MAP"}, {24, "SEARCH-AND-DESTROY-MAP"},
+        {25, "RIVERS-MAP"}, {26, "TEAM-LAND-SATELLITES-MAP"}, {27, "TEAM-SPACE-SATELLITES-MAP"},
+        {29, "TUNDRA-MAP"}, {30, "FLATS-MAP"}, {31, "SAVANNAH-MAP"}, {32, "SWAMP-MAP"},
+        {33, "ARENA-MAP"}, {35, "MOTHERLODE-MAP"}, {36, "ICE-LAKE-MAP"}, {37, "RAIDERS-MAP"},
+        {38, "STAR-WARS-WORLD-KASHYYYK-MAP"}, {39, "STAR-WARS-WORLD-ENDOR-MAP"},
+        {40, "STAR-WARS-WORLD-YAVIN-MAP"}, {41, "STAR-WARS-WORLD-HOTH-MAP"},
+        {42, "STAR-WARS-WORLD-KRANT-MAP"}, {43, "STAR-WARS-WORLD-HANOON-MAP"},
+        {44, "STAR-WARS-WORLD-GEDDES-MAP"}, {45, "STAR-WARS-WORLD-KESSEL-MAP"},
+        {46, "STAR-WARS-WORLD-TATOOINE-MAP"}, {47, "STAR-WARS-WORLD-REYTHA-MAP"},
+        {48, "STAR-WARS-WORLD-ZALORIIS-MAP"}, {49, "STAR-WARS-WORLD-DAGOBAH-MAP"},
+        {50, "STAR-WARS-WORLD-NABOO-MAP"}, {55, "STAR-WARS-WORLD-MOSESPA-MAP"},
+        {56, "STAR-WARS-WORLD-SARAPIN-MAP"}, {57, "STAR-WARS-WORLD-AEREEN-MAP"},
+        {58, "STAR-WARS-WORLD-EREDENN-MAP"}, {59, "STAR-WARS-WORLD-GEONOSIS-MAP"},
+        {60, "STAR-WARS-WORLD-TATOOINE-NEW-MAP"}};
+    for (const auto &entry : maps)
+        if (entry.first == settings.mapType) defines.insert(entry.second);
+    return defines;
 }
 
 } // namespace swgb

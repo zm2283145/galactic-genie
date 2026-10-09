@@ -70,7 +70,9 @@ struct CampaignProgress {
 };
 
 struct CampaignProfile {
-    bool developmentAccess = true;
+    // Vita/dev toggle (L on the mission list): every mission and campaign
+    // open. Off by default, as in the original (sequential unlocks).
+    bool developmentAccess = false;
     int difficulty = 2;
     std::vector<CampaignProgress> progress;
 
@@ -78,6 +80,12 @@ struct CampaignProfile {
     bool isUnlocked(
         const CampaignInfo &campaign,
         size_t mission) const;
+    // Clone Campaigns: the Republic campaign (1cam2) stays locked until
+    // the Confederacy campaign's (1cam1) last mission is completed
+    // (Campaign Game Screen 0x507f10). Everything else is open.
+    bool isCampaignUnlocked(
+        const CampaignInfo &campaign,
+        const std::vector<CampaignInfo> &all) const;
     void complete(const std::string &key);
 };
 

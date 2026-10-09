@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace swgb {
@@ -93,7 +94,40 @@ struct SkirmishSettings {
     SkirmishGameSpeed gameSpeed = SkirmishGameSpeed::Normal;
     int timeLimitMinutes = 60;
     int scoreLimit = 4000;
+
+    // The original random maps (save v8): mapType 9..61 runs that map's
+    // script (rms.h) at mapSizeIndex (0 tiny .. 5 giant); 0 uses mapStyle
+    // and mapSize with the port's own generator.
+    int mapType = 0;
+    int mapSizeIndex = 1;
+    // Game type (options+0x1445): 0 Random Map, 1 Terminate the Commander,
+    // 2 Death Match, 5 Commander of the Base, 6 Monument Race, 7 Defend the
+    // Monument.
+    uint8_t gameType = 0;
+    // Original resource levels (0 Standard, 1 Low, 2 Medium, 3 High) for
+    // the original maps.
+    uint8_t resourceLevel = 0;
+    // "Team Together": allies start next to each other (FIXED_POSITIONS).
+    bool fixedPositions = true;
 };
+
+enum SkirmishGameType : uint8_t {
+    kGameRandomMap = 0,
+    kGameTerminateCommander = 1,
+    kGameDeathMatch = 2,
+    kGameCommanderOfTheBase = 5,
+    kGameMonumentRace = 6,
+    kGameDefendTheMonument = 7,
+};
+const char *gameTypeName(int gameType);
+const char *resourceLevelName(int level);
+// Starting food/carbon/ore/nova for a game type and resource level
+// (TRIBE_World new_game 0x600310).
+std::array<int, 4> originalStartingResources(int gameType, int resourceLevel);
+// The symbols the exe defines for a computer player's AI script
+// (difficulty, population, victory, map type and size, game type, starting
+// tech level, teams).
+std::unordered_set<std::string> skirmishAiDefines(const SkirmishSettings &settings, int slot);
 
 struct SkirmishPreview {
     static constexpr int kWidth = 48;

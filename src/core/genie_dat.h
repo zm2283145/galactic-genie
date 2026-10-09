@@ -285,6 +285,57 @@ struct Tech {
     std::string name, name2;
 };
 
+// The tech tree section at the end of the dat (TribeTechHelpScreen data).
+// Common block mode: 0 age, 2 unit prerequisite, 3 tech prerequisite.
+struct TechTreeCommon {
+    int32_t used = 0;
+    std::array<int32_t, 20> ids{}, modes{};
+    // The age (1..4) a node becomes available in, or 0.
+    int age() const {
+        for (int i = 0; i < used && i < 20; ++i)
+            if (modes[(size_t)i] == 0) return ids[(size_t)i];
+        return 0;
+    }
+};
+struct TechTreeAge {
+    int32_t id = 0;
+    uint8_t status = 0;
+    std::vector<int32_t> buildings, units, techs;
+    TechTreeCommon common;
+};
+struct TechTreeBuilding {
+    int32_t id = 0;
+    uint8_t status = 0;
+    std::vector<int32_t> buildings, units, techs;
+    TechTreeCommon common;
+    uint8_t locationInAge = 0;
+    std::array<uint8_t, 5> totals{}, firsts{};
+    int32_t lineMode = 0, enablingResearch = -1;
+};
+struct TechTreeUnit {
+    int32_t id = 0;
+    uint8_t status = 0;
+    int32_t upperBuilding = -1;
+    TechTreeCommon common;
+    int32_t verticalLine = 0;
+    std::vector<int32_t> units;
+    int32_t locationInAge = 0, requiredResearch = -1, lineMode = 0, enablingResearch = -1;
+};
+struct TechTreeResearch {
+    int32_t id = 0;
+    uint8_t status = 0;
+    int32_t upperBuilding = -1;
+    std::vector<int32_t> buildings, units, techs;
+    TechTreeCommon common;
+    int32_t verticalLine = 0, locationInAge = 0, lineMode = 0;
+};
+struct TechTree {
+    std::vector<TechTreeAge> ages;
+    std::vector<TechTreeBuilding> buildings;
+    std::vector<TechTreeUnit> units;
+    std::vector<TechTreeResearch> researches;
+};
+
 struct DatFile {
     std::string version;
     int32_t waypointSprite = -1, moveToSprite = -1, garrisonSound = -1, ungarrisonSound = -1;
@@ -301,7 +352,7 @@ struct DatFile {
     std::vector<Tech> techs;
     int32_t timeSlice = 0, unitKillRate = 0, unitKillTotal = 0, unitHitPointRate = 0;
     int32_t unitHitPointTotal = 0, razingKillRate = 0, razingKillTotal = 0;
-    // Tech tree is parsed for validation but not stored yet.
+    TechTree techTree;
 
     bool load(const std::string &path, std::string *err = nullptr);
     bool loadFromCompressed(const std::vector<uint8_t> &compressed, std::string *err = nullptr);

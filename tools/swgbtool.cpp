@@ -18,6 +18,7 @@
 #include "../src/engine/campaign_layout.h"
 #include "../src/engine/campaign_scene.h"
 #include "../src/engine/game.h"
+#include "../src/engine/rms.h"
 #include "../src/engine/startup.h"
 #include "../src/render/soft_renderer.h"
 
@@ -180,6 +181,9 @@ static int cmdTerrain(const char *dataDir, int id) {
                id, terrain.name.c_str(), terrain.name2.c_str(), terrain.slp, terrain.terrainToDraw,
                terrain.blendType, terrain.blendPriority, terrain.terrainDimensions[0],
                terrain.terrainDimensions[1]);
+        for (int i = 0; i < terrain.numTerrainUnitsUsed && i < 30; i++)
+            printf("  terrain unit %d density %d centering %d\n", terrain.terrainUnitId[i],
+                   terrain.terrainUnitDensity[i], terrain.terrainUnitCentering[i]);
         return 0;
 }
 
@@ -1077,6 +1081,217 @@ static int cmdSlopes(const char *dataDir, int id, const char *out, size_t frame)
     r.endFrame();
     r.savePng(out);
     printf("rendered 17 slopes for terrain SLP %d frame %zu -> %s\n", id, frame, out);
+    return 0;
+}
+
+// render-rms <DataDir> <mapType> <sizeIndex> <seed> <out.png> [seconds]: a
+// two-player match on an original random map, viewed from player 1.
+static int cmdRenderRms(int argc, char **argv) {
+    if (argc < 7) return 1;
+    SoftRenderer r;
+    Assets a(&r);
+    std::string err;
+    if (!a.init(argv[2], &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    SkirmishSettings settings;
+    settings.mapType = atoi(argv[3]);
+    settings.mapSizeIndex = atoi(argv[4]);
+    settings.seed = (uint32_t)atoi(argv[5]);
+    settings.slots[0].type = SkirmishSlotType::Human;
+    settings.slots[1].type = SkirmishSlotType::Computer;
+    if (argc > 8) settings.gameType = (uint8_t)atoi(argv[8]);
+    Game g(a);
+    if (!g.initSkirmish(settings, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    InputState in;
+    const float seconds = argc > 7 ? (float)atof(argv[7]) : 0.5f;
+    for (float t = 0; t < seconds; t += 1.0f / 30) g.update(1.0f / 30, in);
+    g.render(r, 960, 544);
+    r.savePng(argv[6]);
+    printf("objects %zu\n", g.activeObjectCount());
+    return 0;
+}
+
+// simulate-rms <DataDir> <mapType> <sizeIndex> <seed> <seconds> [players]:
+// a human (idle) and computer players on an original random map; prints the
+// AI economy every 60 s.
+static int cmdSimulateRms(int argc, char **argv) {
+    if (argc < 7) return 1;
+    SoftRenderer r;
+    Assets a(&r);
+    std::string err;
+    if (!a.init(argv[2], &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    SkirmishSettings settings;
+    settings.mapType = atoi(argv[3]);
+    settings.mapSizeIndex = atoi(argv[4]);
+    settings.seed = (uint32_t)atoi(argv[5]);
+    const int players = argc > 7 ? std::max(2, std::min(8, atoi(argv[7]))) : 2;
+    if (argc > 8) settings.gameType = (uint8_t)atoi(argv[8]);
+    for (int i = 0; i < players; ++i) {
+        settings.slots[(size_t)i].type = i == 0 ? SkirmishSlotType::Human : SkirmishSlotType::Computer;
+        settings.slots[(size_t)i].civilization = (uint8_t)(1 + (i * 3) % 8);
+        settings.slots[(size_t)i].team = 0;
+    }
+    Game g(a);
+    if (!g.initSkirmish(settings, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    for (int i = 1; i < players; ++i) {
+        const std::string path =
+            (std::filesystem::path(argv[2]).parent_path() / "AI" / "Computer Expanded.per").string();
+        if (!g.loadAiScript(i + 1, path, skirmishAiDefines(settings, i), &err)) {
+            fprintf(stderr, "AI: %s\n", err.c_str());
+            return 1;
+        }
+    }
+    const float seconds = (float)atof(argv[6]);
+    InputState in;
+    float next = 60.0f;
+    UpdateStats total;
+    int steps = 0;
+    const float step = getenv("SWGB_SIM_DT") ? (float)atof(getenv("SWGB_SIM_DT")) : 0.1f;
+    for (float t = 0; t < seconds; t += step) {
+        g.update(step, in);
+        const UpdateStats &u = g.updateStats();
+        steps++;
+        total.inputUs += u.inputUs; total.triggersUs += u.triggersUs; total.aiUs += u.aiUs;
+        total.worldUs += u.worldUs; total.movementUs += u.movementUs; total.finalUs += u.finalUs;
+        total.worldProductionUs += u.worldProductionUs; total.worldConstructionUs += u.worldConstructionUs;
+        total.worldShieldsUs += u.worldShieldsUs; total.worldOccupancyUs += u.worldOccupancyUs;
+        total.worldWorkersUs += u.worldWorkersUs; total.worldMaintenanceUs += u.worldMaintenanceUs;
+        total.worldLivestockUs += u.worldLivestockUs; total.worldGatheringUs += u.worldGatheringUs;
+        total.finalVisibilityUs += u.finalVisibilityUs; total.finalVictoryUs += u.finalVictoryUs;
+        total.finalProjectilesUs += u.finalProjectilesUs; total.finalGarrisonUs += u.finalGarrisonUs;
+        if (u.aiUs > (getenv("SWGB_SPIKE_US") ? (uint64_t)atoll(getenv("SWGB_SPIKE_US")) : 20000))
+            printf("ai spike t=%.1f ai %llu rules %llu economy %llu defense %llu strategy %llu military %llu scouting %llu player %d\n",
+                   t, (unsigned long long)u.aiUs, (unsigned long long)u.aiRulesUs,
+                   (unsigned long long)u.aiEconomyUs, (unsigned long long)u.aiDefenseUs,
+                   (unsigned long long)u.aiStrategyUs, (unsigned long long)u.aiMilitaryUs,
+                   (unsigned long long)u.aiScoutingUs, u.aiMaxPlayer);
+        if (t + 0.1f >= next || t + 0.1f >= seconds) {
+            next += 60.0f;
+            for (int p = 2; p <= players; ++p)
+                printf("t=%4.0f ai %d: objects %d workers %d free %zu gatherers %zu/%zu/%zu/%zu "
+                       "res %.0f/%.0f/%.0f/%.0f\n",
+                       t + 0.1f, p, g.unitCountForTesting(p, -1),
+                       g.unitCountForTesting(p, 83) + g.unitCountForTesting(p, 293),
+                       g.aiFreeWorkerCountForTesting(p), g.aiGathererCountForTesting(p, 0),
+                       g.aiGathererCountForTesting(p, 1), g.aiGathererCountForTesting(p, 2),
+                       g.aiGathererCountForTesting(p, 3), g.resource(p, 0), g.resource(p, 1),
+                       g.resource(p, 2), g.resource(p, 3));
+            for (int p = 2; p <= players; ++p)
+                printf("        %s\n", g.workerStatesForTesting(p).c_str());
+        }
+        if (t + 0.1f >= seconds) {
+            std::map<int, int> ids;
+            for (int id = 0; id < 2000; ++id) {
+                const int n = g.unitCountForTesting(2, id);
+                if (n) ids[id] = n;
+            }
+            for (const auto &e : ids) printf("  p2 unit %d x%d\n", e.first, e.second);
+        }
+        if (t + step >= seconds && steps) {
+            auto avg = [&](uint64_t v) { return (double)v / steps; };
+            printf("avg us/step: input %.0f triggers %.0f ai %.0f world %.0f movement %.0f final %.0f\n",
+                   avg(total.inputUs), avg(total.triggersUs), avg(total.aiUs), avg(total.worldUs),
+                   avg(total.movementUs), avg(total.finalUs));
+            printf("  world: production %.0f construction %.0f shields %.0f occupancy %.0f workers %.0f "
+                   "maintenance %.0f livestock %.0f gathering %.0f\n",
+                   avg(total.worldProductionUs), avg(total.worldConstructionUs), avg(total.worldShieldsUs),
+                   avg(total.worldOccupancyUs), avg(total.worldWorkersUs), avg(total.worldMaintenanceUs),
+                   avg(total.worldLivestockUs), avg(total.worldGatheringUs));
+            printf("  final: visibility %.0f victory %.0f projectiles %.0f garrison %.0f\n",
+                   avg(total.finalVisibilityUs), avg(total.finalVictoryUs), avg(total.finalProjectilesUs),
+                   avg(total.finalGarrisonUs));
+        }
+        if (g.victoryStateForTesting() >= 0) {
+            printf("match ended at %.0f: %d\n", t, g.victoryStateForTesting());
+            break;
+        }
+    }
+    return 0;
+}
+
+// iframe <DataDir> <slp> <frame> <palette> <out.png>: one interface frame.
+static int cmdInterfaceFrame(int argc, char **argv) {
+    if (argc < 7) return 1;
+    SoftRenderer r;
+    Assets a(&r);
+    std::string err;
+    if (!a.init(argv[2], &err)) return 1;
+    const SpriteFrame *f = a.interfaceFrame(atoi(argv[3]), (size_t)atoi(argv[4]), atoi(argv[5]));
+    if (!f) {
+        fprintf(stderr, "no frame\n");
+        return 1;
+    }
+    r.beginFrame(f->w, f->h, 1.0f, 255, 0, 255);
+    r.draw(f->tex, Quad{0, 0, (float)f->w, (float)f->h, f->u, f->v, f->u + f->w, f->v + f->h});
+    r.endFrame();
+    r.savePng(argv[6]);
+    printf("%dx%d\n", f->w, f->h);
+    return 0;
+}
+
+// techtree <DataDir> <civ>: the Technology Tree layout.
+static int cmdTechTree(int argc, char **argv) {
+    if (argc < 4) return 1;
+    SoftRenderer r;
+    Assets a(&r);
+    std::string err;
+    if (!a.init(argv[2], &err)) return 1;
+    Game g(a);
+    g.init(1, 64, &err);
+    const TechTreeData data = g.techTreeData(atoi(argv[3]));
+    printf("civ %d columns %d rows %d/%d/%d/%d nodes %zu bonus '%s'\n", data.civilization,
+           data.columns, data.rows[0], data.rows[1], data.rows[2], data.rows[3], data.nodes.size(),
+           data.bonus.c_str());
+    for (const TechTreeNode &n : data.nodes)
+        printf("  %s %4d col %2d w %d age %d row %d st %d icon %d/%d parent %d '%s'\n",
+               n.type == 1 ? "B" : n.type == 3 ? "U" : "T", n.id, n.column, n.width, n.age, n.row,
+               n.status, n.iconSlp, n.iconFrame, n.parent, n.name.c_str());
+    return 0;
+}
+
+// render-techtree <DataDir> <civ> <out.png> [moves right]: the Technology
+// Tree screen.
+static int cmdRenderTechTree(int argc, char **argv) {
+    if (argc < 5) return 1;
+    SoftRenderer r;
+    Assets a(&r);
+    std::string err;
+    if (!a.init(argv[2], &err)) return 1;
+    a.setBuildsPerFrame(100000);
+    Game g(a);
+    g.init(1, 64, &err);
+    Frontend frontend;
+    frontend.setStringLookup([&](int id, const std::string &fallback) {
+        const std::string &value = a.localizedString(id);
+        return value.empty() ? fallback : value;
+    });
+    frontend.setTechTree(g.techTreeData(atoi(argv[3])));
+    frontend.setTechTreeArt([&](int slp, int frame) {
+        return frame < 0 ? nullptr : a.interfaceFrame(slp, (size_t)frame, 50500);
+    });
+    frontend.showScreenForTesting(FrontendScreen::TechTree, 0);
+    InputState in;
+    in.screenW = 960;
+    in.screenH = 544;
+    for (int i = 0; i < (argc > 5 ? atoi(argv[5]) : 0); ++i) {
+        in.menuRight = true;
+        frontend.update(in, -1);
+    }
+    in.menuRight = false;
+    frontend.update(in, -1);
+    frontend.render(r, 960, 544);
+    r.savePng(argv[4]);
     return 0;
 }
 
@@ -2291,7 +2506,9 @@ static int cmdTestCombat(const char *dataDir, const char *out) {
         }
     }
     if (!sawProjectile) {
-        fprintf(stderr, "error: combat sandbox rendered no projectile\n");
+        fprintf(stderr, "error: combat sandbox rendered no projectile (launched %zu landed %zu orders %zu)\n",
+                game.combatStats().projectilesLaunched, game.combatStats().attacksLanded,
+                game.combatStats().activeOrders);
         return 1;
     }
 
@@ -4127,16 +4344,37 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
             victim, 1, attacker);
         const std::string attackMessage =
             g.statusMessageForTesting();
-        const bool originalMessage =
+        bool originalMessage =
             attackMessage ==
-                "YOUR ARMIES ARE UNDER ATTACK BY "
-                "Rebel Alliance" &&
+                "--Warning: Your armies are being attacked by "
+                "Rebel Alliance!!!--" &&
             g.statusMessageIsAttackAlertForTesting();
         const size_t laterAlerts =
             std::count(
                 interfaceSounds.begin(),
                 interfaceSounds.end(),
                 50315);
+        // Buildings warn about the base (37160); gaia attackers are wild
+        // beasts (37165).
+        {
+            const uint32_t building =
+                g.spawnObjectForTesting(1, 70, 1, 60.0f, 60.0f);
+            g.update(10.1f, {});
+            g.damageObjectForTesting(building, 1, attacker);
+            originalMessage = originalMessage &&
+                g.statusMessageForTesting() ==
+                    "--Warning: Your base is being attacked by Rebel Alliance!!!--";
+            const uint32_t beast =
+                g.spawnObjectForTesting(0, 126, 0, 70.0f, 72.0f);
+            g.update(10.1f, {});
+            g.damageObjectForTesting(victim, 1, beast);
+            originalMessage = originalMessage &&
+                g.statusMessageForTesting() ==
+                    "--Warning: You are being attacked by wild beasts!!!--";
+            if (!originalMessage)
+                fprintf(stderr, "attack alert message: %s\n",
+                        g.statusMessageForTesting().c_str());
+        }
         report(
             "under-attack-alert",
             firstAlerts == 1 &&
@@ -6858,8 +7096,10 @@ static int cmdTestFixes(const char *dataDir, const char *outPrefix) {
             1, 3, 3);
         surrender.setDiplomacyForTesting(
             3, 1, 3);
+        // A Spaceport: counts for conquest (the Troop Center is exempt,
+        // 0x5cea70) but trains no military.
         surrender.spawnObjectForTesting(
-            3, 12, 3, 55.0f, 55.0f);
+            3, 84, 3, 55.0f, 55.0f);
         const bool surrenderLoaded =
             surrender.loadAiSourceForTesting(
                 3, "surrender.per",
@@ -7602,6 +7842,112 @@ static int cmdTestSkirmish(const char *dataDir) {
         compact.terrainAtForTesting(48, 20) == 22 &&
         compact.terrainAtForTesting(42, 20) == 2 &&
         compact.terrainAtForTesting(53, 20) == 2;
+    {
+        // The original random map scripts (rms.cpp): every map type
+        // generates, each player gets a Command Center and three workers,
+        // and the match runs.
+        SkirmishSettings original = settings;
+        original.mapType = 9;
+        original.mapSizeIndex = 0;
+        original.seed = 1234;
+        std::string detail;
+        bool ok = true;
+        for (int mapType : {9, 11, 20, 21, 25, 33, 38, 41, 59, 61}) {
+            original.mapType = mapType;
+            Game game(assets);
+            const auto t0 = std::chrono::steady_clock::now();
+            const bool init = game.initSkirmish(original, &err);
+            const double ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - t0).count();
+            const int centers = game.unitCountForTesting(1, 109) + game.unitCountForTesting(2, 109);
+            const int workers = game.unitCountForTesting(1, 83) + game.unitCountForTesting(1, 293);
+            if (!init || centers != 2 || workers != 3) {
+                ok = false;
+                detail += " FAIL" + std::to_string(mapType) + "(" + err + " cc=" +
+                          std::to_string(centers) + " w=" + std::to_string(workers) + ")";
+            } else {
+                detail += " " + std::to_string(mapType) + ":" +
+                          std::to_string(game.activeObjectCount()) + "/" +
+                          std::to_string((int)ms) + "ms";
+            }
+        }
+        original.mapType = 9;
+        Game game(assets);
+        game.initSkirmish(original, &err);
+        for (int i = 0; i < 300; ++i) game.update(0.1f, InputState{});
+        const bool runs = game.victoryStateForTesting() == -1 && game.invariantsForTesting();
+        report("original-random-maps", ok && runs, detail);
+
+        // Terminate the Commander: Commanders, the extra workers and the
+        // TtC stockpile; losing the Commander loses the game.
+        SkirmishSettings ttc = original;
+        ttc.gameType = kGameTerminateCommander;
+        Game regicide(assets);
+        const bool ttcInit = regicide.initSkirmish(ttc, &err);
+        const int commanders = regicide.unitCountForTesting(1, 434) +
+                               regicide.unitCountForTesting(2, 434);
+        const int ttcWorkers = regicide.unitCountForTesting(2, 83) +
+                               regicide.unitCountForTesting(2, 293);
+        const bool ttcStock = regicide.resource(1, 0) == 500 && regicide.resource(1, 3) == 0;
+        regicide.damageObjectForTesting(regicide.firstObjectForTesting(2, 434), 100000);
+        for (int i = 0; i < 40; ++i) regicide.update(0.1f, InputState{});
+        const bool won = regicide.victoryStateForTesting() == 1;
+        SkirmishSettings dm = original;
+        dm.gameType = kGameDeathMatch;
+        Game deathMatch(assets);
+        deathMatch.initSkirmish(dm, &err);
+        const bool dmStock = deathMatch.resource(1, 0) == 20000 && deathMatch.resource(1, 2) == 5000;
+        // Commander of the Base: a unit at the Base captures it and its
+        // countdown runs.
+        SkirmishSettings cotb = original;
+        cotb.gameType = kGameCommanderOfTheBase;
+        Game base(assets);
+        const bool cotbInit = base.initSkirmish(cotb, &err);
+        const uint32_t baseId = base.firstObjectForTesting(0, 826);
+        const float centre = (base.mapSizeForTesting() + 1) * 0.5f;
+        base.spawnObjectForTesting(base.civilizationForPlayerForTesting(1), 83, 1, centre + 3.0f,
+                                   centre);
+        for (int i = 0; i < 30; ++i) base.update(0.1f, InputState{});
+        const bool captured = base.objectPlayer(baseId) == 1 &&
+                              base.victoryCountdownPlayerForTesting() == 1 &&
+                              base.victoryCountdownForTesting() < 2750.0f;
+        // Monument Race: everyone allied, no walls, no instant victory.
+        SkirmishSettings race = original;
+        race.gameType = kGameMonumentRace;
+        Game monumentRace(assets);
+        const bool raceInit = monumentRace.initSkirmish(race, &err);
+        for (int i = 0; i < 50; ++i) monumentRace.update(0.1f, InputState{});
+        const bool raceOk = raceInit && monumentRace.victoryStateForTesting() == -1;
+        // Defend the Monument: the defender's Monument, a second Command
+        // Center, the attackers' Fortress; losing the Monument loses.
+        SkirmishSettings defend = original;
+        defend.gameType = kGameDefendTheMonument;
+        Game defence(assets);
+        const bool defendInit = defence.initSkirmish(defend, &err);
+        const uint32_t monument = defence.firstObjectForTesting(1, 276);
+        // (Tech Level 4 upgrades them: Command Center 71/141/142, Fortress 933.)
+        int defenderCenters = 0;
+        for (int id : {109, 71, 141, 142}) defenderCenters += defence.unitCountForTesting(1, id);
+        const int fortresses =
+            defence.unitCountForTesting(2, 82) + defence.unitCountForTesting(2, 933);
+        const int walls = defence.unitCountForTesting(1, 117);
+        defence.damageObjectForTesting(monument, 1000000);
+        for (int i = 0; i < 5; ++i) defence.update(0.1f, InputState{});
+        const bool defenceLost = defence.victoryStateForTesting() == 0;
+        report("special-game-types",
+               cotbInit && baseId && captured && raceOk && defendInit && monument &&
+                   defenderCenters == 1 && fortresses == 1 && walls > 20 && defenceLost,
+               "base=" + std::to_string(baseId) + " captured=" + std::to_string(captured) +
+                   " race=" + std::to_string(raceOk) + " monument=" + std::to_string(monument) +
+                   " cc=" + std::to_string(defenderCenters) + " fort=" + std::to_string(fortresses) +
+                   " walls=" + std::to_string(walls) + " lost=" + std::to_string(defenceLost) +
+                   " " + err);
+        report("original-game-types", ttcInit && commanders == 2 && ttcWorkers == 10 && ttcStock &&
+                                           won && dmStock,
+               "commanders=" + std::to_string(commanders) + " workers=" +
+                   std::to_string(ttcWorkers) + " stock=" + std::to_string(ttcStock) +
+                   " won=" + std::to_string(won) + " dm=" + std::to_string(dmStock));
+    }
     report(
         "compact-map-selectable",
         compactWater,
@@ -7664,8 +8010,8 @@ static int cmdTestSkirmish(const char *dataDir) {
     frontend.update(input, -1);
     input = {};
     input.menuDown = true;
-    // Restart sits after Diplomacy and Chat.
-    for (int row = 0; row < 6; ++row)
+    // Restart sits after Diplomacy, Chat and Technology Tree.
+    for (int row = 0; row < 7; ++row)
         frontend.update(input, -1);
     input = {};
     input.menuActivate = true;
@@ -7673,7 +8019,14 @@ static int cmdTestSkirmish(const char *dataDir) {
     const FrontendAction restart =
         frontend.update(input, -1);
     frontend.loadingFinished(true);
+    // Game over opens the end-of-game Achievements screen: Play Again is
+    // the second button, Main Menu the first.
     frontend.update({}, 1);
+    const bool achievementsShown =
+        frontend.screen() == FrontendScreen::Achievements;
+    input = {};
+    input.menuDown = true;
+    frontend.update(input, 1);
     input = {};
     input.menuActivate = true;
     const FrontendAction outcomeRestart =
@@ -7681,13 +8034,11 @@ static int cmdTestSkirmish(const char *dataDir) {
     frontend.loadingFinished(true);
     frontend.update({}, 0);
     input = {};
-    input.menuDown = true;
-    frontend.update(input, 0);
-    input = {};
     input.menuActivate = true;
     const FrontendAction outcomeMenu =
         frontend.update(input, 0);
     const bool navigation =
+        achievementsShown &&
         start == FrontendAction::StartSkirmish &&
         restart == FrontendAction::RestartMatch &&
         outcomeRestart ==
@@ -9605,6 +9956,8 @@ static int cmdTestMajorMechanics(
                 converter, stealthUnit);
         game.setDiplomacyForTesting(
             1, 3, 3);
+        game.setDiplomacyForTesting(
+            3, 1, 3);
         const uint32_t sharedDetector =
             game.spawnDetectorForTesting(
                 3, 40.5f, 40.0f);
@@ -9617,8 +9970,10 @@ static int cmdTestMajorMechanics(
         game.setDiplomacyForTesting(
             3, 1, 0);
         game.updateVisibilityForTesting();
+        // Detection is shared with every player the detector's owner is
+        // allied to (allyMask, world update ~0x61ef09); no Holonet needed.
         const bool alliedDetectorHidden =
-            !game.objectDetectedForTesting(
+            game.objectDetectedForTesting(
                 1, stealthUnit);
         const bool holonetResearched =
             game.researchTechnologyForTesting(
@@ -9633,6 +9988,8 @@ static int cmdTestMajorMechanics(
         game.stopUnitForTesting(converter);
         game.setDiplomacyForTesting(
             1, 3, 3);
+        game.setDiplomacyForTesting(
+            3, 1, 3);
         const uint32_t detector =
             game.spawnDetectorForTesting(
                 1, 40.5f, 40.0f);
@@ -10916,7 +11273,9 @@ static int cmdTestCampaign(
     const bool epilogueFirst = frontend.screen() == FrontendScreen::CampaignEpilogue;
     frontend.update({}, 1);
     report("campaign-victory-closing-scene", epilogueFirst &&
-                                                 frontend.screen() == FrontendScreen::Outcome);
+                                                 frontend.screen() == FrontendScreen::Achievements);
+    // Achievements' "Scenario Menu" returns to the mission list with the
+    // next (now unlocked) mission selected.
     input = {};
     input.menuActivate = true;
     const FrontendAction continuation =
@@ -10926,7 +11285,7 @@ static int cmdTestCampaign(
         continuation ==
                 FrontendAction::ReturnToCampaignBrowser &&
             frontend.screen() ==
-                FrontendScreen::CampaignBriefing &&
+                FrontendScreen::CampaignMissions &&
             frontend.selectedMission() == 1);
     frontend.render(renderer, 960, 544);
     report(
@@ -12511,6 +12870,112 @@ static int cmdRenderCampaignMissions(int argc, char **argv) {
 }
 
 // render-achievements <Data> <Campaign dir> <archive substring> <entry> <seconds> <out-prefix>
+// rms-map <DataDir> <mapType> <sizeIndex> <players> <seed> <out.png>: run the
+// original random map script and draw terrain (minimap colours), elevation
+// shading and objects (gaia black, players coloured).
+static int cmdRmsMap(int argc, char **argv) {
+    if (argc < 8) {
+        fprintf(stderr, "usage: rms-map <DataDir> <mapType> <sizeIndex> <players> <seed> <out.png>\n");
+        return 1;
+    }
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    std::string err;
+    if (!assets.init(argv[2], &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    const int mapType = atoi(argv[3]);
+    const int sizeIndex = atoi(argv[4]);
+    const int players = std::max(1, std::min(8, atoi(argv[5])));
+    RmsSettings settings;
+    settings.width = settings.height = rmsMapWidth(mapType, sizeIndex);
+    settings.mapSizeIndex = sizeIndex;
+    settings.seed = atoi(argv[6]);
+    for (int p = 0; p < players; ++p) {
+        RmsPlayer player;
+        player.civilization = 1 + p % 8;
+        player.team = 0;
+        const auto &civRes = assets.dat().civs[(size_t)player.civilization].resources;
+        player.startingWorkers = civRes.size() > 84 ? civRes[84] : 3.0f;
+        if (civRes.size() > 94)
+            printf("civ %d: workers %.0f attrs 91-94 %.0f %.0f %.0f %.0f, res0-3 %.0f %.0f %.0f %.0f\n",
+                   player.civilization, civRes[84], civRes[91], civRes[92], civRes[93], civRes[94],
+                   civRes[0], civRes[1], civRes[2], civRes[3]);
+        settings.players.push_back(player);
+    }
+    const int drsId = rmsScriptForMapType(mapType);
+    std::string script;
+    if (!drsId || !assets.readGamedataText(drsId, script)) {
+        fprintf(stderr, "no script for map type %d\n", mapType);
+        return 1;
+    }
+    RmsLoader loader = [&](int id, const std::string &, std::string &text) {
+        return id >= 0 && assets.readGamedataText(id, text);
+    };
+    RmsResult result;
+    const auto t0 = std::chrono::steady_clock::now();
+    if (!generateRandomMap(assets.dat(), settings, script, loader, result)) {
+        fprintf(stderr, "generation failed: %s\n", result.error.c_str());
+        return 1;
+    }
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0).count();
+    const int w = result.width, h = result.height, scale = 3;
+    renderer.beginFrame(w * scale, h * scale, 1.0f, 0, 0, 0);
+    const auto &terrains = assets.dat().terrainBlock.terrains;
+    const Palette &palette = assets.palette();
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const int t = result.terrain[(size_t)y * w + x];
+            const int e = result.elevation[(size_t)y * w + x];
+            uint8_t c = (size_t)t < terrains.size() ? terrains[(size_t)t].colors[0] : 0;
+            const Rgba rgb = palette.colors[c];
+            const int shade = 80 + e * 22;
+            renderer.fillRect((float)x * scale, (float)y * scale, (float)scale, (float)scale,
+                              (uint8_t)std::min(255, rgb.r * shade / 160),
+                              (uint8_t)std::min(255, rgb.g * shade / 160),
+                              (uint8_t)std::min(255, rgb.b * shade / 160), 255);
+        }
+    static const uint8_t colours[9][3] = {{20, 20, 20}, {40, 80, 255}, {255, 40, 40},
+                                          {40, 220, 40}, {255, 255, 0}, {0, 255, 255},
+                                          {255, 0, 255}, {160, 160, 160}, {255, 140, 0}};
+    std::map<int, int> counts;
+    for (const RmsObject &object : result.objects) {
+        counts[object.unitId]++;
+        const uint8_t *c = colours[std::max(0, std::min(8, object.player))];
+        const bool tree = object.player == 0 && (object.unitId == 348 || object.unitId == 349 ||
+                                                 object.unitId == 350 || object.unitId == 351 ||
+                                                 object.unitId == 411 || object.unitId == 413 ||
+                                                 object.unitId == 414);
+        const bool cliff = object.unitId >= 264 && object.unitId <= 272;
+        if (tree)
+            renderer.fillRect(object.x * scale - 1, object.y * scale - 1, 2, 2, 0, 70, 0, 255);
+        else if (cliff)
+            renderer.fillRect(object.x * scale - 2, object.y * scale - 2, 4, 4, 120, 60, 20, 255);
+        else
+            renderer.fillRect(object.x * scale - 2, object.y * scale - 2, 4, 4, c[0], c[1], c[2], 255);
+    }
+    renderer.endFrame();
+    renderer.savePng(argv[7]);
+    printf("map type %d (%s) %dx%d seed %d: %zu objects, %.1f ms\n", mapType, rmsMapName(mapType),
+           w, h, settings.seed, result.objects.size(), ms);
+    for (int p = 1; p <= players; ++p)
+        printf("  player %d start %.1f,%.1f\n", p, result.starts[(size_t)p][0],
+               result.starts[(size_t)p][1]);
+    for (const auto &entry : counts)
+        if (entry.second >= 1)
+            printf("  unit %d x%d\n", entry.first, entry.second);
+    std::map<int, int> tiles;
+    for (uint8_t t : result.terrain) tiles[t]++;
+    for (const auto &entry : tiles)
+        printf("  terrain %d (%s, colour %d) x%d\n", entry.first,
+               (size_t)entry.first < terrains.size() ? terrains[(size_t)entry.first].name.c_str() : "?",
+               (size_t)entry.first < terrains.size() ? terrains[(size_t)entry.first].colors[0] : 0,
+               entry.second);
+    return 0;
+}
+
 // Plays a campaign mission headless for the given time, then renders every
 // tab of the Achievements screen (<out-prefix>_<tab>.png).
 static int cmdRenderAchievements(int argc, char **argv) {
@@ -12831,6 +13296,12 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "render-campaign-missions")) return cmdRenderCampaignMissions(argc, argv);
     if (!strcmp(cmd, "audit-triggers")) return cmdAuditTriggers(argc, argv);
     if (!strcmp(cmd, "render-achievements")) return cmdRenderAchievements(argc, argv);
+    if (!strcmp(cmd, "rms-map")) return cmdRmsMap(argc, argv);
+    if (!strcmp(cmd, "render-rms")) return cmdRenderRms(argc, argv);
+    if (!strcmp(cmd, "iframe")) return cmdInterfaceFrame(argc, argv);
+    if (!strcmp(cmd, "techtree")) return cmdTechTree(argc, argv);
+    if (!strcmp(cmd, "render-techtree")) return cmdRenderTechTree(argc, argv);
+    if (!strcmp(cmd, "simulate-rms")) return cmdSimulateRms(argc, argv);
     if (!strcmp(cmd, "render-campaign-scene")) return cmdRenderCampaignScene(argc, argv);
 #ifndef SWGB_BASE_BUILD
     if (!strcmp(cmd, "test-sound-select")) {

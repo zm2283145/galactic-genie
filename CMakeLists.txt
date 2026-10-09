@@ -31,8 +31,10 @@ set(SWGB_CORE_SOURCES
     src/engine/campaign_scene.cpp
     src/engine/game.cpp
     src/engine/game_save.cpp
+    src/engine/game_techtree.cpp
     src/engine/menu_framework.cpp
     src/engine/pathfinding.cpp
+    src/engine/rms.cpp
     src/engine/settings.cpp
     src/engine/skirmish.cpp
     src/engine/startup.cpp
@@ -75,7 +77,14 @@ if(VITA)
         ${SWGB_VITA_OPT_FLAG_LIST} -ffunction-sections -fdata-sections
         -Wall -Wno-psabi)
     # -Wl,-q keeps relocations; vita-elf-create needs them for a valid velf.
-    target_link_options(swgb PRIVATE -Wl,-q,--gc-sections)
+    # __sce_headroom (read by the vitasdk linker script) leaves room after the
+    # text segment for the SCE module info vita-elf-create appends there;
+    # without it the build fails whenever the text happens to end within
+    # ~3.5 KB of the 64 KB-aligned data segment.
+    target_link_options(swgb PRIVATE -Wl,-q,--gc-sections
+        -Wl,--defsym,__sce_headroom=0x4000)
+    # The system on-screen keyboard for typed chat.
+    target_compile_definitions(swgb PRIVATE SWGB_ENABLE_IME=1)
     target_link_libraries(swgb PRIVATE
         vitaGL vitashark ${SWGB_SHACCCG_EXT_LIBS} mathneon z
         SceGxm_stub SceDisplay_stub SceCtrl_stub SceTouch_stub SceHid_stub

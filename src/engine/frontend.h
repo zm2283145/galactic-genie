@@ -46,6 +46,8 @@ enum class FrontendScreen : uint8_t {
     // Chat: send a numbered taunt to all, allies or one player (the
     // original's Chat dialog; computer players react to some taunts).
     Chat,
+    // The Technology Tree (TribeTechHelpScreen, screen info 50007).
+    TechTree,
 };
 
 struct DiplomacyResult {
@@ -76,6 +78,8 @@ enum class FrontendAction : uint8_t {
     ApplyDiplomacy,  // OK: apply diplomacyResult()
     OpenChat,        // fill setChatPlayers / setTaunts first
     SendChat,        // chatRecipient() / chatTaunt()
+    TypeChat,        // open the on-screen keyboard; send to chatRecipient()
+    OpenTechTree,    // setTechTree(game.techTreeData(techTreeCivilization())) and art
 };
 
 using FrontendStringLookup =
@@ -85,8 +89,14 @@ using FrontendSoundPlayer =
 
 class Frontend {
 public:
+    // dt (seconds) times the 5 s "You are victorious!" pause before the
+    // end-of-game screens; 0 skips it (tests).
     FrontendAction update(
-        const InputState &input, int matchOutcome);
+        const InputState &input, int matchOutcome, float dt = 0.0f);
+    // The game screen's game-over label (9004/9005) while the end-of-game
+    // pause runs; empty otherwise.
+    std::string gameOverLabel() const;
+    void renderGameOverOverlay(Renderer &renderer, int screenW, int screenH) const;
     void render(
         Renderer &renderer, int screenW,
         int screenH) const;
@@ -173,10 +183,23 @@ public:
                                   : chatPlayers_[chatRecipient_ - 2].first;
     }
     int chatTaunt() const {
-        return chatSelection_ < taunts_.size() ? taunts_[chatSelection_].first : 0;
+        // Row 0 is "type a message"; taunts follow.
+        return chatSelection_ >= 1 && chatSelection_ - 1 < taunts_.size()
+                   ? taunts_[chatSelection_ - 1].first
+                   : 0;
     }
     void renderChatOverlay(Renderer &renderer, int screenW, int screenH) const;
     void renderDiplomacyOverlay(Renderer &renderer, int screenW, int screenH) const;
+    // Technology Tree: the data and an art lookup (slp, frame) -> frame.
+    void setTechTree(TechTreeData data) {
+        techTree_ = std::move(data);
+        if (techTreeSelection_ >= techTree_.nodes.size()) techTreeSelection_ = 0;
+    }
+    void setTechTreeArt(std::function<const SpriteFrame *(int, int)> art) {
+        techTreeArt_ = std::move(art);
+    }
+    int techTreeCivilization() const { return techTreeCivilization_; }
+    void renderTechTree(Renderer &renderer, int screenW, int screenH) const;
     void showDiplomacyForTesting() { screen_ = FrontendScreen::Diplomacy; }
     void showAchievementsForTesting(size_t tab) {
         if (screen_ != FrontendScreen::Achievements) achievementsReturn_ = screen_;
@@ -376,7 +399,12 @@ private:
         float top, float rowHeight);
 
     FrontendScreen screen_ = FrontendScreen::Title;
-    SkirmishSettings settings_;
+    // The lobby starts on an original random map (Desert).
+    SkirmishSettings settings_ = [] {
+        SkirmishSettings defaults;
+        defaults.mapType = 9;
+        return defaults;
+    }();
     SkirmishPreview lobbyPreview_ =
         generateSkirmishPreview(settings_);
     size_t selection_ = 0;
@@ -434,9 +462,24 @@ private:
     AchievementsData achievements_;
     size_t achievementsTab_ = 0;
     FrontendScreen achievementsReturn_ = FrontendScreen::Outcome;
+    // 2 = end-of-game Achievements (0x4eb000 mode 2): "Scenario Menu" or
+    // "Main Menu" plus "Play Again"; 0 = opened from a menu (Back).
+    int achievementsMode_ = 0;
+    size_t achievementsButton_ = 0;
+    bool gameOverPending_ = false;
+    float gameOverSeconds_ = 0.0f;
+    bool trainingCampaign() const;
+    FrontendAction finishGameOver();
+    FrontendAction achievementsMainButton();
     std::array<const SpriteFrame *, 12> achievementTabFrames_{};
     std::array<const SpriteFrame *, 8> achievementBannerFrames_{};
     void renderAchievements(Renderer &renderer, int screenW, int screenH) const;
+    TechTreeData techTree_;
+    std::function<const SpriteFrame *(int, int)> techTreeArt_;
+    size_t techTreeSelection_ = 0;
+    float techTreeScroll_ = 0.0f;
+    int techTreeCivilization_ = -1;
+    FrontendAction updateTechTree(const InputState &input);
     DiplomacyData diplomacy_;
     std::vector<int> diplomacyStances_;
     // Pending tribute by row and dialog column (carbon, food, nova, ore).
