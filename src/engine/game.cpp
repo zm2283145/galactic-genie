@@ -125,6 +125,7 @@ constexpr int kStanceNameStrings[4] = {4133, 4134, 4122, 4135};
 constexpr int kStanceHelpStrings[4] = {4933, 4934, 4922, 4935};
 constexpr int kShieldWallTech = 484;
 constexpr int kSharedVisionResource = 50;
+constexpr int kSpyNetResource = 183; // Bothan SpyNet (tech 62)
 constexpr int kBuildingIconSlpBase = 53241;
 constexpr int kUnitIconSlpBase = 53251;
 constexpr int kTechnologyIconSlpBase = 53261;
@@ -428,8 +429,7 @@ void Game::resetMatchState() {
     baseWarned1000_ = baseWarned500_ = false;
     defenderPlayer_ = 0;
     defenderMonumentId_ = 0;
-    regenerationTime_.fill(0.0f);
-    heroRegenerationTime_ = 0.0f;
+    garrisonHealClock_ = 0.0f;
     players_ = {};
     resetCommodityPrices();
     chatLines_.clear();
@@ -2240,31 +2240,229 @@ void Game::setupSpecialGameType(const SkirmishSettings &settings,
 
 // Commander of the Base capture and countdown (artifact action 107, world
 // update 0x603290); Defend the Monument's monument loss.
+// Combat object update 0x55a760: a per-object accumulator (+0x1c0).
+// Heroes regain 1 HP per 2 s; Jedi/Sith Masters 1 HP per attribute 49
+// seconds (hero Masters feed the same accumulator twice); other organic
+// units 1 HP per attribute 96 seconds (Wookiee Self Regeneration).
+// Class 50 force points recharge by attribute 35 per second (handled with
+// conversion).
+bool Game::isJediMaster(const Object &object) const {
+    if (!object.unit) return false;
+    static constexpr int kBases[] = {115, 125, 134, 136, 89, 140, 643, 645};
+    static constexpr int kHeroes[] = {1077, 1085, 1082, 1084, 1080, 725, 728, 731,
+                                      747, 753, 761, 770, 778, 784, 806, 792};
+    const int base = object.unit->baseId >= 0 ? object.unit->baseId : object.unit->id;
+    for (int id : kBases)
+        if (base == id) return true;
+    for (int id : kHeroes)
+        if (object.unit->id == id) return true;
+    return false;
+}
+
 void Game::updateRegeneration(float dt) {
-    std::array<bool, 17> tick{};
-    bool any = false;
-    for (int player = 1; player < 17 && (size_t)player <= players_.size(); ++player) {
-        const float period = playerAttribute(player, 96);
-        if (period <= 0.0f) continue;
-        regenerationTime_[(size_t)player] += dt;
-        if (regenerationTime_[(size_t)player] >= period) {
-            regenerationTime_[(size_t)player] -= period;
-            tick[(size_t)player] = any = true;
-        }
-    }
-    heroRegenerationTime_ += dt;
-    const bool heroTick = heroRegenerationTime_ >= 2.0f;
-    if (heroTick) heroRegenerationTime_ -= 2.0f;
-    if (!any && !heroTick) return;
-    for (Object &object : prefetched(objects_)) {
+    for (size_t slot = 0, count = dynamicObjects().size(); slot < count; ++slot) {
+        Object &object = objects_[dynamicObjectIndices_[slot]];
         if (!object.active || !object.unit || object.player <= 0 || object.player >= 17 ||
-            object.hitPoints <= 0.0f || object.hitPoints >= object.maxHitPoints ||
             object.underConstruction)
             continue;
-        const bool regen = tick[(size_t)object.player] && (object.unit->trait & 0x20u);
-        const bool hero = heroTick && object.unit->heroMode != 0;
-        if (regen || hero)
-            object.hitPoints = std::min(object.maxHitPoints, object.hitPoints + 1.0f);
+        auto damaged = [&] {
+            return object.hitPoints >= 1.0f && object.hitPoints < object.maxHitPoints;
+        };
+        auto run = [&](float period) {
+            if (period <= 0.0f || !damaged()) return;
+            object.regenAccumulator += dt;
+            while (object.regenAccumulator >= period) {
+                object.regenAccumulator -= period;
+                object.hitPoints = std::min(object.maxHitPoints, object.hitPoints + 1.0f);
+            }
+        };
+        if (object.unit->heroMode != 0)
+            run(2.0f);
+        if (isJediMaster(object))
+            run(playerAttribute(object.player, 49));
+        else if (object.unit->trait & 0x20u)
+            run(playerAttribute(object.player, 96));
+    }
+}
+
+// --- Healing -----------------------------------------------------------------
+
+const dat::Task *Game::healTask(const Object &object) const {
+    return object.unit ? firstUnitTask(object.unit->id, 105) : nullptr;
+}
+
+bool Game::isHealer(const Object &object) const {
+    return object.active && healTask(object) != nullptr;
+}
+
+// vf+0x60 (0x54b9e0): workers (class 58) and class 14 count as organic when
+// their standing graphic belongs to the organic graphic sets (names ending
+// in 2, 6 or 8); everything else uses the organic trait bit (0x20).
+bool Game::isHealableObject(const Object &target) const {
+    if (!target.unit) return false;
+    if (target.unit->cls == 58 || target.unit->cls == 14) {
+        if (const dat::Graphic *g = assets_.dat().graphic(target.unit->standingGraphic[0]);
+            g && !g->name.empty()) {
+            const char last = g->name.back();
+            return last == '2' || last == '6' || last == '8';
+        }
+    }
+    return (target.unit->trait & 0x20u) != 0;
+}
+
+// vf+0x6c (0x54b8b0).
+bool Game::isHealTargetFor(const Object &target, int player) const {
+    return target.active && !target.hidden && target.garrisonedInId < 0 &&
+           target.hitPoints >= 0.5f && target.hitPoints < target.maxHitPoints &&
+           isHealableObject(target) &&
+           (target.player == player ||
+            (target.player > 0 && isFriendlyPlayer(target.player, player)));
+}
+
+// vf+0x104 (0x55e000): mechanical (trait 0x02) units that are not organic
+// are repaired for a price instead: maxHP * amount / trainTime HP, costing
+// half the unit cost per full repair. Returns the HP applied.
+float Game::healObject(Object &target, float amount, int payer) {
+    if (!target.unit || amount <= 0.0f) return 0.0f;
+    float applied = std::min(amount, target.maxHitPoints - target.hitPoints);
+    if ((target.unit->trait & 0x02u) && !isHealableObject(target)) {
+        applied = std::min(target.maxHitPoints - target.hitPoints,
+                           target.maxHitPoints * amount /
+                               std::max<float>(1.0f, (float)target.unit->trainTime));
+        if (payer > 0 && payer < 17) {
+            auto &bank = resources_[(size_t)payer];
+            const float fraction = applied / (2.0f * std::max(1.0f, target.maxHitPoints));
+            for (const dat::ResourceCost &cost : target.unit->costs) {
+                if (!cost.flag || cost.type < 0 || cost.amount <= 0) continue;
+                const auto it = bank.find(cost.type);
+                if ((it == bank.end() ? 0.0f : it->second) < cost.amount * fraction)
+                    return 0.0f;
+            }
+            for (const dat::ResourceCost &cost : target.unit->costs)
+                if (cost.flag && cost.type >= 0 && cost.amount > 0)
+                    bank[cost.type] -= cost.amount * fraction;
+        }
+    }
+    if (applied <= 0.0f) return 0.0f;
+    target.hitPoints = std::min(target.maxHitPoints, target.hitPoints + applied);
+    return applied;
+}
+
+bool Game::issueHealCommand(Object &medic, Object &target) {
+    if (!isHealer(medic) || &medic == &target || !isHealTargetFor(target, medic.player))
+        return false;
+    stopUnit(medic);
+    medic.healTargetId = target.spawnId;
+    return true;
+}
+
+// Building update 0x555130: once per whole game second each garrisoned unit
+// below its maximum gets heal(garrison heal rate) — unit attribute 108, so
+// Bacta Tanks (x4) applies through the tech effects.
+void Game::updateGarrisonHealing(float dt) {
+    garrisonHealClock_ += dt;
+    if (garrisonHealClock_ < 1.0f) return;
+    garrisonHealClock_ -= std::floor(garrisonHealClock_);
+    for (size_t slot = 0, count = dynamicObjects().size(); slot < count; ++slot) {
+        Object &unit = objects_[dynamicObjectIndices_[slot]];
+        if (!unit.active || unit.garrisonedInId < 0 || unit.hitPoints >= unit.maxHitPoints ||
+            unit.hitPoints <= 0.0f)
+            continue;
+        const Object *container = findObject((uint32_t)unit.garrisonedInId);
+        if (!container || !container->active || !container->unit ||
+            container->unit->type != dat::UT_Building || container->underConstruction)
+            continue;
+        const float rate =
+            modifiedUnitAttribute(*container, 108, container->unit->garrisonHealRate);
+        if (rate > 0.0f)
+            healObject(unit, rate, unit.player);
+    }
+}
+
+// Heal action 0x569e60 plus the class 54 idle search (0x5b43e0/0x5b4120).
+void Game::updateHealing(float dt) {
+    std::unordered_map<uint32_t, int> healers;
+    for (size_t slot = 0, count = dynamicObjects().size(); slot < count; ++slot) {
+        const Object &medic = objects_[dynamicObjectIndices_[slot]];
+        if (medic.active && medic.healTargetId) healers[medic.healTargetId]++;
+    }
+    for (size_t slot = 0, count = dynamicObjects().size(); slot < count; ++slot) {
+        Object &medic = objects_[dynamicObjectIndices_[slot]];
+        if (!medic.active || medic.hidden || !medic.unit || medic.garrisonedInId >= 0)
+            continue;
+        const dat::Task *task = medic.healTargetId || medic.state == State::Idle
+                                    ? healTask(medic) : nullptr;
+        if (!task) continue;
+        if (!medic.healTargetId) {
+            // Idle auto-heal: own then allied units nobody else is healing.
+            if (medic.state != State::Idle || medic.moveGoalActive || medic.attackTargetId ||
+                medic.frozen)
+                continue;
+            medic.healSearchTime -= dt;
+            if (medic.healSearchTime > 0.0f) continue;
+            medic.healSearchTime = 1.0f;
+            float radius = medic.player == 0 ? 2.0f
+                           : medic.player == localPlayer_ ? 5.0f
+                                                          : std::max(0.0f, medic.unit->lineOfSight);
+            Object *best = nullptr;
+            float bestScore = 0.0f;
+            for (int pass = 0; pass < 2 && !best; ++pass)
+                for (size_t other = 0; other < count; ++other) {
+                    Object &target = objects_[dynamicObjectIndices_[other]];
+                    if (&target == &medic || healers.count(target.spawnId) ||
+                        (pass == 0) != (target.player == medic.player) ||
+                        !isHealTargetFor(target, medic.player) ||
+                        !objectVisibleToPlayer(target, medic.player))
+                        continue;
+                    const float dist = std::hypot(target.x - medic.x, target.y - medic.y);
+                    if (dist > radius) continue;
+                    const float score = target.maxHitPoints - target.hitPoints - dist;
+                    if (!best || score > bestScore) {
+                        best = &target;
+                        bestScore = score;
+                    }
+                }
+            if (!best) continue;
+            medic.healTargetId = best->spawnId;
+            healers[best->spawnId]++;
+        }
+        Object *target = findObject(medic.healTargetId);
+        if (!target || !target->active || target->hitPoints < 0.5f ||
+            !isHealTargetFor(*target, medic.player)) {
+            medic.healTargetId = 0;
+            if (medic.state == State::Heal) {
+                medic.state = State::Idle;
+                medic.animTime = 0;
+            }
+            continue;
+        }
+        const float range = std::max(0.5f, playerAttribute(medic.player, 90) > 0.0f
+                                               ? playerAttribute(medic.player, 90) : 0.1f);
+        if (!withinInteractionRange(medic, *target, range)) {
+            if (medic.state == State::Heal) medic.state = State::Idle;
+            if (!medic.moveGoalActive && medic.path.empty())
+                approach(medic, *target, std::min(range, 0.35f));
+            continue;
+        }
+        if (medic.state != State::Heal) medic.animTime = 0;
+        medic.state = State::Heal;
+        medic.moveGoalActive = false;
+        medic.path.clear();
+        medic.pathIndex = 0;
+        medic.facing = std::atan2(target->y - medic.y, target->x - medic.x);
+        float amount = dt * modifiedUnitAttribute(medic, 13, medic.unit->workRate) * task->workValue1;
+        const auto n = healers.find(target->spawnId);
+        if (n != healers.end() && n->second > 1)
+            amount *= (n->second - 1) * 0.5f + 1.0f;
+        if (playerAttribute(medic.player, 89) > 0.0f)
+            amount *= playerAttribute(medic.player, 89);
+        healObject(*target, amount, target->player);
+        if (target->hitPoints >= target->maxHitPoints) {
+            medic.healTargetId = 0;
+            medic.state = State::Idle;
+            medic.animTime = 0;
+            medic.healSearchTime = 0.0f;
+        }
     }
 }
 
@@ -2982,17 +3180,11 @@ void Game::updateVisibility() {
                      [visionPlayerCounts[
                          (size_t)player]++] =
             player;
-        if (!hasSharedVision(player))
+        if (!hasVisionSharing(player))
             continue;
         for (int ally = 1; ally < 17;
              ++ally) {
-            if (ally == player ||
-                (size_t)ally > players_.size() ||
-                !players_[(size_t)ally - 1].active ||
-                !isFriendlyPlayer(
-                    player, ally) ||
-                !isFriendlyPlayer(
-                    ally, player))
+            if (!seesThroughPlayer(player, ally))
                 continue;
             visionPlayers[(size_t)player]
                          [visionPlayerCounts[
@@ -3111,21 +3303,13 @@ bool Game::tileExplored(
             (size_t)mapSize_ * mapSize_ &&
         ownTiles[tile])
         return true;
-    if (!hasSharedVision(player) ||
+    if (!hasVisionSharing(player) ||
         (size_t)player > players_.size() ||
         !players_[(size_t)player - 1].active)
         return false;
     for (int visionPlayer = 1;
          visionPlayer < 17; ++visionPlayer) {
-        if (visionPlayer == player ||
-            (size_t)visionPlayer >
-                players_.size() ||
-            !players_[(size_t)visionPlayer - 1]
-                 .active ||
-            !isFriendlyPlayer(
-                player, visionPlayer) ||
-            !isFriendlyPlayer(
-                visionPlayer, player))
+        if (!seesThroughPlayer(player, visionPlayer))
             continue;
         const std::vector<uint8_t> &tiles =
             exploredTiles_[(size_t)visionPlayer];
@@ -3156,21 +3340,13 @@ bool Game::tileVisible(
             (size_t)mapSize_ * mapSize_ &&
         ownTiles[tile])
         return true;
-    if (!hasSharedVision(player) ||
+    if (!hasVisionSharing(player) ||
         (size_t)player > players_.size() ||
         !players_[(size_t)player - 1].active)
         return false;
     for (int visionPlayer = 1;
          visionPlayer < 17; ++visionPlayer) {
-        if (visionPlayer == player ||
-            (size_t)visionPlayer >
-                players_.size() ||
-            !players_[(size_t)visionPlayer - 1]
-                 .active ||
-            !isFriendlyPlayer(
-                player, visionPlayer) ||
-            !isFriendlyPlayer(
-                visionPlayer, player))
+        if (!seesThroughPlayer(player, visionPlayer))
             continue;
         const std::vector<uint8_t> &tiles =
             visibleTiles_[(size_t)visionPlayer];
@@ -3196,6 +3372,8 @@ bool Game::objectCurrentlyVisibleToPlayer(
     if (isStealthed(object) &&
         !detectedByPlayer(object, player))
         return false;
+    if (seesThroughPlayer(player, object.player))
+        return true;
     const float halfX =
         object.unit
             ? std::max(
@@ -3289,6 +3467,24 @@ bool Game::isStealthed(
     return object.unit->cls == 64;
 }
 
+// Whether `player` sees through `other`'s line of sight: allied shared vision
+// (attribute 50, both sides allied) or Bothan SpyNet (attribute 183: every
+// other non-gaia player, enemies included; world vfunc 0x624330).
+bool Game::seesThroughPlayer(int player, int other) const {
+    if (player <= 0 || player >= 17 || other <= 0 || other >= 17 || other == player ||
+        (size_t)other > players_.size() || !players_[(size_t)other - 1].active)
+        return false;
+    if (playerAttribute(player, kSpyNetResource) != 0.0f)
+        return true;
+    return hasSharedVision(player) && isFriendlyPlayer(player, other) &&
+           isFriendlyPlayer(other, player);
+}
+
+bool Game::hasVisionSharing(int player) const {
+    return hasSharedVision(player) ||
+           (player > 0 && player < 17 && playerAttribute(player, kSpyNetResource) != 0.0f);
+}
+
 bool Game::hasSharedVision(int player) const {
     return player > 0 && player < 17 &&
            playerAttribute(
@@ -3331,7 +3527,9 @@ bool Game::detectedByPlayer(
         return true;
     static constexpr int kHalfWidth[11] = {10, 10, 10, 10, 9, 9, 8, 7, 6, 5, 3};
     const int tx = fastFloor(object.x), ty = fastFloor(object.y);
-    for (const Object &detector : prefetched(objects_)) {
+    // Detectors are never inert gaia scenery: the dynamic list holds them.
+    for (size_t slot = 0, count = dynamicObjects().size(); slot < count; ++slot) {
+        const Object &detector = objects_[dynamicObjectIndices_[slot]];
         if (!isDetector(detector) ||
             (detector.player != player &&
              !isFriendlyPlayer(detector.player, player)))
@@ -4691,6 +4889,30 @@ std::vector<AchievementsPlayer> Game::achievementsPlayers() const {
         row.timeline = scoreTimeline(player);
         rows.push_back(std::move(row));
     }
+    // Teams: groups of mutually allied players (FUN_00606470's team number);
+    // winners when the game is over.
+    int nextTeam = 1;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        if (rows[i].team) continue;
+        bool grouped = false;
+        for (size_t j = i + 1; j < rows.size(); ++j)
+            if (!rows[j].team && isFriendlyPlayer(rows[i].player, rows[j].player) &&
+                isFriendlyPlayer(rows[j].player, rows[i].player)) {
+                if (!grouped) {
+                    rows[i].team = nextTeam;
+                    grouped = true;
+                }
+                rows[j].team = nextTeam;
+            }
+        if (grouped) nextTeam = std::min(nextTeam + 1, 4);
+    }
+    if (victoryState_ >= 0)
+        for (AchievementsPlayer &row : rows) {
+            const bool localSide = row.player == localPlayer_ ||
+                                   (isFriendlyPlayer(row.player, localPlayer_) &&
+                                    isFriendlyPlayer(localPlayer_, row.player));
+            row.won = victoryState_ == 1 ? localSide : (!localSide && row.active);
+        }
     return rows;
 }
 
@@ -7447,6 +7669,29 @@ bool Game::handleSelectionPanelClick(float screenX, float screenY,
         screenX < commandsX + 58.0f &&
         screenY >= panelY + 18.0f &&
         screenY < panelY + 64.0f) {
+        if (oneClickGarrison_ && !garrisonCursorActive_) {
+            // One-Click Garrisoning: straight into the nearest own building
+            // the selection can enter.
+            Object *nearest = nullptr;
+            float best = std::numeric_limits<float>::max();
+            const Object *lead = selected.empty() ? nullptr : selected.front();
+            for (size_t slot = 0, count = dynamicObjects().size(); lead && slot < count; ++slot) {
+                Object &building = objects_[dynamicObjectIndices_[slot]];
+                if (building.player != localPlayer_ || !building.active ||
+                    building.underConstruction || effectiveGarrisonCapacity(building) <= 0 ||
+                    !canGarrison(*lead, building))
+                    continue;
+                const float d = std::hypot(building.x - lead->x, building.y - lead->y);
+                if (d < best) {
+                    best = d;
+                    nearest = &building;
+                }
+            }
+            if (nearest && issueGarrisonCommand(*nearest)) {
+                flashCommandTarget(*nearest);
+                return true;
+            }
+        }
         garrisonCursorActive_ =
             !garrisonCursorActive_;
         repairCursorActive_ = false;
@@ -8389,6 +8634,7 @@ void Game::stopUnit(Object &unit) {
     unit.gatherTargetId = 0;
     unit.dropOffTargetId = 0;
     unit.repairTargetId = 0;
+    unit.healTargetId = 0;
     unit.garrisonTargetId = 0;
     unit.attackTargetId = 0;
     unit.attackAutomatic = false;
@@ -9450,7 +9696,9 @@ bool Game::isPowered(const Object &building) const {
         return !building.underConstruction;
     if (!requiresPower(building))
         return !building.underConstruction;
-    for (const Object &source : prefetched(objects_)) {
+    // Power sources are buildings, so the dynamic list holds them all.
+    for (size_t slot = 0, count = dynamicObjects().size(); slot < count; ++slot) {
+        const Object &source = objects_[dynamicObjectIndices_[slot]];
         if (!source.active || source.hidden ||
             source.underConstruction ||
             source.player != building.player ||
@@ -11027,6 +11275,7 @@ bool Game::issueGarrisonOrder(
     unit.gatherTargetId = 0;
     unit.dropOffTargetId = 0;
     unit.repairTargetId = 0;
+    unit.healTargetId = 0;
     unit.attackTargetId = 0;
     unit.attackAutomatic = false;
     unit.attackGroundActive = false;
@@ -12455,6 +12704,24 @@ void Game::commandAtScreen(float screenX, float screenY, int screenW, int screen
         objectAtScreen(
             screenX, screenY, screenW,
             screenH);
+    // Medics heal a damaged own or allied organic unit (task action 105).
+    if (friendly && isHealTargetFor(*friendly, localPlayer_)) {
+        Object *acknowledgement = nullptr;
+        for (Object *object : selected)
+            if (object != friendly && issueHealCommand(*object, *friendly) && !acknowledgement)
+                acknowledgement = object;
+        if (acknowledgement) {
+            playUnitAcknowledgement(*acknowledgement, false);
+            flashCommandTarget(*friendly);
+            // Units that cannot heal follow the normal command below.
+            if (std::all_of(selected.begin(), selected.end(),
+                            [&](const Object *o) { return isHealer(*o); }))
+                return;
+            selected.erase(std::remove_if(selected.begin(), selected.end(),
+                                          [&](const Object *o) { return isHealer(*o); }),
+                           selected.end());
+        }
+    }
     if (friendly) {
         Object *depositor = nullptr;
         size_t assigned = 0;
@@ -13579,6 +13846,7 @@ bool Game::issueAttackGround(
     source.dropOffTargetId = 0;
     source.garrisonTargetId = 0;
     source.repairTargetId = 0;
+    source.healTargetId = 0;
     source.attackTargetId = 0;
     source.attackAutomatic = false;
     source.attackShotPending = false;
@@ -18017,7 +18285,9 @@ int Game::playerColorBase(int player) const {
         return pc.size() > 6 ? pc[6].playerColorBase : 128;
     const size_t playerIndex = (size_t)(player - 1);
     size_t colorIndex = playerIndex < players_.size() ? players_[playerIndex].color : playerIndex;
-    if (localPlayer_ > 0) {
+    // Friend or Enemy Colors (option 9534): you blue, allies yellow,
+    // enemies red.
+    if (localPlayer_ > 0 && friendOrFoeColors_) {
         if (player == localPlayer_) {
             colorIndex = 0; // blue
         } else {
@@ -18180,11 +18450,176 @@ bool Game::recallControlGroup(
     return true;
 }
 
+// Statistics panel pages (0x4fe9d0 scores, 0x4ff7b0 military, 0x4ff150
+// economy), chosen by the mini-map mode.
+std::vector<std::pair<std::string, std::array<uint8_t, 3>>> Game::statisticsLines() const {
+    std::vector<std::pair<std::string, std::array<uint8_t, 3>>> lines;
+    const auto formatted = [&](int id, const char *fallback, int value) {
+        std::string format = assets_.localizedString(id);
+        if (format.empty() || std::count(format.begin(), format.end(), '%') != 1) format = fallback;
+        char line[128];
+        snprintf(line, sizeof line, format.c_str(), value);
+        return std::string(line);
+    };
+    static constexpr std::array<uint8_t, 3> kWhite{223, 223, 223};
+    if (minimapMode_ == 0) {
+        // name: score/team average, sorted by team then score; player colours
+        // (COLORREFs 0xeba66e, 0x6464ff, ...).
+        static constexpr uint32_t kColours[8] = {0xeba66e, 0x6464ff, 0x00ff00, 0x00ffff,
+                                                 0xffff00, 0xe86cf1, 0xdfdfdf, 0x15b4ff};
+        struct Row {
+            int player, team, score;
+        };
+        std::vector<Row> rows;
+        for (int player = 1; player <= (int)players_.size() && player <= 8; ++player) {
+            if (!players_[(size_t)player - 1].active) continue;
+            int team = player;
+            for (int other = 1; other < player; ++other)
+                if (players_[(size_t)other - 1].active && isFriendlyPlayer(player, other) &&
+                    isFriendlyPlayer(other, player)) {
+                    team = other;
+                    break;
+                }
+            rows.push_back({player, team, playerScore(player)});
+        }
+        std::sort(rows.begin(), rows.end(), [](const Row &a, const Row &b) {
+            return a.team != b.team ? a.team < b.team : a.score > b.score;
+        });
+        for (const Row &row : rows) {
+            int sum = 0, count = 0;
+            for (const Row &other : rows)
+                if (other.team == row.team) {
+                    sum += other.score;
+                    count++;
+                }
+            const uint32_t colour = kColours[std::min<uint32_t>(players_[(size_t)row.player - 1].color, 7)];
+            lines.push_back({playerDisplayName(row.player) + ": " + std::to_string(row.score) + "/" +
+                                 std::to_string(count ? sum / count : 0),
+                             {(uint8_t)(colour & 0xff), (uint8_t)((colour >> 8) & 0xff),
+                              (uint8_t)((colour >> 16) & 0xff)}});
+        }
+        return lines;
+    }
+    if (localPlayer_ <= 0) return lines;
+    if (minimapMode_ == 1) {
+        std::array<int, 64> byClass{};
+        for (size_t slot = 0, count = dynamicObjects().size(); slot < count; ++slot) {
+            const Object &object = objects_[dynamicObjectIndices_[slot]];
+            if (object.active && object.player == localPlayer_ && object.unit &&
+                object.unit->type != dat::UT_Building && !object.underConstruction &&
+                object.unit->cls >= 0 && object.unit->cls < 64)
+                byClass[(size_t)object.unit->cls]++;
+        }
+        struct Group {
+            int id;
+            const char *fallback;
+            std::initializer_list<int> classes;
+        };
+        static const Group kGroups[] = {
+            {20515, "Turrets: %d", {9, 10}},
+            {20516, "Ships: %d", {11, 13, 15, 16, 17}},
+            {20517, "Heavy Weapons: %d", {32, 33, 34, 35, 36}},
+            {20518, "Submarines: %d", {37, 38, 39, 40}},
+            {20519, "Aircraft: %d", {43, 48, 59, 62, 63, 64}},
+            {20520, "Mechs: %d", {47, 53}},
+            {20521, "Troopers: %d", {49, 52, 55, 56}},
+            {20528, "Bounty Hunters: %d", {44}},
+            {20522, "Jedi/Sith: %d", {50, 51}},
+            {20524, "Medics: %d", {54}},
+            {20525, "Workers: %d", {14, 45, 58}},
+            {20526, "Mobile Shields: %d", {57}},
+        };
+        for (const Group &group : kGroups) {
+            int n = 0;
+            for (int cls : group.classes)
+                if (cls < 64) n += byClass[(size_t)cls];
+            if (n > 0) lines.push_back({formatted(group.id, group.fallback, n), kWhite});
+        }
+        return lines;
+    }
+    // Economy: Spaceport prices, then what the workers are doing.
+    if (ownsMarket(localPlayer_)) {
+        static constexpr int kRateStrings[3][2] = {{20500, 1}, {20501, 0}, {20502, 2}};
+        static constexpr const char *kRateFallback[3] = {"Carbon: Buy: %d  /  Sell: %d",
+                                                         "Food: Buy: %d  /  Sell: %d",
+                                                         "Ore: Buy: %d  /  Sell: %d"};
+        for (int i = 0; i < 3; ++i) {
+            std::string format = assets_.localizedString(kRateStrings[i][0]);
+            if (format.empty() || std::count(format.begin(), format.end(), '%') != 2)
+                format = kRateFallback[i];
+            char line[96];
+            snprintf(line, sizeof line, format.c_str(),
+                     commodityBuyPrice(localPlayer_, kRateStrings[i][1]),
+                     commoditySellPrice(localPlayer_, kRateStrings[i][1]));
+            lines.push_back({line, kWhite});
+        }
+    }
+    enum { kOre, kNova, kCarbon, kHunter, kForager, kFarmer, kRepairer, kBuilder, kIdle, kFisher,
+           kHerder, kMerchant, kIdleTrawler, kTaskCount };
+    std::array<int, kTaskCount> tasks{};
+    for (size_t slot = 0, count = dynamicObjects().size(); slot < count; ++slot) {
+        const Object &object = objects_[dynamicObjectIndices_[slot]];
+        if (!object.active || object.player != localPlayer_ || !object.unit) continue;
+        if (object.tradeMarketId || (object.unit->cls == 19 || object.unit->cls == 2)) {
+            if (object.unit->cls == 19 || object.unit->cls == 2) tasks[kMerchant]++;
+            continue;
+        }
+        if (object.unit->cls == 13) { // fishing boats (trawlers)
+            if (object.gatherTargetId) tasks[kFisher]++;
+            else tasks[kIdleTrawler]++;
+            continue;
+        }
+        if (!isWorker(object) || object.garrisonedInId >= 0) continue;
+        if (object.constructionTargetId) { tasks[kBuilder]++; continue; }
+        if (object.repairTargetId) { tasks[kRepairer]++; continue; }
+        const Object *target = object.gatherTargetId ? findObject(object.gatherTargetId) : nullptr;
+        if (!target || !target->unit) { tasks[kIdle]++; continue; }
+        if (isFarmUnit(*target->unit)) tasks[kFarmer]++;
+        else if (target->resourceType == 1) tasks[kCarbon]++;
+        else if (target->resourceType == 2) tasks[kOre]++;
+        else if (target->resourceType == 3) tasks[kNova]++;
+        else if (target->unit->cls == 1 && target->player > 0) tasks[kHerder]++;
+        else if (isLiveAnimal(*target) || target->unit->type == 80 + 0 || target->carcassClass >= 0)
+            tasks[kHunter]++;
+        else tasks[kForager]++;
+    }
+    static constexpr struct {
+        int task, id;
+        const char *fallback;
+    } kTasks[] = {
+        {kIdleTrawler, 20503, "Idle Trawlers: %d"}, {kOre, 20505, "Ore Miners: %d"},
+        {kNova, 20527, "Nova Miners: %d"},          {kCarbon, 20506, "Carbon Collectors: %d"},
+        {kHunter, 20507, "Hunters: %d"},            {kForager, 20508, "Foragers: %d"},
+        {kFarmer, 20509, "Farmers: %d"},            {kRepairer, 20510, "Repairers: %d"},
+        {kBuilder, 20511, "Builders: %d"},          {kIdle, 20512, "Idle Workers: %d"},
+        {kFisher, 20513, "Fishers: %d"},            {kHerder, 20514, "Herders: %d"},
+        {kMerchant, 20523, "Merchants: %d"},
+    };
+    for (const auto &task : kTasks)
+        if (tasks[(size_t)task.task] > 0)
+            lines.push_back({formatted(task.id, task.fallback, tasks[(size_t)task.task]), kWhite});
+    return lines;
+}
+
 bool Game::handleMinimapInput(
     const InputState &input) {
     constexpr float size = 168.0f;
     const float left = input.screenW - size - 10.0f;
     constexpr float top = 10.0f;
+    // The statistics toggle and mini-map mode buttons under the map.
+    if ((input.selectPressed || input.pointerTap) &&
+        input.pointerY >= top + size + 18.0f && input.pointerY <= top + size + 36.0f) {
+        if (input.pointerX >= left && input.pointerX < left + 70.0f) {
+            statisticsVisible_ = !statisticsVisible_;
+            playInterfaceFeedback(kInterfaceButtonSound);
+            return true;
+        }
+        if (input.pointerX >= left + 76.0f && input.pointerX <= left + size) {
+            setMinimapMode((minimapMode_ + 1) % 3);
+            playInterfaceFeedback(kInterfaceButtonSound);
+            return true;
+        }
+    }
     const bool inside =
         input.pointerX >= left &&
         input.pointerX <= left + size &&
@@ -23337,6 +23772,8 @@ void Game::updateAiGatherers(
     }
     std::array<std::vector<Object *>, 4> depositsByType;
     std::array<bool, 4> depositsListed{};
+    std::array<std::vector<std::array<float, 2>>, 4> dropSitesByType;
+    std::array<bool, 4> dropSitesListed{};
     for (int type = 0; type < 4;
          ++type) {
         while (assigned[(size_t)type] <
@@ -23443,6 +23880,13 @@ void Game::updateAiGatherers(
                     deposits.push_back(&resource);
                 }
             }
+            // A deposit costs the walk there plus the round trips to its
+            // nearest drop site, so workers favour deposits by a drop site.
+            std::vector<std::array<float, 2>> &sites = dropSitesByType[(size_t)type];
+            if (!dropSitesListed[(size_t)type]) {
+                dropSitesListed[(size_t)type] = true;
+                aiDropSitePositions(player, type, sites);
+            }
             std::vector<std::pair<float, Object *>> candidates;
             candidates.reserve(deposits.size());
             for (Object *resource : deposits) {
@@ -23452,7 +23896,16 @@ void Game::updateAiGatherers(
                     continue;
                 const float dx = resource->x - worker->x;
                 const float dy = resource->y - worker->y;
-                candidates.push_back({dx * dx + dy * dy, resource});
+                float drop = 0.0f;
+                if (!sites.empty()) {
+                    float nearest = std::numeric_limits<float>::max();
+                    for (const auto &site : sites)
+                        nearest = std::min(nearest, (resource->x - site[0]) * (resource->x - site[0]) +
+                                                        (resource->y - site[1]) * (resource->y - site[1]));
+                    drop = std::sqrt(nearest);
+                }
+                const float score = std::sqrt(dx * dx + dy * dy) + 2.0f * drop;
+                candidates.push_back({score, resource});
             }
             const size_t nearest = std::min<size_t>(candidates.size(), kPathBudget + 4);
             std::partial_sort(candidates.begin(), candidates.begin() + (ptrdiff_t)nearest,
@@ -23496,6 +23949,27 @@ void Game::updateAiGatherers(
                              oldResourceType]--;
             assigned[(size_t)type]++;
         }
+    }
+}
+
+// Positions of the player's finished drop sites for a resource type (its
+// Command Centers accept everything).
+void Game::aiDropSitePositions(int player, int resourceType,
+                               std::vector<std::array<float, 2>> &out) const {
+    out.clear();
+    static constexpr const char *kDropSites[4] = {"BLDG-DROPCHOW", "BLDG-DROPCARBON",
+                                                  "BLDG-DROPMETAL", "BLDG-DROPNOVA"};
+    const dat::Unit *site =
+        resourceType >= 0 && resourceType < 4 ? aiUnit(player, kDropSites[resourceType]) : nullptr;
+    const dat::Unit *siteEffective = site ? effectiveUnitForPlayer(player, site) : nullptr;
+    for (size_t slot = 0, count = dynamicObjects().size(); slot < count; ++slot) {
+        const Object &object = objects_[dynamicObjectIndices_[slot]];
+        if (object.active && !object.hidden && object.player == player && object.unit &&
+            object.unit->type == dat::UT_Building && !object.underConstruction &&
+            (object.unit->name.rfind("BLDG-MAIN", 0) == 0 ||
+             (site && (object.unit->id == site->id ||
+                       (siteEffective && object.unit->id == siteEffective->id)))))
+            out.push_back({object.x, object.y});
     }
 }
 
@@ -23699,11 +24173,12 @@ bool Game::updateInputPhase(float dt, const InputState &in, WorldInput &worldInp
                     to - from)
                     .count();
         };
+    // The original's speeds are 1.0 / 1.5 / 2.0 with Normal as the base.
     if (gameSpeed_ == SkirmishGameSpeed::Slow)
-        dt *= 0.75f;
+        dt *= 1.0f / 1.5f;
     else if (gameSpeed_ ==
              SkirmishGameSpeed::Fast)
-        dt *= 1.5f;
+        dt *= 2.0f / 1.5f;
     // Placement armed by the build menu last frame may now take clicks.
     placementJustBegun_ = false;
     gatherPointJustBegun_ = false;
@@ -23981,7 +24456,8 @@ bool Game::updateInputPhase(float dt, const InputState &in, WorldInput &worldInp
         else if (in.pointerY >= in.screenH - edge)
             scrollY = std::max(scrollY, (in.pointerY - (in.screenH - edge)) / edge);
     }
-    const float scrollSpeed = 900.0f / zoom_;
+    // Scroll speed option (10..109, default 84).
+    const float scrollSpeed = 900.0f / zoom_ * (scrollSpeed_ / 84.0f);
     camX_ += scrollX * scrollSpeed * dt -
              (consumeCameraInput ? 0.0f
                                  : in.dragX / zoom_);
@@ -24617,11 +25093,12 @@ void Game::simulateChunk(float dt, const WorldInput *worldInput, int chunk) {
                     to - from)
                     .count();
         };
+    // The original's speeds are 1.0 / 1.5 / 2.0 with Normal as the base.
     if (gameSpeed_ == SkirmishGameSpeed::Slow)
-        dt *= 0.75f;
+        dt *= 1.0f / 1.5f;
     else if (gameSpeed_ ==
              SkirmishGameSpeed::Fast)
-        dt *= 1.5f;
+        dt *= 2.0f / 1.5f;
     if (chunk == 0) {
     // Read only by the simulation (time-limit victory) and the HUD, so it
     // advances here rather than in the input phase.
@@ -24665,7 +25142,8 @@ void Game::simulateChunk(float dt, const WorldInput *worldInput, int chunk) {
     auto prepareReservedPopulation = [&]() {
         if (reservedPopulationReady) return;
         reservedPopulationReady = true;
-        for (const Object &object : prefetched(objects_))
+        for (size_t slot = 0, count = dynamicObjects().size(); slot < count; ++slot) {
+            const Object &object = objects_[dynamicObjectIndices_[slot]];
             if (object.active &&
                 object.player > 0 &&
                 object.player < 17 &&
@@ -24673,6 +25151,7 @@ void Game::simulateChunk(float dt, const WorldInput *worldInput, int chunk) {
                 reservedPopulation[
                     (size_t)object.player] +=
                     populationUse(*object.unit);
+        }
     };
     const size_t productionObjectCount = objects_.size();
     for (size_t index = 0; index < productionObjectCount;
@@ -24873,6 +25352,8 @@ void Game::simulateChunk(float dt, const WorldInput *worldInput, int chunk) {
             gatheringStart,
             repairingStart);
     updateRepairing(dt);
+    updateHealing(dt);
+    updateGarrisonHealing(dt);
     const auto conversionStart =
         UpdateClock::now();
     updateStats_.worldRepairingUs =
@@ -25148,7 +25629,8 @@ void Game::simulateChunk(float dt, const WorldInput *worldInput, int chunk) {
                     continue; // must be on the goal's side of any wall
                 bool formationSlotOpen = true;
                 if (object.moveGroupId != 0)
-                    for (const Object &other : prefetched(objects_)) {
+                    for (size_t slot = 0, count = dynamicObjects().size(); slot < count; ++slot) {
+                        const Object &other = objects_[dynamicObjectIndices_[slot]];
                         if (&other == &object || !other.active ||
                             other.moveGroupId != object.moveGroupId ||
                             isAirUnit(other) != isAirUnit(object))
@@ -26078,6 +26560,14 @@ void Game::updateMinimapTexture(
             !object.draw || !object.unit ||
             object.unit->minimapMode == 0)
             continue;
+        // Combat map: no resources or civilian units; economic map: no
+        // military units.
+        if (minimapMode_ != 0 && object.unit->type != dat::UT_Building) {
+            const bool civilian = isWorker(object) || isGatherable(object) ||
+                                  object.unit->cls == 13 || object.unit->cls == 19 ||
+                                  object.unit->cls == 2 || object.player == 0;
+            if (minimapMode_ == 1 ? civilian : !civilian) continue;
+        }
         const bool staticObject =
             object.unit->type ==
                 dat::UT_Building ||
@@ -26805,6 +27295,14 @@ void Game::renderFrame(Renderer &r, int screenW, int screenH) {
                     else if (task->proceedingGraphic >= 0)
                         gid = task->proceedingGraphic;
                 }
+            }
+        }
+        if (o.state == State::Heal) {
+            if (const dat::Task *task = healTask(o)) {
+                if (task->proceedingGraphic >= 0)
+                    gid = task->proceedingGraphic;
+                else if (task->workingGraphic >= 0)
+                    gid = task->workingGraphic;
             }
         }
         if (o.state == State::Convert) {
@@ -27894,26 +28392,30 @@ void Game::renderFrame(Renderer &r, int screenW, int screenH) {
             invZoom,
         0.82f * invZoom,
         220, 224, 206);
-    // Spaceport exchange rates (the Statistics panel's economy page,
-    // 0x4ff150, strings 20500-20502) while the player owns a Spaceport.
-    if (localPlayer_ > 0 && ownsMarket(localPlayer_)) {
-        std::vector<std::string> lines;
-        static constexpr int kRateStrings[3][2] = {{20500, 1}, {20501, 0}, {20502, 2}};
-        static constexpr const char *kRateFallback[3] = {"Carbon: Buy: %d  /  Sell: %d",
-                                                         "Food: Buy: %d  /  Sell: %d",
-                                                         "Ore: Buy: %d  /  Sell: %d"};
-        for (int i = 0; i < 3; ++i) {
-            std::string format = assets_.localizedString(kRateStrings[i][0]);
-            if (format.empty() || std::count(format.begin(), format.end(), '%') != 2)
-                format = kRateFallback[i];
-            char line[96];
-            snprintf(line, sizeof line, format.c_str(),
-                     commodityBuyPrice(localPlayer_, kRateStrings[i][1]),
-                     commoditySellPrice(localPlayer_, kRateStrings[i][1]));
-            lines.push_back(line);
+    {
+        // Statistics toggle and mini-map mode buttons (icomap_b row).
+        const float buttonY = (minimapTop + minimapSize + 18.0f) * invZoom;
+        const float buttonH = 18.0f * invZoom;
+        r.fillRect(minimapX, buttonY, 70.0f * invZoom, buttonH, 18, 26, 36,
+                   statisticsVisible_ ? 255 : 200);
+        r.fillRect(minimapX + 76.0f * invZoom, buttonY, 92.0f * invZoom, buttonH, 18, 26, 36, 200);
+        drawBitmapText(r, {statisticsVisible_ ? "STATS ON" : "STATS"},
+                       minimapX + 6.0f * invZoom, buttonY + 4.0f * invZoom, 0.72f * invZoom,
+                       statisticsVisible_ ? 255 : 210, statisticsVisible_ ? 231 : 214,
+                       statisticsVisible_ ? 159 : 220);
+        static constexpr const char *kModes[3] = {"MAP: NORMAL", "MAP: COMBAT", "MAP: ECONOMY"};
+        drawBitmapText(r, {kModes[minimapMode_]}, minimapX + 82.0f * invZoom,
+                       buttonY + 4.0f * invZoom, 0.72f * invZoom, 210, 214, 220);
+        if (statisticsVisible_) {
+            float y = buttonY + buttonH + 6.0f * invZoom;
+            for (const auto &line : statisticsLines()) {
+                drawBitmapText(r, {line.first}, minimapX + 1.0f * invZoom, y + 1.0f * invZoom,
+                               0.72f * invZoom, 0, 0, 0);
+                drawBitmapText(r, {line.first}, minimapX, y, 0.72f * invZoom, line.second[0],
+                               line.second[1], line.second[2]);
+                y += 13.0f * invZoom;
+            }
         }
-        drawBitmapText(r, lines, minimapX, (minimapTop + minimapSize + 20.0f) * invZoom,
-                       0.72f * invZoom, 223, 223, 223);
     }
 
     if (panelObject) {

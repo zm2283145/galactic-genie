@@ -48,7 +48,14 @@ enum class FrontendScreen : uint8_t {
     Chat,
     // The Technology Tree (TribeTechHelpScreen, screen info 50007).
     TechTree,
+    // The History ("DataBank") screen (screen info 50062, ctor 0x509920).
+    History,
 };
+
+// History screen sources: a topic's text file (History/<name>) and SLP
+// frames (background 50161, pictures 50162 / 53291) in palette 50530.
+using HistoryReader = std::function<bool(const std::string &name, std::string &text)>;
+using HistoryFrameSource = std::function<const SpriteFrame *(int slp, int frame)>;
 
 struct DiplomacyResult {
     std::vector<std::pair<int, int>> stances;                // player, stance
@@ -58,6 +65,7 @@ struct DiplomacyResult {
 
 struct AchievementsData {
     std::vector<AchievementsPlayer> players;
+    bool atGameEnd = false; // opened from the end of the game (winner trophies)
     float elapsedSeconds = 0.0f;
 };
 
@@ -139,16 +147,33 @@ public:
     void setCampaignScene(const CampaignScene *scene) {
         campaignScene_ = scene;
     }
+    // Opens the History screen at a topic (autostart tests).
+    void openHistoryForTesting(size_t topic) {
+        screen_ = FrontendScreen::History;
+        historyTopic_ = topic;
+        historyLoadedTopic_ = -1;
+        loadHistoryTopic();
+    }
+    void setHistorySources(HistoryReader reader, HistoryFrameSource frames) {
+        historyReader_ = std::move(reader);
+        historyFrames_ = std::move(frames);
+    }
     void setAchievements(AchievementsData data) {
         achievements_ = std::move(data);
     }
     // sat_tabs.slp (50765): frame 2*tab is the selected tab, 2*tab+1 the
     // normal one; PNBnr1.slp (50762): the player-coloured name banners.
+    // AchDecal.slp (50766): 4 team leader, 5 winner, 6 best in a column;
+    // AchTeam.slp (50769): team marks 0-3, 4 no team.
     void setAchievementsArt(
         const std::array<const SpriteFrame *, 12> &tabs,
-        const std::array<const SpriteFrame *, 8> &banners) {
+        const std::array<const SpriteFrame *, 8> &banners,
+        const std::array<const SpriteFrame *, 9> &decals = {},
+        const std::array<const SpriteFrame *, 5> &teams = {}) {
         achievementTabFrames_ = tabs;
         achievementBannerFrames_ = banners;
+        achievementDecalFrames_ = decals;
+        achievementTeamFrames_ = teams;
     }
     size_t achievementsTab() const { return achievementsTab_; }
     void setDiplomacy(DiplomacyData data) {
@@ -472,6 +497,21 @@ private:
     FrontendAction finishGameOver();
     FrontendAction achievementsMainButton();
     std::array<const SpriteFrame *, 12> achievementTabFrames_{};
+    std::array<const SpriteFrame *, 9> achievementDecalFrames_{};
+    // History screen.
+    HistoryReader historyReader_;
+    HistoryFrameSource historyFrames_;
+    size_t historyTopic_ = 0;
+    int historyLoadedTopic_ = -1;
+    std::vector<std::string> historyLines_;
+    std::string historyTitle_;
+    size_t historyScroll_ = 0;
+    size_t historyCount() const;
+    std::string historyEntry(size_t index) const;
+    bool historySelectable(size_t index) const;
+    void loadHistoryTopic();
+    void renderHistory(Renderer &renderer, int screenW, int screenH) const;
+    std::array<const SpriteFrame *, 5> achievementTeamFrames_{};
     std::array<const SpriteFrame *, 8> achievementBannerFrames_{};
     void renderAchievements(Renderer &renderer, int screenW, int screenH) const;
     TechTreeData techTree_;

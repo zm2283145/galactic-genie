@@ -169,26 +169,27 @@ void wrappedText(
     drawUiText(renderer, lines, x, y, scale, r, g, b);
 }
 
+// The original Options dialog (screen info 50018) rows, plus the Vita's
+// master/dialogue volume and control preset.
+constexpr size_t kOptionRows = 11;
+constexpr size_t kOptionBack = 10;
+
 std::string optionValue(
     const UserSettings &settings, size_t row) {
     switch (row) {
-    case 0: return std::to_string(settings.masterVolume) + "%";
-    case 1: return std::to_string(settings.musicVolume) + "%";
-    case 2: return std::to_string(settings.dialogueVolume) + "%";
-    case 3: return std::to_string(settings.effectsVolume) + "%";
-    case 4: return controlPresetName(settings.controls);
-    case 5: return "BACK";
+    case 0: return settings.gameSpeed == 0 ? "SLOW" : settings.gameSpeed == 1 ? "NORMAL" : "FAST";
+    case 1: return std::to_string(settings.masterVolume) + "%";
+    case 2: return settings.musicVolume == 0 ? "OFF" : std::to_string(settings.musicVolume) + "%";
+    case 3: return settings.effectsVolume == 0 ? "OFF" : std::to_string(settings.effectsVolume) + "%";
+    case 4: return std::to_string(settings.dialogueVolume) + "%";
+    case 5: return std::to_string(settings.scrollSpeed);
+    case 6: return settings.audioTaunts ? "ON" : "OFF";
+    case 7: return settings.oneClickGarrison ? "ON" : "OFF";
+    case 8: return settings.friendOrFoeColors ? "ON" : "OFF";
+    case 9: return controlPresetName(settings.controls);
+    case kOptionBack: return "BACK";
     default: return {};
     }
-}
-
-const char *optionLabel(size_t row) {
-    static constexpr std::array<const char *, 6> labels{{
-        "Master Volume", "Music Volume",
-        "Dialogue Volume", "Effects Volume",
-        "Control Preset", "",
-    }};
-    return row < labels.size() ? labels[row] : "";
 }
 
 std::string upperCase(std::string value) {
@@ -608,11 +609,29 @@ void Frontend::refreshLobbyPreview() {
 void Frontend::adjustOptionValue(int direction) {
     int *volume = nullptr;
     switch (selection_) {
-    case 0: volume = &userSettings_.masterVolume; break;
-    case 1: volume = &userSettings_.musicVolume; break;
-    case 2: volume = &userSettings_.dialogueVolume; break;
+    case 0:
+        userSettings_.gameSpeed = (userSettings_.gameSpeed + (direction < 0 ? 2 : 1)) % 3;
+        settingsChanged_ = true;
+        return;
+    case 1: volume = &userSettings_.masterVolume; break;
+    case 2: volume = &userSettings_.musicVolume; break;
     case 3: volume = &userSettings_.effectsVolume; break;
-    case 4:
+    case 4: volume = &userSettings_.dialogueVolume; break;
+    case 5:
+        userSettings_.scrollSpeed =
+            std::clamp(userSettings_.scrollSpeed + (direction < 0 ? -5 : 5), 10, 109);
+        settingsChanged_ = true;
+        return;
+    case 6: userSettings_.audioTaunts = !userSettings_.audioTaunts; settingsChanged_ = true; return;
+    case 7:
+        userSettings_.oneClickGarrison = !userSettings_.oneClickGarrison;
+        settingsChanged_ = true;
+        return;
+    case 8:
+        userSettings_.friendOrFoeColors = !userSettings_.friendOrFoeColors;
+        settingsChanged_ = true;
+        return;
+    case 9:
         userSettings_.controls =
             userSettings_.controls == ControlPreset::Standard
                 ? ControlPreset::LeftHanded
@@ -814,8 +833,15 @@ FrontendAction Frontend::update(
                 message_ = "COMMUNITY SERVICES ARE UNAVAILABLE";
                 if (sounds_) sounds_(50303);
             } else if (selection_ == 3) {
-                screen_ = FrontendScreen::DataStatus;
-                selection_ = 0;
+                // History (button 9505): the DataBank screen.
+                screen_ = FrontendScreen::History;
+                historyLoadedTopic_ = -1;
+                historyScroll_ = 0;
+                if (!historySelectable(historyTopic_)) {
+                    historyTopic_ = 0;
+                    while (historyTopic_ + 1 < historyCount() && !historySelectable(historyTopic_))
+                        ++historyTopic_;
+                }
             } else if (selection_ == 4) {
                 optionsReturnScreen_ = FrontendScreen::MainMenu;
                 screen_ = FrontendScreen::Options;
@@ -1405,20 +1431,20 @@ FrontendAction Frontend::update(
     }
 
     if (screen_ == FrontendScreen::Options) {
-        constexpr size_t count = 6;
+        constexpr size_t count = kOptionRows;
         const size_t touched =
-            rowFromPointer(input, 154, 48, count);
+            rowFromPointer(input, 104, 36, count);
         if (touched < count) selection_ = touched;
         if (input.menuUp) moveSelection(-1, count);
         if (input.menuDown) moveSelection(1, count);
         if (input.menuLeft) adjustOptionValue(-1);
         if (input.menuRight) adjustOptionValue(1);
         if ((input.menuActivate || touched < count) &&
-            selection_ < 5)
+            selection_ < kOptionBack)
             adjustOptionValue(1);
         if (input.menuBack ||
             ((input.menuActivate || touched < count) &&
-             selection_ == 5)) {
+             selection_ == kOptionBack)) {
             screen_ = optionsReturnScreen_;
             selection_ = 0;
         }
@@ -1490,6 +1516,47 @@ FrontendAction Frontend::update(
         return updateDiplomacy(input);
     if (screen_ == FrontendScreen::TechTree)
         return updateTechTree(input);
+    if (screen_ == FrontendScreen::History) {
+        // Topics: up/down (spacer rows skipped); text: left/right pages.
+        const size_t count = historyCount();
+        auto step = [&](int direction) {
+            size_t index = historyTopic_;
+            for (size_t tries = 0; tries < count; ++tries) {
+                index = (index + count + (size_t)(direction < 0 ? count - 1 : 1)) % count;
+                if (historySelectable(index)) {
+                    historyTopic_ = index;
+                    return;
+                }
+            }
+        };
+        if (count) {
+            if (input.menuUp) step(-1);
+            if (input.menuDown) step(1);
+            if (input.pointerTap && input.screenW > 0 && input.screenH > 0) {
+                const float x = input.pointerX * 800.0f / input.screenW;
+                const float y = input.pointerY * 600.0f / input.screenH;
+                if (x >= 14 && x < 230 && y >= 24 && y < 387) {
+                    const size_t first = historyTopic_ > 12 ? historyTopic_ - 12 : 0;
+                    const size_t index = first + (size_t)((y - 24) / 14.5f);
+                    if (index < count && historySelectable(index)) historyTopic_ = index;
+                }
+                if (x >= 560 && y >= 560) {
+                    screen_ = FrontendScreen::MainMenu;
+                    selection_ = 3;
+                    return FrontendAction::None;
+                }
+            }
+            if (!historySelectable(historyTopic_)) step(1);
+            loadHistoryTopic();
+            if (input.menuRight && historyScroll_ + 14 < historyLines_.size()) historyScroll_ += 14;
+            if (input.menuLeft) historyScroll_ = historyScroll_ > 14 ? historyScroll_ - 14 : 0;
+        }
+        if (input.menuBack) {
+            screen_ = FrontendScreen::MainMenu;
+            selection_ = 3;
+        }
+        return FrontendAction::None;
+    }
     if (screen_ == FrontendScreen::Chat)
         return updateChat(input);
 
@@ -1910,7 +1977,7 @@ void Frontend::render(
                 "Play campaigns, standard games, or saved games.",
                 "Learn the fundamentals of Galactic Battlegrounds.",
                 "Community services are not available on Vita.",
-                "View original-data and implementation status.",
+                "Read the history of the galaxy.",
                 "Configure audio and controls.",
                 "Multiplayer is unavailable in this build.",
                 "Create and play custom scenarios.",
@@ -2508,28 +2575,43 @@ void Frontend::render(
             playtestMatch_ ? 42.0f : 36.0f);
     } else if (screen_ == FrontendScreen::TechTree) {
         renderTechTree(renderer, screenW, screenH);
+    } else if (screen_ == FrontendScreen::History) {
+        renderHistory(renderer, screenW, screenH);
     } else if (screen_ == FrontendScreen::Objectives) {
         renderObjectivesOverlay(
             renderer, screenW, screenH);
     } else if (screen_ == FrontendScreen::Options) {
         centeredText(
-            renderer, text(9274, "OPTIONS"), 25, 2.5f,
+            renderer, upperCase(text(9431, "Options")), 25, 2.5f,
             screenW, 235, 213, 145);
-        panel(renderer, 170, 128, 620, 342);
-        for (size_t row = 0; row < 6; ++row) {
-            const float y = 154 + row * 48;
+        panel(renderer, 170, 84, 620, 412);
+        // Labels from the original dialog (9439 Speed, 9435 Music Volume,
+        // 9438 Sound Volume, 9456 Scroll Speed, 9526/9527/9534 checkboxes).
+        const auto label = [&](int id, const char *fallback) {
+            std::string value = text(id, fallback);
+            for (char &c : value)
+                if (c == '\n' || c == '\r') c = ' ';
+            return value;
+        };
+        const std::array<std::string, kOptionRows> labels{{
+            label(9439, "Speed"), "Master Volume", label(9435, "Music Volume"),
+            label(9438, "Sound Volume"), "Dialogue Volume", label(9456, "Scroll Speed"),
+            label(9526, "Allow Audio Taunts"), label(9527, "One-Click Garrisoning"),
+            label(9534, "Friend or Enemy Colors"), "Control Preset", ""}};
+        for (size_t row = 0; row < kOptionRows; ++row) {
+            const float y = 104 + row * 36;
             if (row == selection_)
                 renderer.fillRect(
-                    188, y - 10, 584, 42,
+                    188, y - 8, 584, 32,
                     30, 72, 102, 255);
-            if (*optionLabel(row))
+            if (!labels[row].empty())
                 drawUiText(
-                    renderer, {optionLabel(row)}, 218, y,
-                    1.3f, 201, 216, 228);
+                    renderer, {labels[row]}, 218, y,
+                    1.2f, 201, 216, 228);
             drawUiText(
                 renderer, {optionValue(userSettings_, row)},
-                row < 5 ? 545.0f : 440.0f, y,
-                1.3f,
+                row < kOptionBack ? 585.0f : 440.0f, y,
+                1.2f,
                 row == selection_ ? 255 : 220,
                 row == selection_ ? 231 : 226,
                 row == selection_ ? 159 : 232);
@@ -3271,6 +3353,26 @@ void Frontend::renderAchievements(Renderer &renderer, int screenW, int screenH) 
             renderer.fillRect(4 * sx, top * sy, 138 * sx, 33 * sy, player.red, player.green,
                               player.blue, 255);
         centred(player.name, 14, top, 128, 33, 1.3f, 255, 255, 255);
+        if (tab < 5) {
+            // Team mark (AchTeam 50769): teams 1-4, frame 4 without a team.
+            const int teamFrame = player.team >= 1 && player.team <= 4 ? player.team - 1 : 4;
+            drawFrame(achievementTeamFrames_[(size_t)teamFrame], 748, top);
+            // Winner trophy (AchDecal 5, at the end of the game) and the
+            // team's top scorer (4; ties go to the lower player number).
+            bool leader = false;
+            if (player.team > 0 && player.total > 0) {
+                leader = true;
+                for (const AchievementsPlayer &other : achievements_.players)
+                    if (&other != &player && other.team == player.team &&
+                        (other.total > player.total ||
+                         (other.total == player.total && other.player < player.player)))
+                        leader = false;
+            }
+            const bool won = achievements_.atGameEnd && player.won;
+            const float labelY = 76.0f + 52.0f * row;
+            if (won) drawFrame(achievementDecalFrames_[5], 8, labelY);
+            if (leader) drawFrame(achievementDecalFrames_[4], 8, won ? labelY + 17.0f : labelY);
+        }
     }
     if (tab < 5) {
         for (size_t column = 0; column < 6; ++column) {
@@ -3288,7 +3390,31 @@ void Frontend::renderAchievements(Renderer &renderer, int screenW, int screenH) 
                 centred(player.cells[tab][column], columnEdges[column], top,
                         columnEdges[column + 1] - columnEdges[column], 33, 1.35f, 255, 255,
                         255);
-            centred(std::to_string(player.total), 711, top, 69, 33, 1.35f, 255, 255, 255);
+            centred(std::to_string(player.total), 705, top, 43, 33, 1.35f, 255, 255, 255);
+        }
+        // Best in each column (AchDecal 6, left of the number; ties all).
+        const auto valueOf = [](const std::string &cell, long &value) {
+            if (cell.empty() || cell.find(':') != std::string::npos) return false;
+            char *end = nullptr;
+            value = std::strtol(cell.c_str(), &end, 10);
+            return end != cell.c_str();
+        };
+        for (size_t column = 0; column < 6; ++column) {
+            long best = 0;
+            for (const AchievementsPlayer &player : achievements_.players) {
+                long value = 0;
+                if (valueOf(player.cells[tab][column], value)) best = std::max(best, value);
+            }
+            if (best <= 0) continue;
+            for (size_t row = 0; row < achievements_.players.size() && row < 8; ++row) {
+                long value = 0;
+                const std::string &cell = achievements_.players[row].cells[tab][column];
+                if (!valueOf(cell, value) || value != best) continue;
+                const float centre = (columnEdges[column] + columnEdges[column + 1]) * 0.5f;
+                const float width = uiTextWidth(cell, 1.35f * sy) / sx;
+                drawFrame(achievementDecalFrames_[6], centre - width * 0.5f - 18.0f,
+                          82.0f + 52.0f * row + 8.0f);
+            }
         }
     } else {
         // Timeline: each minute's share of the total score, stacked by player.
@@ -3460,6 +3586,152 @@ void Frontend::renderObjectivesOverlay(
             index == selection_ ? 239 : 220,
             index == selection_ ? 190 : 230);
     }
+}
+
+
+// --- History (DataBank, screen info 50062) ---------------------------------
+// String 20310 is the topic count N; 20311+i the list text (leading spaces
+// indent a child entry, a lone space is a spacer); the file names follow
+// (20411+i in the stock data, 19811+i in the expanded string table);
+// 20811+i is "set,frameA,frameB": set 1 = SLP 50162, set 2 = SLP 53291.
+
+size_t Frontend::historyCount() const {
+    const std::string count = text(20310, "0");
+    return (size_t)std::max(0, std::min(400, atoi(count.c_str())));
+}
+
+std::string Frontend::historyEntry(size_t index) const {
+    return text(20311 + (int)index, "");
+}
+
+bool Frontend::historySelectable(size_t index) const {
+    const std::string entry = historyEntry(index);
+    return entry.find_first_not_of(' ') != std::string::npos;
+}
+
+void Frontend::loadHistoryTopic() {
+    if ((int)historyTopic_ == historyLoadedTopic_) return;
+    historyLoadedTopic_ = (int)historyTopic_;
+    historyScroll_ = 0;
+    historyLines_.clear();
+    historyTitle_ = historyEntry(historyTopic_);
+    historyTitle_.erase(0, historyTitle_.find_first_not_of(' '));
+    const size_t count = historyCount();
+    (void)count;
+    // The expanded string table (143 topics) keeps the file names at
+    // 19811+i; the stock one at 20411+i.
+    const auto isFile = [](const std::string &value) {
+        return value.size() > 4 && value.substr(value.size() - 4) == ".txt";
+    };
+    std::string name = isFile(text(19811, "")) ? text(19811 + (int)historyTopic_, "")
+                                               : text(20411 + (int)historyTopic_, "");
+    std::string body;
+    if (name.empty() || !historyReader_ || !historyReader_(name, body)) {
+        historyLines_.push_back(name.empty() ? "" : "(History/" + name + " was not found.)");
+        return;
+    }
+    // <B> toggles bold in the original; drop the markers and the title line
+    // that repeats the topic.
+    for (size_t at; (at = body.find("<B>")) != std::string::npos;) body.erase(at, 3);
+    for (size_t at; (at = body.find("<b>")) != std::string::npos;) body.erase(at, 3);
+    std::vector<std::string> paragraphs;
+    size_t start = 0;
+    while (start <= body.size()) {
+        size_t end = body.find('\n', start);
+        if (end == std::string::npos) end = body.size();
+        std::string line = body.substr(start, end - start);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        paragraphs.push_back(line);
+        start = end + 1;
+    }
+    const auto trimmed = [](std::string value) {
+        value.erase(0, value.find_first_not_of(" \t"));
+        value.erase(value.find_last_not_of(" \t") + 1);
+        return value;
+    };
+    while (!paragraphs.empty() && trimmed(paragraphs.front()).empty()) paragraphs.erase(paragraphs.begin());
+    if (!paragraphs.empty() && trimmed(paragraphs.front()) == trimmed(historyTitle_))
+        paragraphs.erase(paragraphs.begin());
+    while (!paragraphs.empty() && paragraphs.front().empty()) paragraphs.erase(paragraphs.begin());
+    // Wrap to the 420-wide text box (800x600 units, text scale 0.8).
+    const float width = 420.0f;
+    const float scale = 0.8f;
+    for (const std::string &paragraph : paragraphs) {
+        if (paragraph.empty()) {
+            historyLines_.push_back("");
+            continue;
+        }
+        std::string line;
+        size_t at = 0;
+        while (at < paragraph.size()) {
+            size_t next = paragraph.find(' ', at);
+            if (next == std::string::npos) next = paragraph.size();
+            const std::string word = paragraph.substr(at, next - at);
+            const std::string candidate = line.empty() ? word : line + " " + word;
+            if (!line.empty() && uiTextWidth(candidate, scale) > width) {
+                historyLines_.push_back(line);
+                line = word;
+            } else {
+                line = candidate;
+            }
+            at = next + 1;
+        }
+        historyLines_.push_back(line);
+    }
+}
+
+void Frontend::renderHistory(Renderer &renderer, int screenW, int screenH) const {
+    const float sx = screenW / 800.0f, sy = screenH / 600.0f;
+    auto frame = [&](int slp, int index) -> const SpriteFrame * {
+        return historyFrames_ ? historyFrames_(slp, index) : nullptr;
+    };
+    auto draw = [&](const SpriteFrame *f, float x, float y, float w, float h) {
+        if (!f || !f->tex) return false;
+        renderer.draw(f->tex, Quad{x * sx, y * sy, w * sx, h * sy, f->u, f->v, f->u + f->w, f->v + f->h});
+        return true;
+    };
+    if (!draw(frame(50161, 0), 0, 0, 800, 600))
+        renderer.fillRect(0, 0, (float)screenW, (float)screenH, 6, 10, 16, 255);
+    const size_t count = historyCount();
+    // Topic list.
+    const size_t first = historyTopic_ > 12 ? historyTopic_ - 12 : 0;
+    for (size_t row = 0; row < 25 && first + row < count; ++row) {
+        const size_t index = first + row;
+        std::string entry = historyEntry(index);
+        const size_t indent = entry.find_first_not_of(' ');
+        if (indent == std::string::npos) continue;
+        entry.erase(0, indent);
+        const float y = 24.0f + row * 14.5f;
+        const bool selected = index == historyTopic_;
+        if (selected)
+            renderer.fillRect(14 * sx, (y - 2) * sy, 216 * sx, 14 * sy, 30, 72, 102, 255);
+        drawUiText(renderer, {entry}, (18.0f + indent * 6.0f) * sx, y * sy, 0.8f * sy,
+                   selected ? 255 : 201, selected ? 231 : 216, selected ? 159 : 228);
+    }
+    // Pictures: "set,frameA,frameB".
+    const std::string pictures = text(20811 + (int)historyTopic_, "");
+    int set = 0, a = -1, b = -1;
+    if (sscanf(pictures.c_str(), "%d,%d,%d", &set, &a, &b) >= 2) {
+        const int slp = set == 2 ? 53291 : 50162;
+        if (a >= 0) draw(frame(slp, a), 337, 74, 383, 185);
+        if (b >= 0) draw(frame(slp, b), 14, 407, 216, 161);
+    }
+    // Title and text.
+    const float titleScale = 1.3f * sy;
+    drawUiText(renderer, {historyTitle_},
+               (529.0f * sx) - uiTextWidth(historyTitle_, titleScale) * 0.5f, 22.0f * sy,
+               titleScale, 235, 213, 145);
+    for (size_t row = 0; row < 16 && historyScroll_ + row < historyLines_.size(); ++row)
+        drawUiText(renderer, {historyLines_[historyScroll_ + row]}, 319 * sx,
+                   (284.0f + row * 14.5f) * sy, 0.8f * sy, 220, 226, 232);
+    if (historyLines_.size() > 16) {
+        const std::string page = "< > " + std::to_string(historyScroll_ / 14 + 1) + "/" +
+                                 std::to_string((historyLines_.size() + 13) / 14);
+        drawUiText(renderer, {page}, 680 * sx, 524 * sy, 0.75f * sy, 151, 177, 199);
+    }
+    const std::string back = text(20300, "Return to Main Menu");
+    drawUiText(renderer, {back}, 790 * sx - uiTextWidth(back, 1.0f * sy), 572 * sy, 1.0f * sy, 215,
+               226, 233);
 }
 
 } // namespace swgb

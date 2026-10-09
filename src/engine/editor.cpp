@@ -334,7 +334,11 @@ bool ScenarioEditor::exportScx() {
         return false;
     }
     status_ =
-        "EXPORTED BYTE-EXACT SOURCE SCX: " +
+        (document_.hasImportFingerprint &&
+                 editableScenarioSemanticFingerprint(document_) ==
+                     document_.importSemanticFingerprint
+             ? "EXPORTED BYTE-EXACT SOURCE SCX: "
+             : "EXPORTED SCX: ") +
         shortPath(file);
     return true;
 }
@@ -1779,123 +1783,7 @@ bool ScenarioEditor::buildPlaytestScenario(
                 "scenario has validation errors; open Validate";
         return false;
     }
-    scenario = {};
-    scenario.version =
-        document_.scx.version.empty()
-            ? "1.21"
-            : document_.scx.version;
-    scenario.saveType = document_.scx.saveType;
-    scenario.lastSaveTime =
-        document_.scx.lastSaveTime;
-    scenario.instructions =
-        document_.messages.instructions;
-    scenario.victoryType = document_.victory.type;
-    scenario.enabledPlayerCount =
-        (uint32_t)document_.players.size();
-    scenario.nextUnitId = 1;
-    scenario.playerDataVersion =
-        document_.scx.playerDataVersion > 0
-            ? document_.scx.playerDataVersion
-            : 1.24f;
-    scenario.originalFilename =
-        document_.metadata.title;
-    scenario.hints = document_.messages.hints;
-    scenario.victoryMessage =
-        document_.messages.victory;
-    scenario.lossMessage =
-        document_.messages.loss;
-    scenario.history = document_.messages.history;
-    scenario.scouts = document_.messages.scouts;
-    scenario.pregameCinematic =
-        document_.messages.pregameCinematic;
-    scenario.victoryCinematic =
-        document_.messages.victoryCinematic;
-    scenario.lossCinematic =
-        document_.messages.lossCinematic;
-    scenario.background =
-        document_.messages.background;
-    scenario.cameraX = document_.camera.x;
-    scenario.cameraY = document_.camera.y;
-    scenario.mapCameraX = document_.camera.mapX;
-    scenario.mapCameraY = document_.camera.mapY;
-    scenario.victory = document_.victory.scenario;
-    scenario.allTechnologies =
-        document_.scx.allTechnologies;
-    scenario.map = document_.map;
-    for (size_t index = 0;
-         index < document_.players.size() &&
-         index < 8;
-         ++index) {
-        scenario.players[index] =
-            document_.players[index].scenario;
-        scenario.players[index]
-            .researchedTechnologies =
-            document_.players[index]
-                .researchedTechnologies;
-        scenario.players[index].researchedUnits =
-            document_.players[index].researchedUnits;
-        scenario.players[index].researchedBuildings =
-            document_.players[index]
-                .researchedBuildings;
-        scenario.civilizations[index] =
-            scenario.players[index].civilization;
-    }
-    for (size_t source = 0;
-         source < document_.players.size();
-         ++source)
-        for (size_t target = 0;
-             target < document_.players.size();
-             ++target) {
-            const int left =
-                document_.players[source].team;
-            const int right =
-                document_.players[target].team;
-            if (source == target ||
-                (left > 0 && left == right))
-                scenario.players[source]
-                    .diplomacy[target + 1] = 0u;
-        }
-    for (const EditorObject &object :
-         document_.objects) {
-        scenario.units.push_back(object.scenario);
-        scenario.nextUnitId = std::max(
-            scenario.nextUnitId,
-            object.scenario.spawnId + 1);
-    }
-    for (const EditorTrigger &source :
-         document_.triggers) {
-        ScenarioTrigger trigger;
-        trigger.enabled = source.enabled;
-        trigger.looping = source.looping;
-        trigger.objective = source.objective;
-        trigger.objectiveOrder =
-            source.objectiveOrder;
-        trigger.objectiveStringId =
-            source.objectiveStringId;
-        trigger.description = source.description;
-        trigger.name = source.name;
-        for (const EditorTriggerEffect &effect :
-             source.effects)
-            trigger.effects.push_back(
-                effect.scenario);
-        trigger.effectOrder = source.effectOrder;
-        for (const EditorTriggerCondition &condition :
-             source.conditions)
-            trigger.conditions.push_back(
-                condition.scenario);
-        trigger.conditionOrder =
-            source.conditionOrder;
-        scenario.triggers.push_back(
-            std::move(trigger));
-    }
-    scenario.triggerOrder = document_.triggerOrder;
-    scenario.triggerSystemVersion =
-        document_.scx.triggerSystemVersion > 0
-            ? document_.scx.triggerSystemVersion
-            : 1.6;
-    scenario.objectiveState =
-        document_.scx.objectiveState;
-    return true;
+    return scenarioFromDocument(document_, scenario, error);
 }
 
 int ScenarioEditor::playtestDifficulty() const {

@@ -27,8 +27,8 @@ struct NativeScenarioLimits {
     size_t maxStringBytes = 1024u * 1024u;
     size_t maxCollectionEntries = 100000u;
     size_t maxOpaqueRecordBytes = 4u * 1024u * 1024u;
-    uint32_t maxMapDimension = 160;
-    uint64_t maxMapTiles = 160u * 160u;
+    uint32_t maxMapDimension = 256;
+    uint64_t maxMapTiles = 256u * 256u;
 };
 
 struct EditorMetadata {
@@ -227,6 +227,9 @@ bool importScxFile(
     EditableScenarioDocument &document,
     std::string *error = nullptr,
     const NativeScenarioLimits &limits = NativeScenarioLimits{});
+bool scenarioFromDocument(
+    const EditableScenarioDocument &document,
+    Scenario &scenario, std::string *error = nullptr);
 bool exportScxBytes(
     const EditableScenarioDocument &document,
     std::vector<uint8_t> &bytes,

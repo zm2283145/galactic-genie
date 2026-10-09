@@ -817,7 +817,11 @@ const SpriteFrame *Assets::interfaceFrame(
     if (!slp) {
         std::vector<uint8_t> slpData;
         auto parsed = std::make_unique<Slp>();
-        if (interfac_.read(slpId, slpData) && parsed->parse(std::move(slpData), &err)) {
+        // The History pictures (53291) of the expanded data bank are the
+        // Expanding Fronts archive's longer copy (74 frames, a superset).
+        const bool latest = slpId == 53291;
+        if ((latest ? interfac_.readLatest(slpId, slpData) : interfac_.read(slpId, slpData)) &&
+            parsed->parse(std::move(slpData), &err)) {
             if (interfaceSlpCache_.size() >= 3) interfaceSlpCache_.pop_front();
             interfaceSlpCache_.emplace_back(slpId, std::move(parsed));
             slp = interfaceSlpCache_.back().second.get();

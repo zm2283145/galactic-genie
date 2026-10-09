@@ -27,6 +27,7 @@ param(
     [string]$MusicDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\MUSIC",
     [string]$TerrainSoundDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\Sound\Terrain",
     [string]$AiDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\AI",
+    [string]$HistoryDir = "D:\GOG\Star Wars - Galactic Battlegrounds\Game\History",
     [string]$ScenarioFile = "",
     [int]$CampaignEntry = 2,
     [switch]$Vpk,
@@ -40,6 +41,8 @@ param(
     [switch]$TerrainSoundData,
     [switch]$LanguageData,
     [switch]$AiData,
+    # The History (DataBank) topic texts.
+    [switch]$HistoryData,
     [switch]$AllCampaignSoundData,
     [switch]$CampaignStoryData,
     [switch]$AllRequiredData,
@@ -301,6 +304,12 @@ if ($AiData) {
             Ftp-MkDir $remoteDir
         }
         Ftp-Put $file.FullName "ux0:/data/swgb/AI/$relative"
+    }
+}
+if ($HistoryData) {
+    Ftp-MkDir "ux0:/data/swgb/History"
+    foreach ($file in Get-ChildItem -LiteralPath $HistoryDir -File -Filter *.txt) {
+        Ftp-Put $file.FullName "ux0:/data/swgb/History/$($file.Name)"
     }
 }
 if ($ScenarioImport) {

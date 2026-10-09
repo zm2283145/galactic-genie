@@ -1110,6 +1110,13 @@ static int cmdRenderRms(int argc, char **argv) {
     InputState in;
     const float seconds = argc > 7 ? (float)atof(argv[7]) : 0.5f;
     for (float t = 0; t < seconds; t += 1.0f / 30) g.update(1.0f / 30, in);
+    // SWGB_RENDER_ZOOM / SWGB_RENDER_REVEAL: a wider, fully visible view.
+    if (const char *zoom = getenv("SWGB_RENDER_ZOOM")) g.setZoom((float)atof(zoom));
+    if (getenv("SWGB_RENDER_REVEAL")) g.setVisibilityCheatsForTesting(true, true);
+    if (const char *stats = getenv("SWGB_RENDER_STATS")) {
+        g.setStatisticsVisible(true);
+        g.setMinimapMode(atoi(stats));
+    }
     g.render(r, 960, 544);
     r.savePng(argv[6]);
     printf("objects %zu\n", g.activeObjectCount());
@@ -7676,7 +7683,7 @@ static int cmdTestAi(
         !originalProgression ||
         explored <= openingExplored ||
         attacksIssued == 0 ||
-        powerCores > 1 ||
+        powerCores > 3 || // CE-homebase builds more at TL3 (goal make-power)
         enemyProductionSounds != 0 ||
         !forwardLand ||
         !forwardIslands) {
@@ -7934,6 +7941,45 @@ static int cmdTestSkirmish(const char *dataDir) {
         defence.damageObjectForTesting(monument, 1000000);
         for (int i = 0; i < 5; ++i) defence.update(0.1f, InputState{});
         const bool defenceLost = defence.victoryStateForTesting() == 0;
+        // Medics heal (action 105), garrisons heal once per second (unit
+        // attribute 108), Bothan SpyNet (attribute 183) shares every LOS.
+        {
+            Game heal(assets);
+            heal.init(7, 96, &err);
+            heal.setLocalPlayerForTesting(1);
+            const int civ = heal.civilizationForPlayerForTesting(1);
+            const uint32_t medic = heal.spawnObjectForTesting(civ, 939, 1, 30.0f, 30.0f);
+            const uint32_t trooper = heal.spawnObjectForTesting(civ, 460, 1, 31.0f, 30.0f);
+            heal.setHitPointsForTesting(trooper, 10.0f);
+            for (int i = 0; i < 30; ++i) heal.update(0.1f, InputState{});
+            const float healed = heal.objectHitPoints(trooper);
+            const uint32_t center = heal.firstObjectForTesting(1, 109);
+            const uint32_t garrisoned = heal.spawnObjectForTesting(civ, 460, 1, 40.0f, 40.0f);
+            heal.setHitPointsForTesting(garrisoned, 10.0f);
+            const bool entered = center && heal.garrisonForTesting(garrisoned, center);
+            for (int i = 0; i < 400 && heal.garrisonedCount(center) == 0; ++i)
+                heal.update(0.1f, InputState{});
+            const float garrisonStart = heal.objectHitPoints(garrisoned);
+            for (int i = 0; i < 50; ++i) heal.update(0.1f, InputState{});
+            const float garrisonHp = heal.objectHitPoints(garrisoned) - garrisonStart;
+            // SpyNet: player 1 sees a tile only player 2 can see.
+            int spyX = -1, spyY = -1;
+            for (int y = 0; y < 96 && spyX < 0; ++y)
+                for (int x = 0; x < 96; ++x)
+                    if (heal.tileVisibleForTesting(2, x, y) && !heal.tileVisibleForTesting(1, x, y)) {
+                        spyX = x; spyY = y; break;
+                    }
+            heal.researchTechnology(1, 62); // Bothan SpyNet
+            heal.update(0.1f, InputState{});
+            const bool spy = spyX >= 0 && heal.tileVisibleForTesting(1, spyX, spyY);
+            report("healing-garrison-spynet",
+                   heal.healableForTesting(trooper) && medic && healed > 14.0f && healed < 17.0f &&
+                       entered && garrisonHp > 1.2f && garrisonHp < 1.8f && spy,
+                   "healable " + std::to_string(heal.healableForTesting(trooper)) + " medic hp " +
+                       std::to_string(healed) + " garrison " + std::to_string(entered) + " hp " +
+                       std::to_string(garrisonHp) + " spy tile " + std::to_string(spyX) + "," +
+                       std::to_string(spyY) + " " + std::to_string(spy));
+        }
         report("special-game-types",
                cotbInit && baseId && captured && raceOk && defendInit && monument &&
                    defenderCenters == 1 && fortresses == 1 && walls > 20 && defenceLost,
@@ -12423,10 +12469,9 @@ static int cmdTestEditor(
             std::to_string(
                 editor.document().objects.size()));
 
-    const std::string archivePath =
-        std::string(campaignDir) + "\\XCAM1.CPX";
-    std::unique_ptr<CpxArchive> archive =
-        CpxArchive::open(archivePath, &err);
+    std::unique_ptr<CpxArchive> archive;
+    for (const char *name : {"/xcam1.cpx", "/XCAM1.CPX", "\\XCAM1.CPX"})
+        if (!archive) archive = CpxArchive::open(std::string(campaignDir) + name, &err);
     std::vector<uint8_t> stockScx;
     if (archive)
         for (size_t entry = 0;
@@ -12486,19 +12531,24 @@ static int cmdTestEditor(
         exportScxBytes(
             importedReloaded, metadataExact, &err) &&
         metadataExact == stockScx;
+    // Edited documents are written in the editor's SCX format: the edit
+    // survives a reload, and a generated document exports too.
     exportDocument.messages.instructions +=
         " modified";
+    Scenario modifiedReload;
     const bool modifiedRejected =
-        !exportScxBytes(
-            exportDocument, exact, &err) &&
-        err.find("native") != std::string::npos;
+        exportScxBytes(exportDocument, exact, &err) &&
+        modifiedReload.load(exact, &err) &&
+        modifiedReload.instructions == exportDocument.messages.instructions &&
+        modifiedReload.units.size() == exportDocument.objects.size();
     EditableScenarioDocument generated =
         exportDocument;
     generated.originalScxBytes.clear();
     generated.hasImportFingerprint = false;
+    Scenario generatedReload;
     const bool generatedRejected =
-        !exportScxBytes(
-            generated, exact, &err);
+        exportScxBytes(generated, exact, &err) && generatedReload.load(exact, &err) &&
+        generatedReload.triggers.size() == generated.triggers.size();
     report(
         "honest-scx-export-gate",
         exactExport && importedSidecar &&
@@ -12565,7 +12615,7 @@ static int cmdTestEditor(
             std::string::npos;
     const bool ioRejected =
         !saveEditableScenario(
-            "missing-editor-dir\\scenario.swscenario",
+            "missing-editor-dir/scenario.swscenario",
             document, &storageError);
     std::remove(nativePath);
     std::remove("test-editor.swscenario.bak");
@@ -12869,6 +12919,156 @@ static int cmdRenderCampaignMissions(int argc, char **argv) {
     return 0;
 }
 
+// scx-diff <file.cpx> <index>: parse a campaign scenario, write it back with
+// Scenario::save and list where the decompressed bodies differ.
+namespace swgb { extern std::vector<std::pair<std::string, size_t>> *g_scenarioTrace; }
+static int cmdScxDiff(int argc, char **argv) {
+    if (argc < 4) return 2;
+    std::vector<std::pair<std::string, size_t>> traceA, traceB;
+    std::string err;
+    auto archive = CpxArchive::open(argv[2], &err);
+    if (!archive) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    std::vector<uint8_t> original;
+    if (!archive->read((size_t)atoi(argv[3]), original, &err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    Scenario scenario;
+    g_scenarioTrace = &traceA;
+    if (!scenario.load(original, &err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    std::vector<uint8_t> written;
+    if (getenv("SWGB_SCX_VIA_DOC")) {
+        // Through the editor: import, then export as an edited document.
+        EditableScenarioDocument document;
+        if (!importScxBytes(original, document, &err)) { fprintf(stderr, "import: %s\n", err.c_str()); return 1; }
+        document.hasImportFingerprint = false;
+        if (!exportScxBytes(document, written, &err)) { fprintf(stderr, "export: %s\n", err.c_str()); return 1; }
+    } else if (!scenario.save(written, &err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    Scenario reloaded;
+    g_scenarioTrace = &traceB;
+    const bool reloads = reloaded.load(written, &err);
+    g_scenarioTrace = nullptr;
+    std::vector<uint8_t> bodyA, bodyB, headerA, headerB;
+    {
+        auto split = [](const std::vector<uint8_t> &scx, std::vector<uint8_t> &out) {
+            uint32_t length = 0;
+            std::memcpy(&length, scx.data() + 4, 4);
+            std::vector<uint8_t> compressed(scx.begin() + 8 + length, scx.end());
+            dat::inflateRaw(compressed, out, nullptr);
+        };
+        split(original, bodyA);
+        split(written, bodyB);
+    }
+    for (size_t i = 0; i < traceA.size() && i < traceB.size(); ++i) {
+        const size_t a0 = traceA[i].second, b0 = traceB[i].second;
+        const size_t a1 = i + 1 < traceA.size() ? traceA[i + 1].second : bodyA.size();
+        const size_t b1 = i + 1 < traceB.size() ? traceB[i + 1].second : bodyB.size();
+        size_t first = SIZE_MAX;
+        for (size_t k = 0; k < std::min(a1 - a0, b1 - b0); ++k)
+            if (bodyA[a0 + k] != bodyB[b0 + k]) { first = k; break; }
+        printf("  %-12s %8zu %8zu len %zu/%zu", traceA[i].first.c_str(), a0, b0, a1 - a0, b1 - b0);
+        if (first != SIZE_MAX) {
+            printf(" first diff +%zu:", first);
+            const size_t from = first >= 8 ? first - 8 : 0;
+            printf("\n     A:");
+            for (size_t k = from; k < first + 24 && a0 + k < a1; ++k) printf(" %02x", bodyA[a0 + k]);
+            printf("\n     B:");
+            for (size_t k = from; k < first + 24 && b0 + k < b1; ++k) printf(" %02x", bodyB[b0 + k]);
+        }
+        printf("\n");
+    }
+    auto body = [](const std::vector<uint8_t> &scx, std::vector<uint8_t> &out, std::vector<uint8_t> &header) {
+        uint32_t length = 0;
+        std::memcpy(&length, scx.data() + 4, 4);
+        header.assign(scx.begin() + 8, scx.begin() + 8 + length);
+        std::vector<uint8_t> compressed(scx.begin() + 8 + length, scx.end());
+        return dat::inflateRaw(compressed, out, nullptr);
+    };
+    std::vector<uint8_t> a, b, ha, hb;
+    body(original, a, ha);
+    body(written, b, hb);
+    printf("player data %.2f; reload %d %s; header %zu/%zu %s; body %zu/%zu\n", scenario.playerDataVersion,
+           reloads, err.c_str(), ha.size(), hb.size(), ha == hb ? "same" : "differs", a.size(), b.size());
+    size_t shown = 0;
+    for (size_t i = 0; i < std::min(a.size(), b.size()) && shown < 40;) {
+        if (a[i] == b[i]) { ++i; continue; }
+        size_t j = i;
+        while (j < std::min(a.size(), b.size()) && a[j] != b[j]) ++j;
+        printf("  diff at %zu..%zu:", i, j);
+        for (size_t k = i; k < std::min(j, i + 12); ++k) printf(" %02x/%02x", a[k], b[k]);
+        printf("\n");
+        ++shown;
+        i = j;
+        if (a.size() != b.size() && shown > 12) break;
+    }
+    return 0;
+}
+
+// render-history <Data> <HistoryDir> <topic> <out.png>: the History screen.
+static int cmdRenderHistory(int argc, char **argv) {
+    if (argc < 6) return 2;
+    SoftRenderer renderer;
+    Assets assets(&renderer);
+    std::string err;
+    if (!assets.init(argv[2], &err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    const std::string dir = argv[3];
+    Frontend frontend;
+    frontend.setStringLookup([&](int id, const std::string &fallback) {
+        const std::string &text = assets.localizedString(id);
+        return text.empty() ? fallback : text;
+    });
+    frontend.setHistorySources(
+        [&](const std::string &name, std::string &text) {
+            for (const std::string &candidate : {name, std::string(name)}) {
+                FILE *file = fopen((dir + "/" + candidate).c_str(), "rb");
+                if (!file) {
+                    // Case-insensitive match.
+                    for (const auto &entry : std::filesystem::directory_iterator(dir)) {
+                        std::string a = entry.path().filename().string(), b = candidate;
+                        for (char &c : a) c = (char)tolower((unsigned char)c);
+                        for (char &c : b) c = (char)tolower((unsigned char)c);
+                        if (a == b) { file = fopen(entry.path().string().c_str(), "rb"); break; }
+                    }
+                }
+                if (!file) continue;
+                text.clear();
+                char buffer[4096];
+                size_t n;
+                while ((n = fread(buffer, 1, sizeof buffer, file)) > 0) text.append(buffer, n);
+                fclose(file);
+                return true;
+            }
+            return false;
+        },
+        [&](int slp, int frame) { return assets.interfaceFrame(slp, (size_t)frame, 50530); });
+    InputState in;
+    in.screenW = 960;
+    in.screenH = 544;
+    in.menuActivate = true;
+    frontend.update(in, -1); // title -> main menu
+    in = {};
+    in.screenW = 960;
+    in.screenH = 544;
+    in.menuDown = true;
+    for (int i = 0; i < 3; ++i) frontend.update(in, -1);
+    in = {};
+    in.screenW = 960;
+    in.screenH = 544;
+    in.menuActivate = true;
+    frontend.update(in, -1);
+    in = {};
+    in.screenW = 960;
+    in.screenH = 544;
+    in.menuDown = true;
+    for (int i = 0; i < atoi(argv[4]); ++i) frontend.update(in, -1);
+    in.menuDown = false;
+    frontend.update(in, -1);
+    frontend.render(renderer, 960, 544);
+    renderer.savePng(argv[5]);
+    printf("screen %d\n", (int)frontend.screen());
+    return 0;
+}
+
 // render-achievements <Data> <Campaign dir> <archive substring> <entry> <seconds> <out-prefix>
 // rms-map <DataDir> <mapType> <sizeIndex> <players> <seed> <out.png>: run the
 // original random map script and draw terrain (minimap colours), elevation
@@ -13021,9 +13221,15 @@ static int cmdRenderAchievements(int argc, char **argv) {
             std::array<const SpriteFrame *, 8> banners{};
             for (size_t i = 0; i < tabs.size(); ++i) tabs[i] = assets.interfaceFrame(50765, i, 50531);
             for (size_t i = 0; i < banners.size(); ++i) banners[i] = assets.interfaceFrame(50762, i, 50531);
-            frontend.setAchievementsArt(tabs, banners);
+            std::array<const SpriteFrame *, 9> decals{};
+            std::array<const SpriteFrame *, 5> teams{};
+            for (size_t i = 0; i < decals.size(); ++i) decals[i] = assets.interfaceFrame(50766, i, 50531);
+            for (size_t i = 0; i < teams.size(); ++i) teams[i] = assets.interfaceFrame(50769, i, 50531);
+            frontend.setAchievementsArt(tabs, banners, decals, teams);
             AchievementsData data;
             data.players = game.achievementsPlayers();
+            data.atGameEnd = getenv("SWGB_ACH_END") != nullptr;
+            if (data.atGameEnd && !data.players.empty()) data.players[0].won = true;
             data.elapsedSeconds = game.elapsedGameTime();
             frontend.setAchievements(data);
             for (const AchievementsPlayer &player : data.players) {
@@ -13296,6 +13502,8 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "render-campaign-missions")) return cmdRenderCampaignMissions(argc, argv);
     if (!strcmp(cmd, "audit-triggers")) return cmdAuditTriggers(argc, argv);
     if (!strcmp(cmd, "render-achievements")) return cmdRenderAchievements(argc, argv);
+    if (!strcmp(cmd, "render-history")) return cmdRenderHistory(argc, argv);
+    if (!strcmp(cmd, "scx-diff")) return cmdScxDiff(argc, argv);
     if (!strcmp(cmd, "rms-map")) return cmdRmsMap(argc, argv);
     if (!strcmp(cmd, "render-rms")) return cmdRenderRms(argc, argv);
     if (!strcmp(cmd, "iframe")) return cmdInterfaceFrame(argc, argv);

@@ -1315,30 +1315,228 @@ bool importScxFile(
     return true;
 }
 
+// The scenario a document describes (also the editor's playtest).
+bool scenarioFromDocument(
+    const EditableScenarioDocument &document,
+    Scenario &scenario, std::string *error) {
+    (void)error;
+    scenario = {};
+    scenario.version =
+        document.scx.version.empty()
+            ? "1.21"
+            : document.scx.version;
+    scenario.saveType = document.scx.saveType;
+    scenario.lastSaveTime =
+        document.scx.lastSaveTime;
+    scenario.instructions =
+        document.messages.instructions;
+    scenario.victoryType = document.victory.type;
+    scenario.enabledPlayerCount =
+        (uint32_t)document.players.size();
+    scenario.nextUnitId = 1;
+    scenario.playerDataVersion =
+        document.scx.playerDataVersion > 0
+            ? document.scx.playerDataVersion
+            : 1.24f;
+    scenario.originalFilename =
+        document.metadata.title;
+    scenario.hints = document.messages.hints;
+    scenario.victoryMessage =
+        document.messages.victory;
+    scenario.lossMessage =
+        document.messages.loss;
+    scenario.history = document.messages.history;
+    scenario.scouts = document.messages.scouts;
+    scenario.pregameCinematic =
+        document.messages.pregameCinematic;
+    scenario.victoryCinematic =
+        document.messages.victoryCinematic;
+    scenario.lossCinematic =
+        document.messages.lossCinematic;
+    scenario.background =
+        document.messages.background;
+    scenario.cameraX = document.camera.x;
+    scenario.cameraY = document.camera.y;
+    scenario.mapCameraX = document.camera.mapX;
+    scenario.mapCameraY = document.camera.mapY;
+    scenario.victory = document.victory.scenario;
+    scenario.allTechnologies =
+        document.scx.allTechnologies;
+    scenario.map = document.map;
+    for (size_t index = 0;
+         index < document.players.size() &&
+         index < 8;
+         ++index) {
+        scenario.players[index] =
+            document.players[index].scenario;
+        scenario.players[index]
+            .researchedTechnologies =
+            document.players[index]
+                .researchedTechnologies;
+        scenario.players[index].researchedUnits =
+            document.players[index].researchedUnits;
+        scenario.players[index].researchedBuildings =
+            document.players[index]
+                .researchedBuildings;
+        scenario.civilizations[index] =
+            scenario.players[index].civilization;
+    }
+    for (size_t source = 0;
+         source < document.players.size();
+         ++source)
+        for (size_t target = 0;
+             target < document.players.size();
+             ++target) {
+            const int left =
+                document.players[source].team;
+            const int right =
+                document.players[target].team;
+            if (source == target ||
+                (left > 0 && left == right))
+                scenario.players[source]
+                    .diplomacy[target + 1] = 0u;
+        }
+    for (const EditorObject &object :
+         document.objects) {
+        scenario.units.push_back(object.scenario);
+        scenario.nextUnitId = std::max(
+            scenario.nextUnitId,
+            object.scenario.spawnId + 1);
+    }
+    for (const EditorTrigger &source :
+         document.triggers) {
+        ScenarioTrigger trigger;
+        trigger.enabled = source.enabled;
+        trigger.looping = source.looping;
+        trigger.objective = source.objective;
+        trigger.objectiveOrder =
+            source.objectiveOrder;
+        trigger.objectiveStringId =
+            source.objectiveStringId;
+        trigger.description = source.description;
+        trigger.name = source.name;
+        for (const EditorTriggerEffect &effect :
+             source.effects)
+            trigger.effects.push_back(
+                effect.scenario);
+        trigger.effectOrder = source.effectOrder;
+        for (const EditorTriggerCondition &condition :
+             source.conditions)
+            trigger.conditions.push_back(
+                condition.scenario);
+        trigger.conditionOrder =
+            source.conditionOrder;
+        scenario.triggers.push_back(
+            std::move(trigger));
+    }
+    scenario.triggerOrder = document.triggerOrder;
+    scenario.triggerSystemVersion =
+        document.scx.triggerSystemVersion > 0
+            ? document.scx.triggerSystemVersion
+            : 1.6;
+    scenario.objectiveState =
+        document.scx.objectiveState;
+    return true;
+}
+
+namespace {
+// Values a scenario written from scratch needs where an imported one keeps
+// what it was read with (see Scenario's raw fields).
+void fillScxDefaults(Scenario &scenario) {
+    for (size_t index = 0; index < scenario.players.size(); ++index) {
+        ScenarioPlayer &player = scenario.players[index];
+        bool primaryEmpty = true;
+        for (uint32_t value : player.primaryResources) primaryEmpty = primaryEmpty && value == 0;
+        if (primaryEmpty) {
+            // The player-data block lists ore, carbon, food, nova (the
+            // object block's 2, 1, 0, 3).
+            const auto clampValue = [](float value) { return (uint32_t)std::max(0.0f, value); };
+            player.primaryResources = {clampValue(player.resources[2]), clampValue(player.resources[1]),
+                                       clampValue(player.resources[0]), clampValue(player.resources[3]),
+                                       clampValue(player.resources[4]), 0};
+        }
+        bool diplomacyEmpty = true;
+        for (uint32_t value : player.primaryDiplomacy) diplomacyEmpty = diplomacyEmpty && value == 0;
+        if (diplomacyEmpty) player.primaryDiplomacy = player.diplomacy;
+        if (player.recordTail.empty()) {
+            bool recordEmpty = true;
+            for (uint32_t value : player.recordDiplomacy) recordEmpty = recordEmpty && value == 0;
+            if (recordEmpty)
+                for (size_t other = 0; other < 9; ++other) {
+                    // 0 gaia, 1 self, 2 ally, 3 neutral, 4 enemy.
+                    const uint32_t stance = player.diplomacy[other];
+                    player.recordDiplomacy[other] =
+                        other == 0 ? 0 : other == index + 1 ? 1 : stance == 0 ? 2 : stance == 1 ? 3 : 4;
+                }
+            if (player.recordName.empty()) player.recordName = player.name;
+        }
+    }
+}
+} // namespace
+
 bool exportScxBytes(
     const EditableScenarioDocument &document,
     std::vector<uint8_t> &bytes,
     std::string *error) {
     bytes.clear();
-    if (!document.hasImportFingerprint ||
-        document.originalScxBytes.empty()) {
-        setError(
-            error,
-            "SCX export is unavailable for generated documents; save a "
-            "native .swscenario sidecar");
+    // An unchanged import is written back byte for byte.
+    if (document.hasImportFingerprint && !document.originalScxBytes.empty()) {
+        const uint64_t current = editableScenarioSemanticFingerprint(document);
+        if (current != 0 && current == document.importSemanticFingerprint) {
+            bytes = document.originalScxBytes;
+            return true;
+        }
+    }
+    // Otherwise the scenario is written in the editor's SCX 1.21 format.
+    Scenario scenario;
+    if (!scenarioFromDocument(document, scenario, error)) return false;
+    // Keep what an imported file stored beyond the editor's model (string
+    // ids, embedded AI files, the formatting of empty strings).
+    Scenario source;
+    if (!document.originalScxBytes.empty() && source.load(document.originalScxBytes)) {
+        scenario.playerDataByte = source.playerDataByte;
+        scenario.timelineValue = source.timelineValue;
+        scenario.messageStringIds = source.messageStringIds;
+        scenario.messageTerminatedMask = source.messageTerminatedMask;
+        scenario.headerCameraX = source.headerCameraX;
+        scenario.headerCameraY = source.headerCameraY;
+        scenario.headerCameraExtra = source.headerCameraExtra;
+        scenario.includedFiles = source.includedFiles;
+        scenario.compatibilityBlock = source.compatibilityBlock;
+        scenario.nextUnitId = std::max(scenario.nextUnitId, source.nextUnitId);
+        scenario.originalFilename = source.originalFilename;
+        scenario.saveType = source.saveType;
+        scenario.lastSaveTime = source.lastSaveTime;
+        if (document.players.size() == source.enabledPlayerCount ||
+            (document.players.size() == 8 && source.enabledPlayerCount <= 8))
+            scenario.enabledPlayerCount = source.enabledPlayerCount;
+        // The editor models players 1-8; the file has 16 slots.
+        for (size_t index = document.players.size(); index < scenario.players.size(); ++index) {
+            scenario.players[index] = source.players[index];
+            scenario.civilizations[index] = source.civilizations[index];
+        }
+        for (size_t i = 0; i < scenario.triggers.size() && i < source.triggers.size(); ++i) {
+            ScenarioTrigger &trigger = scenario.triggers[i];
+            const ScenarioTrigger &original = source.triggers[i];
+            if (trigger.name != original.name) continue;
+            trigger.descriptionStringId = original.descriptionStringId;
+            for (size_t e = 0; e < trigger.effects.size() && e < original.effects.size(); ++e)
+                if (trigger.effects[e].type == original.effects[e].type) {
+                    trigger.effects[e].emptyMessageTerminated = original.effects[e].emptyMessageTerminated;
+                    trigger.effects[e].emptySoundTerminated = original.effects[e].emptySoundTerminated;
+                }
+        }
+    } else {
+        scenario.messageTerminatedMask = 0x3f;
+        scenario.headerCameraX = (int32_t)std::max(0.0f, scenario.cameraX);
+        scenario.headerCameraY = (int32_t)std::max(0.0f, scenario.cameraY);
+    }
+    fillScxDefaults(scenario);
+    std::string saveError;
+    if (!scenario.save(bytes, &saveError)) {
+        setError(error, "SCX export failed: " + saveError);
         return false;
     }
-    const uint64_t current =
-        editableScenarioSemanticFingerprint(document);
-    if (current == 0 ||
-        current != document.importSemanticFingerprint) {
-        setError(
-            error,
-            "SCX export refused because editable scenario semantics changed; "
-            "save a native .swscenario sidecar");
-        return false;
-    }
-    bytes = document.originalScxBytes;
     return true;
 }
 

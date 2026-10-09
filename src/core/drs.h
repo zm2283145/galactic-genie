@@ -52,6 +52,8 @@ public:
     bool add(const std::string &path, std::string *err = nullptr);
     bool has(int32_t id) const;
     bool read(int32_t id, std::vector<uint8_t> &out);
+    // The copy in the archive added last (an expansion added after its base).
+    bool readLatest(int32_t id, std::vector<uint8_t> &out);
     const DrsEntry *find(int32_t id, DrsArchive **owner = nullptr) const;
     const std::vector<std::unique_ptr<DrsArchive>> &archives() const { return archives_; }
 

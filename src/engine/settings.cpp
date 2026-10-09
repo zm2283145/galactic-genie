@@ -10,7 +10,8 @@ namespace swgb {
 namespace {
 
 constexpr char kMagic[8] = {'S', 'W', 'G', 'B', 'S', 'E', 'T', '1'};
-constexpr size_t kSettingsSize = 36;
+constexpr size_t kSettingsSizeV1 = 36;
+constexpr size_t kSettingsSize = 56;
 
 void writeU32(std::vector<uint8_t> &out, uint32_t value) {
     for (int shift = 0; shift < 32; shift += 8)
@@ -98,6 +99,11 @@ bool validateSettings(
             if (err) *err = "volume setting is outside 0-100";
             return false;
         }
+    if (settings.gameSpeed < 0 || settings.gameSpeed > 2 || settings.scrollSpeed < 10 ||
+        settings.scrollSpeed > 109) {
+        if (err) *err = "game or scroll speed is out of range";
+        return false;
+    }
     if (settings.controls != ControlPreset::Standard &&
         settings.controls != ControlPreset::LeftHanded) {
         if (err) *err = "unsupported control preset";
@@ -126,21 +132,22 @@ bool loadSettings(
         std::fread(bytes.data(), 1, bytes.size(), file);
     const bool readError = std::ferror(file) != 0;
     std::fclose(file);
-    if (readError || size != kSettingsSize ||
+    if (readError || (size != kSettingsSize && size != kSettingsSizeV1) ||
         std::memcmp(bytes.data(), kMagic, sizeof kMagic) != 0) {
         if (err)
             *err = "settings file is corrupt or unsupported";
         return false;
     }
     const uint32_t expected =
-        readU32(bytes.data() + kSettingsSize - 4);
+        readU32(bytes.data() + size - 4);
     if (expected != checksum(
                         bytes.data(),
-                        kSettingsSize - 4)) {
+                        size - 4)) {
         if (err) *err = "settings checksum mismatch";
         return false;
     }
-    if (readU32(bytes.data() + 8) != 1) {
+    const uint32_t version = readU32(bytes.data() + 8);
+    if ((version != 1 || size != kSettingsSizeV1) && (version != 2 || size != kSettingsSize)) {
         if (err) *err = "unsupported settings version";
         return false;
     }
@@ -155,6 +162,13 @@ bool loadSettings(
         (int)readU32(bytes.data() + 24);
     loaded.controls =
         (ControlPreset)readU32(bytes.data() + 28);
+    if (version >= 2) {
+        loaded.gameSpeed = (int)readU32(bytes.data() + 32);
+        loaded.scrollSpeed = (int)readU32(bytes.data() + 36);
+        loaded.audioTaunts = readU32(bytes.data() + 40) != 0;
+        loaded.oneClickGarrison = readU32(bytes.data() + 44) != 0;
+        loaded.friendOrFoeColors = readU32(bytes.data() + 48) != 0;
+    }
     if (!validateSettings(loaded, err)) return false;
     settings = loaded;
     return true;
@@ -167,12 +181,17 @@ bool saveSettings(
     if (!validateSettings(settings, err)) return false;
     std::vector<uint8_t> bytes(
         kMagic, kMagic + sizeof kMagic);
-    writeU32(bytes, 1);
+    writeU32(bytes, 2);
     writeU32(bytes, (uint32_t)settings.masterVolume);
     writeU32(bytes, (uint32_t)settings.musicVolume);
     writeU32(bytes, (uint32_t)settings.dialogueVolume);
     writeU32(bytes, (uint32_t)settings.effectsVolume);
     writeU32(bytes, (uint32_t)settings.controls);
+    writeU32(bytes, (uint32_t)settings.gameSpeed);
+    writeU32(bytes, (uint32_t)settings.scrollSpeed);
+    writeU32(bytes, settings.audioTaunts ? 1u : 0u);
+    writeU32(bytes, settings.oneClickGarrison ? 1u : 0u);
+    writeU32(bytes, settings.friendOrFoeColors ? 1u : 0u);
     writeU32(bytes, checksum(bytes.data(), bytes.size()));
     return writeAtomic(path, bytes, err);
 }

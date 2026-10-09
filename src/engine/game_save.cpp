@@ -14,7 +14,7 @@ namespace {
 
 constexpr char kSaveMagic[8] = {
     'S', 'W', 'G', 'B', 'S', 'A', 'V', 'E'};
-constexpr uint32_t kSaveVersion = 8;
+constexpr uint32_t kSaveVersion = 9;
 constexpr uint32_t kOldestSaveVersion = 1;
 constexpr size_t kMaxSaveBytes = 32u * 1024u * 1024u;
 constexpr uint32_t kMaxObjects = 20000;
@@ -899,6 +899,8 @@ bool Game::saveMatch(
         SAVE_FIELD(tradeHomeId);
         SAVE_FIELD(tradeCarrying);
         SAVE_FIELD(conversionCountdown);
+        SAVE_FIELD(healTargetId);
+        SAVE_FIELD(regenAccumulator);
 #undef SAVE_FIELD
     }
 
@@ -1696,6 +1698,12 @@ bool Game::loadMatch(
              !LOAD_FIELD(tradeHomeId) ||
              !LOAD_FIELD(tradeCarrying) ||
              !LOAD_FIELD(conversionCountdown))) {
+            if (err) *err = reader.error();
+            return false;
+        }
+        if (version >= 9 &&
+            (!LOAD_FIELD(healTargetId) ||
+             !LOAD_FIELD(regenAccumulator))) {
             if (err) *err = reader.error();
             return false;
         }

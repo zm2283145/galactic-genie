@@ -209,6 +209,8 @@ struct AchievementsPlayer {
     std::array<std::array<std::string, 6>, 5> cells{};
     int total = 0;
     std::vector<int> timeline;
+    int team = 0;      // 1..4 for a team of allied players, 0 alone
+    bool won = false;  // the game ended and this player won
 };
 
 class Game {
@@ -1139,6 +1141,17 @@ public:
     void setResourceForTesting(
         int player, int resourceType,
         float amount);
+    void setHitPointsForTesting(uint32_t spawnId, float hp) {
+        if (Object *o = findObject(spawnId)) o->hitPoints = hp;
+    }
+    uint32_t healTargetForTesting(uint32_t spawnId) const {
+        const Object *o = findObject(spawnId);
+        return o ? o->healTargetId : 0;
+    }
+    bool healableForTesting(uint32_t spawnId) const {
+        const Object *o = findObject(spawnId);
+        return o && isHealableObject(*o);
+    }
     void setDiplomacyForTesting(
         int sourcePlayer, int targetPlayer,
         uint32_t stance);
@@ -1511,6 +1524,7 @@ private:
         Gather,
         Repair,
         Convert,
+        Heal,
     };
     enum class CursorMode : uint8_t {
         Normal,
@@ -1710,6 +1724,9 @@ private:
         uint32_t gatherTargetId = 0;
         uint32_t dropOffTargetId = 0;
         uint32_t repairTargetId = 0;
+        uint32_t healTargetId = 0;   // medic heal action (task action 105)
+        float healSearchTime = 0;    // next idle auto-heal search
+        float regenAccumulator = 0;  // per-object regeneration timer (+0x1c0)
         bool garrisonDamageLocked = false;
         uint32_t discoveredByPlayers = 0;
         uint16_t initialFrame = 0;
@@ -1897,8 +1914,18 @@ private:
     void updateSpecialGameType(float dt);
     // Self Regeneration (player attribute 96: 1 HP every N s for trait 0x20
     // units, exe 0x55aa8c) and heroes' 1 HP every 2 s.
-    std::array<float, 17> regenerationTime_{};
-    float heroRegenerationTime_ = 0.0f;
+    float garrisonHealClock_ = 0.0f; // fraction of the buildings' 1 s tick
+    void updateGarrisonHealing(float dt);
+    void updateHealing(float dt);
+    bool isHealer(const Object &object) const;
+    const dat::Task *healTask(const Object &object) const;
+    bool isHealableObject(const Object &target) const;
+    bool isHealTargetFor(const Object &target, int player) const;
+    bool issueHealCommand(Object &medic, Object &target);
+    float healObject(Object &target, float amount, int payer);
+    bool isJediMaster(const Object &object) const;
+    void aiDropSitePositions(int player, int resourceType,
+                             std::vector<std::array<float, 2>> &out) const;
     void updateRegeneration(float dt);
     void generateTerrain(
         int size, SkirmishMapStyle style);
@@ -1924,6 +1951,8 @@ private:
     bool objectVisibleToPlayer(
         const Object &object, int player) const;
     bool hasSharedVision(int player) const;
+    bool hasVisionSharing(int player) const;
+    bool seesThroughPlayer(int player, int other) const;
     bool isStealthed(
         const Object &object) const;
     bool isDetector(
@@ -2895,6 +2924,25 @@ private:
         UINT64_MAX;
     bool fogForceExplore_ = false;
     bool minimapDragging_ = false;
+    // Statistics panel (action 0x18, F4) and the mini-map mode (Normal /
+    // Combat / Economic, actions 0x28-0x2a) whose page it shows.
+    bool statisticsVisible_ = false;
+    int scrollSpeed_ = 84;
+    bool friendOrFoeColors_ = false;
+    bool oneClickGarrison_ = false;
+    int minimapMode_ = 0;
+    std::vector<std::pair<std::string, std::array<uint8_t, 3>>> statisticsLines() const;
+public:
+    bool statisticsVisible() const { return statisticsVisible_; }
+    // Options dialog settings (screen info 50018).
+    void setGameSpeed(SkirmishGameSpeed speed) { gameSpeed_ = speed; }
+    void setScrollSpeed(int speed) { scrollSpeed_ = std::clamp(speed, 10, 200); }
+    void setFriendOrFoeColors(bool on) { friendOrFoeColors_ = on; minimapRefreshTime_ = 0.0f; }
+    void setOneClickGarrison(bool on) { oneClickGarrison_ = on; }
+    int minimapMode() const { return minimapMode_; }
+    void setStatisticsVisible(bool on) { statisticsVisible_ = on; }
+    void setMinimapMode(int mode) { minimapMode_ = std::clamp(mode, 0, 2); minimapRefreshTime_ = 0.0f; }
+private:
     SkirmishSettings currentSkirmishSettings_{};
     bool generatedMatch_ = false;
     MatchSaveKind saveKind_ =

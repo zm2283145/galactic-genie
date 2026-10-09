@@ -120,4 +120,10 @@ bool ResourceSet::read(int32_t id, std::vector<uint8_t> &out) {
     return e && owner->read(*e, out);
 }
 
+bool ResourceSet::readLatest(int32_t id, std::vector<uint8_t> &out) {
+    for (auto it = archives_.rbegin(); it != archives_.rend(); ++it)
+        if (const DrsEntry *e = (*it)->find(id)) return (*it)->read(*e, out);
+    return false;
+}
+
 } // namespace swgb

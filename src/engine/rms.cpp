@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <list>
 #include <map>
 #include <set>
 
@@ -375,6 +376,22 @@ private:
     void placeGroup(const ObjectRec &rec, int type, int player, int gx, int gy,
                     std::vector<uint8_t> &g);
     int resolveCiv(int type, int player) const;
+    // Walls (0x4df5b0 / 0x499a60): a worker (TR 25) walkability grid kept
+    // live like the engine's path map, and the plan built once.
+    std::vector<uint8_t> pathCells_, occupied_;
+    void refreshPathCells(int x0, int y0, int x1, int y1);
+    void markObstruction(const RmsObject &object, bool set);
+    bool tr25Passable(int terrain) const;
+    struct WallSegment {
+        bool passable;
+        int x1, y1, x2, y2;
+    };
+    bool wallPlanBuilt_ = false;
+    std::vector<std::vector<WallSegment>> wallPlan_; // by player, creation order
+    std::array<int, 2> wallBaseTile(int player) const;
+    void buildWallPlan(int min, int max);
+    void wallStrip(int x0, int y0, int x1, int y1, int dir, uint8_t bit, std::vector<uint8_t> &m);
+    void placeWalls(int type, int min, int max, int player);
 };
 
 const dat::Unit *Generator::unitFor(int player, int id) const {
@@ -963,6 +980,7 @@ int Generator::createObject(int unitId, int player, float x, float y, int facet)
     const int tx = std::max(0, std::min(w_ - 1, (int)x));
     const int ty = std::max(0, std::min(h_ - 1, (int)y));
     tileObjects_[at(tx, ty)].push_back(index);
+    markObstruction(objects_[(size_t)index], true);
     return index;
 }
 
@@ -974,6 +992,7 @@ void Generator::deleteObject(int index) {
     const int ty = std::max(0, std::min(h_ - 1, (int)object.y));
     auto &list = tileObjects_[at(tx, ty)];
     list.erase(std::remove(list.begin(), list.end(), index), list.end());
+    markObstruction(object, false);
 }
 
 // can_place (unit type vtbl+0x38): 0 = OK. hill: a6; clearance: a8;
@@ -2162,7 +2181,8 @@ int Generator::buildCandidates(int list, int x, int y, int r, const std::vector<
     for (int py = y0; py <= y1; ++py)
         for (int px = x0; px <= x1; ++px)
             if (g[at(px, py)] != 0) lists_.append(list, lists_.node(px, py));
-    const int moves = ((x1 - x0 - 1) * (y1 - y0 - 1)) / 4;
+    const int a = x1 - x0 - 1, b = y1 - y0 - 1;
+    const int moves = a > 1 && b > 1 ? (a * b) / 4 : 0;
     for (int i = 0; i < moves; ++i) {
         const int px = x0 + rng_.range(x1 - x0 - 1);
         const int py = y0 + rng_.range(y1 - y0 - 1);
@@ -2222,6 +2242,314 @@ void Generator::placeGroup(const ObjectRec &rec, int type, int player, int gx, i
     }
 }
 
+// --- Walls (0x4df5b0, plan 0x499a60) ----------------------------------------
+
+bool Generator::tr25Passable(int terrain) const {
+    if (dat_.terrainRestrictions.size() <= 25) return true;
+    const auto &costs = dat_.terrainRestrictions[25].passableBuildableDmgMultiplier;
+    return terrain < 0 || (size_t)terrain >= costs.size() || costs[(size_t)terrain] > 0.0f;
+}
+
+// Path-map cell (0x498070): 0 when the tile is blocked, else the open
+// 4-neighbour direction bits N 1, W 2, E 4, S 8.
+void Generator::refreshPathCells(int x0, int y0, int x1, int y1) {
+    x0 = std::max(0, x0);
+    y0 = std::max(0, y0);
+    x1 = std::min(w_ - 1, x1);
+    y1 = std::min(h_ - 1, y1);
+    auto open = [&](int x, int y) {
+        return tr25Passable(terrain_[at(x, y)]) && !occupied_[at(x, y)];
+    };
+    for (int y = y0; y <= y1; ++y)
+        for (int x = x0; x <= x1; ++x) {
+            uint8_t c = 0;
+            if (open(x, y)) {
+                if (x > 0 && open(x - 1, y)) c |= 2;
+                if (y > 0 && open(x, y - 1)) c |= 1;
+                if (x < w_ - 1 && open(x + 1, y)) c |= 4;
+                if (y < h_ - 1 && open(x, y + 1)) c |= 8;
+            }
+            pathCells_[at(x, y)] = c;
+        }
+}
+
+void Generator::markObstruction(const RmsObject &object, bool set) {
+    if (pathCells_.empty()) return;
+    const dat::Unit *unit = unitFor(object.player, object.unitId);
+    if (!unit || unit->obstructionClass == 0 ||
+        (unit->obstructionType != 1 && unit->obstructionType != 2 && unit->obstructionType != 10))
+        return;
+    const int x0 = (int)(object.x - unit->collisionSize[0]);
+    const int x1 = (int)(object.x + unit->collisionSize[0]) - 1;
+    const int y0 = (int)(object.y - unit->collisionSize[1]);
+    const int y1 = (int)(object.y + unit->collisionSize[1]) - 1;
+    for (int y = std::max(0, y0); y <= std::min(h_ - 1, y1); ++y)
+        for (int x = std::max(0, x0); x <= std::min(w_ - 1, x1); ++x)
+            occupied_[at(x, y)] = set ? 1 : 0;
+    refreshPathCells(x0 - 1, y0 - 1, x1 + 1, y1 + 1);
+}
+
+// 0x5d72a0 / 0x5d7300: the tile diagonally NW of the player's first Command
+// Center footprint, else the player's start (camera) tile.
+std::array<int, 2> Generator::wallBaseTile(int player) const {
+    for (const RmsObject &object : objects_) {
+        if (!object.alive || object.player != player || object.unitId != 109) continue;
+        const dat::Unit *unit = unitFor(player, 109);
+        const float rx = unit ? unit->collisionSize[0] : 0.0f;
+        const float ry = unit ? unit->collisionSize[1] : 0.0f;
+        return {(int)((float)(int)object.x - rx - 0.5f), (int)((float)(int)object.y - ry - 0.5f)};
+    }
+    for (const ExtLand &land : extLands_)
+        if (land.player == player) return {land.x, land.y};
+    return {w_ / 2, h_ / 2};
+}
+
+// 0x49a030 / 0x49a3a0: least-cost 8-connected line through one strip.
+void Generator::wallStrip(int x0, int y0, int x1, int y1, int dir, uint8_t bit,
+                          std::vector<uint8_t> &m) {
+    if (!(x0 < w_ && x1 >= 0 && y0 < h_ && y1 > 0)) return;
+    x0 = std::max(x0, 0);
+    x1 = std::min(x1, w_ - 1);
+    y0 = std::max(y0, 0);
+    y1 = std::min(y1, w_ - 1);
+    if (y1 >= h_) y1 = h_ - 1;
+    struct Node {
+        int x, y;
+        float g, prio;
+        int parent;
+    };
+    std::vector<Node> nodes;
+    std::list<int> open;
+    std::vector<uint8_t> visited((size_t)w_ * h_, 0);
+    auto insert = [&](int index) {
+        auto it = open.begin();
+        while (it != open.end() && nodes[(size_t)*it].prio < nodes[(size_t)index].prio) ++it;
+        open.insert(it, index);
+    };
+    const bool horizontal = dir == 2 || dir == 4;
+    int sx = x0, sy = y0;
+    if (dir == 1) sy = y1;
+    else if (dir == 2) sx = x1;
+    nodes.push_back({sx, sy, 0.0f, 0.0f, -1});
+    visited[at(sx, sy)] = 1;
+    insert(0);
+    auto mine = [&](int x, int y) {
+        if (!inMap(x, y)) return false;
+        for (int index : tileObjects_[at(x, y)]) {
+            const RmsObject &o = objects_[(size_t)index];
+            const dat::Unit *u = unitFor(o.player, o.unitId);
+            if (u && (u->cls == 29 || u->cls == 30)) return true;
+        }
+        return false;
+    };
+    auto push = [&](int x, int y, int parent, bool diag) {
+        if (x < x0 || x > x1 || y < y0 || y > y1 || visited[at(x, y)]) return;
+        int c = -1;
+        if (horizontal) {
+            if (y == y0) c = 0;
+            if (y == y1) c = -100;
+        } else {
+            if (x == x0) c = 0;
+            if (x == x1) c = -100;
+        }
+        if (c == -1) {
+            const int t = terrain_[at(x, y)];
+            if (t == 35) c = 600;
+            else if (x == 0 || y == 0 || x == w_ - 1 || y == h_ - 1) c = 10;
+            else if (pathCells_[at(x, y)] == 0) {
+                if (mine(x, y) || mine(x + 1, y) || mine(x, y + 1) || mine(x - 1, y) || mine(x, y - 1))
+                    c = 300;
+                else
+                    c = 10 + (dir == 1 ? y - y0 : dir == 2 ? x - x0 : dir == 4 ? x1 - x : y1 - y);
+            } else {
+                c = t == 4 ? 300 : 100;
+                if (diag) c += 10;
+            }
+            if (m[at(x, y)] != 0) c = 2000;
+        }
+        const int g = c + (int)nodes[(size_t)parent].g;
+        const int h = horizontal ? y1 - y : x1 - x;
+        nodes.push_back({x, y, (float)g, (float)g + (float)h, parent});
+        visited[at(x, y)] = 1;
+        insert((int)nodes.size() - 1);
+    };
+    static constexpr int kNb[8][3] = {{1, 1, 1},  {-1, 1, 1}, {1, -1, 1}, {-1, -1, 1},
+                                      {1, 0, 0},  {-1, 0, 0}, {0, 1, 0},  {0, -1, 0}};
+    while (!open.empty()) {
+        const int n = open.front();
+        open.pop_front();
+        const Node node = nodes[(size_t)n];
+        if (horizontal ? node.y == y1 : node.x == x1) {
+            for (int k = n; k >= 0; k = nodes[(size_t)k].parent)
+                m[at(nodes[(size_t)k].x, nodes[(size_t)k].y)] |= bit;
+            break;
+        }
+        for (const auto &d : kNb) push(node.x + d[0], node.y + d[1], n, d[2] != 0);
+    }
+}
+
+void Generator::buildWallPlan(int min, int max) {
+    const size_t n = (size_t)w_ * h_;
+    std::vector<uint8_t> a(n, 0), m(n, 0);
+    for (int p = 1; p <= players_ && p <= 8; ++p) {
+        const uint8_t bit = (uint8_t)(1u << (p - 1));
+        const auto c = wallBaseTile(p);
+        const int cx = c[0], cy = c[1];
+        wallStrip(cx - max, cy - max, cx - min, cy + max, 2, bit, m);
+        wallStrip(cx + min, cy - max, cx + max, cy + max, 4, bit, m);
+        wallStrip(cx - max, cy - max, cx + max, cy - min, 1, bit, m);
+        wallStrip(cx - max, cy + min, cx + max, cy + max, 8, bit, m);
+    }
+    auto inside = [&](int x, int y) { return inMap(x, y); };
+    // Flood 1 (0x49a660): land reachable from the base without crossing the
+    // own path.
+    for (int p = 1; p <= players_ && p <= 8; ++p) {
+        const uint8_t bit = (uint8_t)(1u << (p - 1));
+        const auto c = wallBaseTile(p);
+        if (!inside(c[0], c[1])) continue;
+        a[at(c[0], c[1])] |= bit;
+        std::vector<std::array<int, 2>> stack{{c[0], c[1]}};
+        while (!stack.empty()) {
+            const auto t = stack.back();
+            stack.pop_back();
+            const int x = t[0], y = t[1];
+            const int nb[4][3] = {{x - 1, y, x > 0}, {x + 1, y, x < w_ - 1},
+                                  {x, y - 1, y > 0}, {x, y + 1, y < h_ - 1}};
+            for (const auto &q : nb) {
+                if (!q[2]) continue;
+                uint8_t &cell = a[at(q[0], q[1])];
+                if ((cell & bit) || !tr25Passable(terrain_[at(q[0], q[1])])) continue;
+                cell |= bit;
+                if (!(m[at(q[0], q[1])] & bit)) stack.push_back({q[0], q[1]});
+            }
+        }
+    }
+    for (size_t i = 0; i < n; ++i) m[i] &= a[i];
+    // Flood 2 (0x49abe0): keep the path tiles bordering the reachable interior.
+    std::fill(a.begin(), a.end(), 0);
+    for (int p = 1; p <= players_ && p <= 8; ++p) {
+        const uint8_t bit = (uint8_t)(1u << (p - 1));
+        const auto c = wallBaseTile(p);
+        if (!inside(c[0], c[1])) continue;
+        a[at(c[0], c[1])] |= bit;
+        struct Item {
+            int x, y;
+            float v;
+        };
+        std::vector<Item> stack{{c[0], c[1], 0.0f}};
+        while (!stack.empty()) {
+            Item item = stack.back();
+            stack.pop_back();
+            const int x = item.x, y = item.y;
+            float v = item.v;
+            const uint8_t cell = pathCells_[at(x, y)];
+            if (cell == 0) v += 1.0f;
+            if (v <= 0.0f || v >= 3.0f) {
+                const int nb[4][4] = {{x - 1, y, 2, x > 0}, {x + 1, y, 4, x < w_ - 1},
+                                      {x, y - 1, 1, y > 0}, {x, y + 1, 8, y < h_ - 1}};
+                for (const auto &q : nb) {
+                    if (!q[3] || (a[at(q[0], q[1])] & bit) || !(cell & q[2])) continue;
+                    a[at(q[0], q[1])] |= bit;
+                    stack.push_back({q[0], q[1], (m[at(q[0], q[1])] & bit) ? 1.0f : 0.0f});
+                }
+            } else if (cell == 0 || v == 1.0f) {
+                const int nb[8][2] = {{x - 1, y},     {x + 1, y},     {x, y - 1},     {x, y + 1},
+                                      {x - 1, y - 1}, {x - 1, y + 1}, {x + 1, y - 1}, {x + 1, y + 1}};
+                for (const auto &q : nb) {
+                    if (!inside(q[0], q[1])) continue;
+                    uint8_t &mark = a[at(q[0], q[1])];
+                    if ((mark & bit) || !(m[at(q[0], q[1])] & bit)) continue;
+                    mark |= bit;
+                    stack.push_back({q[0], q[1], v});
+                }
+            }
+        }
+    }
+    for (size_t i = 0; i < n; ++i) m[i] &= a[i];
+    // Segments (0x499d10): straight runs of one player's tiles.
+    wallPlan_.assign((size_t)players_ + 1, {});
+    std::fill(a.begin(), a.end(), 1);
+    auto passable = [&](int x, int y) { return pathCells_[at(x, y)] != 0; };
+    for (int x = 0; x < w_; ++x)
+        for (int y = 0; y < w_ && y < h_; ++y) {
+            if (!a[at(x, y)] || !m[at(x, y)]) continue;
+            for (int k = 0; k < 8; ++k) {
+                const uint8_t b = (uint8_t)(1u << k);
+                if (!(m[at(x, y)] & b)) continue;
+                const bool p0 = passable(x, y);
+                auto same = [&](int u, int v) { return m[at(u, v)] == b && passable(u, v) == p0; };
+                bool dx = false, dy = false, dym = false;
+                auto tryA = [&] { return same(x + 1, y) ? (dx = true) : false; };
+                auto tryB = [&] { return same(x + 1, y + 1) ? (dx = dy = true) : false; };
+                auto tryC = [&] { return same(x, y + 1) ? (dy = true) : false; };
+                auto tryD = [&] { return y > 0 && same(x + 1, y - 1) ? (dx = dym = true) : false; };
+                if (x < w_ - 1 && y < h_ - 1) {
+                    if (!tryA() && !tryB() && !tryC()) tryD();
+                } else if (x < w_ - 1) {
+                    if (!tryA()) tryD();
+                } else if (y < h_ - 1) {
+                    tryC();
+                }
+                WallSegment seg{p0, x, y, x, y};
+                int lx = x, ly = y;
+                while ((m[at(lx, ly)] & b) && passable(lx, ly) == p0) {
+                    a[at(lx, ly)] = 0;
+                    seg.x2 = lx;
+                    seg.y2 = ly;
+                    bool moved = false;
+                    if (dx && lx < w_ - 1) { lx++; moved = true; }
+                    if (dy && ly < h_ - 1) { ly++; moved = true; }
+                    if (dym && ly > 0) ly--;
+                    else if (!moved) break;
+                }
+                if (k + 1 <= players_) wallPlan_[(size_t)k + 1].push_back(seg);
+            }
+        }
+}
+
+void Generator::placeWalls(int type, int min, int max, int player) {
+    if (!wallPlanBuilt_) {
+        buildWallPlan(min, max);
+        wallPlanBuilt_ = true;
+    }
+    if (player <= 0 || (size_t)player >= wallPlan_.size()) return;
+    int gates[4] = {0, 0, 0, 0};
+    const std::vector<WallSegment> &plan = wallPlan_[(size_t)player];
+    for (auto it = plan.rbegin(); it != plan.rend(); ++it) {
+        const WallSegment &seg = *it;
+        if (!seg.passable) continue;
+        int x = seg.x1, y = seg.y1;
+        const int length = std::max(std::abs(seg.x1 - seg.x2), std::abs(seg.y1 - seg.y2));
+        int skip = 0;
+        if (length >= 4) {
+            int k, id;
+            float gx, gy;
+            if (seg.y2 < seg.y1) { k = 0; id = 667; gx = seg.x1 + 2.0f; gy = seg.y1 - 1.0f; }
+            else if (seg.x1 < seg.x2 && seg.y1 < seg.y2) { k = 1; id = 659; gx = seg.x1 + 2.0f; gy = seg.y1 + 2.0f; }
+            else if (seg.x1 < seg.x2) { k = 2; id = 64; gx = seg.x1 + 2.0f; gy = seg.y1 + 0.5f; }
+            else { k = 3; id = 88; gx = seg.x1 + 0.5f; gy = seg.y1 + 2.0f; }
+            if (gates[k] <= 1) {
+                gates[k]++;
+                createObject(id, player, gx, gy);
+                skip = 4;
+            }
+        }
+        for (;;) {
+            if (skip < 1) createObject(type, player, x + 0.5f, y + 0.5f);
+            else skip--;
+            const bool sx = x < seg.x2;
+            if (sx) x++;
+            if (seg.y2 < seg.y1) {
+                if (seg.y2 < y) { y--; continue; }
+            } else if (y < seg.y2) {
+                y++;
+                continue;
+            }
+            if (!sx) break;
+        }
+    }
+}
+
 void Generator::objectModule() {
     // Terrain objects (forests) for the whole map (0x495f80 -> 0x495020).
     for (int y = 0; y < h_; ++y)
@@ -2238,7 +2566,9 @@ void Generator::objectModule() {
         if (rec.scalePlayers) groups = std::max(1, groups * players_);
         const dat::Unit *baseUnit = unitFor(0, rec.type);
         if (!baseUnit) continue;
-        if (baseUnit->cls == 6) continue; // walls: 0x4df5b0 (not reproduced)
+        // Walls are handled per land below (after the candidate list, whose
+        // random draws come first); the global placer does not place them.
+        if (baseUnit->cls == 6 && (rec.place == -1 || rec.place == -2)) continue;
         auto spaceOut = [&](int list, int x, int y, const dat::Unit &unit) {
             auto unlinkSquare = [&](int r) {
                 if (r <= 0) return;
@@ -2337,6 +2667,12 @@ void Generator::objectModule() {
             const uint8_t originZone = zones[at(land.x, land.y)];
             const int list = lists_.newList();
             buildCandidates(list, land.x, land.y, rec.maxDistance, g);
+            if (unit->cls == 6) {
+                placeWalls(rec.type, rec.minDistance, rec.maxDistance, player);
+                while (lists_.pop(list) >= 0) {
+                }
+                continue;
+            }
             const int min = rec.minDistance;
             const int lox = std::max(land.x - min, 0), hix = std::min(land.x + min, w_ - 1);
             const int loy = std::max(land.y - min, 0), hiy = std::min(land.y + min, h_ - 1);
@@ -2381,6 +2717,13 @@ bool Generator::run(const std::string &script, RmsResult &result) {
     elevation_.assign(n, 0);
     slope_.assign(n, 0);
     tileObjects_.assign(n, {});
+    // The path map is built while every tile is still terrain 0 and is only
+    // refreshed around obstructing objects as they come and go.
+    occupied_.assign(n, 0);
+    pathCells_.assign(n, 0);
+    refreshPathCells(0, 0, w_ - 1, h_ - 1);
+    wallPlanBuilt_ = false;
+    wallPlan_.clear();
     rng_.state = (uint32_t)s_.seed;
     predefine();
     parse(script, "script");

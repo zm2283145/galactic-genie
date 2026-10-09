@@ -547,6 +547,31 @@ int main() {
                 "SETTINGS WERE CORRUPT; DEFAULTS RESTORED");
         }
         frontend.setUserSettings(userSettings);
+        // History (DataBank): ux0:data/swgb/History/<topic>.txt and the
+        // pictures in palette 50530; frames are released on leaving.
+        static std::vector<std::pair<int, int>> historyFrames;
+        frontend.setHistorySources(
+            [](const std::string &name, std::string &text) {
+                std::string lower = name;
+                for (char &c : lower) c = (char)tolower((unsigned char)c);
+                for (const std::string &candidate : {name, lower}) {
+                    FILE *file = fopen((std::string(kRoot) + "/History/" + candidate).c_str(), "rb");
+                    if (!file) continue;
+                    text.clear();
+                    char buffer[4096];
+                    size_t n;
+                    while ((n = fread(buffer, 1, sizeof buffer, file)) > 0) text.append(buffer, n);
+                    fclose(file);
+                    return true;
+                }
+                return false;
+            },
+            [&assets](int slp, int frame) -> const swgb::SpriteFrame * {
+                const std::pair<int, int> key{slp, frame};
+                if (std::find(historyFrames.begin(), historyFrames.end(), key) == historyFrames.end())
+                    historyFrames.push_back(key);
+                return assets.interfaceFrame(slp, (size_t)frame, 50530);
+            });
         const bool expandingFrontsMenu =
             assets.interfaceFrame(
                 53233, 0, 53237) != nullptr;
@@ -835,7 +860,12 @@ int main() {
                     logf("slow sound %s %s: %llu us", kind, name.c_str(), (unsigned long long)us);
             }
         };
-        game.setTauntPlayer([&](int number) { audio.playTaunt(number); });
+        game.setTauntPlayer([&](int number) {
+            if (userSettings.audioTaunts) audio.playTaunt(number);
+        });
+        game.setScrollSpeed(userSettings.scrollSpeed);
+        game.setFriendOrFoeColors(userSettings.friendOrFoeColors);
+        game.setOneClickGarrison(userSettings.oneClickGarrison);
         game.setSoundPlayer([&](const std::string &name) {
             SoundTimer timer{sceKernelGetProcessTimeWide(), soundUs, soundMaxUs, "voice", name};
             return audio.play(name);
@@ -993,6 +1023,8 @@ int main() {
                     err.c_str());
                 return false;
             }
+            // Campaigns play at the Options dialog's game speed.
+            game.setGameSpeed((swgb::SkirmishGameSpeed)userSettings.gameSpeed);
             campaignMatch = true;
             frontend.setCampaignMatch(true);
             {
@@ -1083,6 +1115,7 @@ int main() {
         // techtree 1: at exit_after, open the Technology Tree, walk right,
         // switch civilization, then exit.
         bool autostartTechTree = false;
+        int autostartHistory = -1; // history <topic>: open the History screen
         uint64_t autostartTechTreeStart = 0, autostartTechTreeStep = 0;
         uint64_t autostartAchievementsStart = 0;
         size_t autostartAchievementsTab = SIZE_MAX;
@@ -1124,6 +1157,8 @@ int main() {
                         autostartAchievements = atoi(value) != 0;
                     else if (std::string(key) == "techtree")
                         autostartTechTree = atoi(value) != 0;
+                    else if (std::string(key) == "history")
+                        autostartHistory = atoi(value);
                 }
             }
             fclose(autostart);
@@ -1525,6 +1560,13 @@ int main() {
                     }
                 }
             }
+            if (autostartHistory >= 0 &&
+                (frontend.screen() == swgb::FrontendScreen::MainMenu ||
+                 frontend.screen() == swgb::FrontendScreen::Title)) {
+                frontend.openHistoryForTesting((size_t)autostartHistory);
+                logf("autostart: history topic %d", autostartHistory);
+                autostartHistory = -1;
+            }
             const swgb::FrontendScreen currentFrontendScreen =
                 frontend.screen();
             // Music by screen (see VitaAudio::setMusic).
@@ -1557,6 +1599,11 @@ int main() {
             }
             if (currentFrontendScreen !=
                 previousFrontendScreen) {
+                if (previousFrontendScreen == swgb::FrontendScreen::History) {
+                    for (const auto &frame : historyFrames)
+                        assets.releaseInterfaceFrame(frame.first, (size_t)frame.second, 50530);
+                    historyFrames.clear();
+                }
                 if (previousFrontendScreen == swgb::FrontendScreen::TechTree) {
                     frontend.setTechTreeArt({});
                     for (const auto &frame : techTreeFrames)
@@ -1572,9 +1619,16 @@ int main() {
                         tabs[i] = assets.interfaceFrame(50765, i, 50531);
                     for (size_t i = 0; i < banners.size(); ++i)
                         banners[i] = assets.interfaceFrame(50762, i, 50531);
-                    frontend.setAchievementsArt(tabs, banners);
+                    std::array<const swgb::SpriteFrame *, 9> decals{};
+                    std::array<const swgb::SpriteFrame *, 5> teams{};
+                    for (size_t i = 0; i < decals.size(); ++i)
+                        decals[i] = assets.interfaceFrame(50766, i, 50531);
+                    for (size_t i = 0; i < teams.size(); ++i)
+                        teams[i] = assets.interfaceFrame(50769, i, 50531);
+                    frontend.setAchievementsArt(tabs, banners, decals, teams);
                     swgb::AchievementsData data;
                     data.players = game.achievementsPlayers();
+                    data.atGameEnd = game.victoryStateForTesting() >= 0;
                     data.elapsedSeconds = game.elapsedGameTime();
                     for (const swgb::AchievementsPlayer &row : data.players)
                         logf("achievements: player %d '%s' score %d", row.player,
@@ -1584,6 +1638,8 @@ int main() {
                     frontend.setAchievementsArt({}, {});
                     for (size_t i = 0; i < 12; ++i) assets.releaseInterfaceFrame(50765, i, 50531);
                     for (size_t i = 0; i < 8; ++i) assets.releaseInterfaceFrame(50762, i, 50531);
+                    for (size_t i = 0; i < 9; ++i) assets.releaseInterfaceFrame(50766, i, 50531);
+                    for (size_t i = 0; i < 5; ++i) assets.releaseInterfaceFrame(50769, i, 50531);
                 }
                 if (currentFrontendScreen ==
                     swgb::FrontendScreen::CampaignBriefing) {
@@ -1660,8 +1716,14 @@ int main() {
                 }
             }
             if (frontend.takeSettingsChanged()) {
+                const int previousSpeed = userSettings.gameSpeed;
                 userSettings =
                     frontend.userSettings();
+                game.setScrollSpeed(userSettings.scrollSpeed);
+                game.setFriendOrFoeColors(userSettings.friendOrFoeColors);
+                game.setOneClickGarrison(userSettings.oneClickGarrison);
+                if (userSettings.gameSpeed != previousSpeed)
+                    game.setGameSpeed((swgb::SkirmishGameSpeed)userSettings.gameSpeed);
                 audio.setVolumes(
                     userSettings.masterVolume,
                     userSettings.musicVolume,
